@@ -1,0 +1,42 @@
+# Python
+backend/.venv/
+backend/.mypy_cache/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.coverage
+*.egg-info/
+**/__pycache__/
+*.py[cod]
+
+# JavaScript / build
+desktop/node_modules/
+desktop/dist/
+desktop/*.tsbuildinfo
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# Local state and environment
+.env
+.missus-tom-data/
+*.sqlite3
+*.log
+.nextflow/
+
+# Bioinformatics data must never enter this application repository
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.cram
+*.rds
+*.RData
+*.h5
+*.hdf5
+work/
+results/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

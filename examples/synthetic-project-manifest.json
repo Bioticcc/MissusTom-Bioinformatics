@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0.0",
+  "project_name": "Synthetic paired-end pilot",
+  "project_identifier": "11111111-2222-4333-8444-555555555555",
+  "created_at": "2026-01-15T12:00:00Z",
+  "input_directory": "/nonexistent/example/fastq",
+  "output_directory": "/nonexistent/example/missus-tom-project",
+  "pipeline_identifier": "bulk-rnaseq",
+  "pipeline_version": "0.1.0-preview",
+  "organism": "Mus musculus",
+  "reference_genome": "GRCm39",
+  "annotation_source": "GENCODE release to be confirmed",
+  "reference_resources": {
+    "transcriptome_fasta": "/nonexistent/example/references/transcripts.fa",
+    "annotation_gtf": "/nonexistent/example/references/annotation.gtf"
+  },
+  "library_type": "total RNA",
+  "read_layout": "paired-end",
+  "strandedness": "unknown",
+  "samples": [
+    {
+      "sample_id": "synthetic_control_01",
+      "r1_files": ["/nonexistent/example/fastq/synthetic_control_01_R1.fastq.gz"],
+      "r2_files": ["/nonexistent/example/fastq/synthetic_control_01_R2.fastq.gz"],
+      "condition": "control",
+      "biological_replicate": "1",
+      "batch": "batch_1",
+      "covariates": {},
+      "included": true
+    },
+    {
+      "sample_id": "synthetic_treatment_01",
+      "r1_files": ["/nonexistent/example/fastq/synthetic_treatment_01_R1.fastq.gz"],
+      "r2_files": ["/nonexistent/example/fastq/synthetic_treatment_01_R2.fastq.gz"],
+      "condition": "treatment",
+      "biological_replicate": "1",
+      "batch": "batch_1",
+      "covariates": {},
+      "included": true
+    }
+  ],
+  "comparisons": [
+    {
+      "comparison_id": "treatment_vs_control",
+      "numerator": "treatment",
+      "denominator": "control",
+      "label": "Treatment (test) vs control (reference)"
+    }
+  ],
+  "parameters": {
+    "minimum_read_length": 20,
+    "confirm_before_execution": true
+  },
+  "resource_profile": {
+    "cpus": 4,
+    "memory_gb": 8,
+    "max_parallel_tasks": 1
+  },
+  "execution_profile": "local",
+  "application_version": "0.1.0",
+  "pipeline_status": "draft"
+}
+

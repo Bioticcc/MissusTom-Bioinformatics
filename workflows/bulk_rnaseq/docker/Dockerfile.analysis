@@ -1,0 +1,10 @@
+FROM bioconductor/bioconductor_docker@sha256:41ed449aa2181f330cdc8d0499a11a7435b04827ff926dc141584a34f65a12cb
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends r-cran-ggplot2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN R --vanilla -e 'options(Ncpus = 1); BiocManager::install(c("DESeq2", "tximport"), ask = FALSE, update = FALSE); stopifnot(requireNamespace("DESeq2", quietly = TRUE), requireNamespace("tximport", quietly = TRUE), requireNamespace("ggplot2", quietly = TRUE))'
+
+LABEL org.opencontainers.image.title="Missus Tom bulk RNA-seq analysis"
+LABEL org.opencontainers.image.version="0.3.0"

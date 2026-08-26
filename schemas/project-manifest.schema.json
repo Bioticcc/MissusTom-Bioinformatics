@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yanlab.example/schemas/missus-tom/project-manifest-1.0.0.json",
+  "title": "Missus Tom project manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_name",
+    "project_identifier",
+    "created_at",
+    "input_directory",
+    "output_directory",
+    "pipeline_identifier",
+    "pipeline_version",
+    "organism",
+    "reference_genome",
+    "annotation_source",
+    "reference_resources",
+    "library_type",
+    "read_layout",
+    "strandedness",
+    "samples",
+    "comparisons",
+    "parameters",
+    "resource_profile",
+    "execution_profile",
+    "application_version",
+    "pipeline_status"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "project_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "project_identifier": { "type": "string", "format": "uuid" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "input_directory": { "type": "string", "pattern": "^/" },
+    "output_directory": { "type": "string", "pattern": "^/" },
+    "pipeline_identifier": { "const": "bulk-rnaseq" },
+    "pipeline_version": { "type": "string", "minLength": 1 },
+    "organism": { "type": "string", "minLength": 1 },
+    "reference_genome": { "type": "string", "minLength": 1 },
+    "annotation_source": { "type": "string", "minLength": 1 },
+    "reference_resources": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^/" }
+    },
+    "library_type": { "type": "string", "minLength": 1 },
+    "read_layout": { "enum": ["paired-end", "single-end"] },
+    "strandedness": { "enum": ["unstranded", "forward", "reverse", "unknown"] },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sample" }
+    },
+    "comparisons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/comparison" }
+    },
+    "parameters": { "$ref": "#/$defs/scalarMap" },
+    "resource_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpus", "memory_gb", "max_parallel_tasks"],
+      "properties": {
+        "cpus": { "type": "integer", "minimum": 1 },
+        "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
+        "max_parallel_tasks": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "execution_profile": { "enum": ["local", "docker", "apptainer"] },
+    "application_version": { "type": "string", "minLength": 1 },
+    "pipeline_status": {
+      "enum": ["draft", "validated", "planned", "queued", "preparing", "running", "completed", "failed", "cancelled"]
+    }
+  },
+  "$defs": {
+    "scalar": { "type": ["string", "number", "integer", "boolean", "null"] },
+    "scalarMap": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/scalar" }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_id", "r1_files", "r2_files", "condition", "biological_replicate", "batch", "covariates", "included"],
+      "properties": {
+        "sample_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "r1_files": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^/" } },
+        "r2_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
+        "condition": { "type": "string", "minLength": 1 },
+        "biological_replicate": { "type": "string", "minLength": 1 },
+        "batch": { "type": ["string", "null"] },
+        "covariates": { "$ref": "#/$defs/scalarMap" },
+        "included": { "type": "boolean" }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comparison_id", "numerator", "denominator"],
+      "properties": {
+        "comparison_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "numerator": { "type": "string", "minLength": 1 },
+        "denominator": { "type": "string", "minLength": 1 },
+        "label": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
+
