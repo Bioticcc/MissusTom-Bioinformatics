@@ -1,31 +1,44 @@
 import { useEffect, useState } from "react";
 import { apiRequest } from "../api";
 import { CheckList } from "../components/CheckList";
-import type { HumanDemoProject, ProjectManifest, RunPlan, SystemPreflight } from "../types";
+import { selectFiles } from "../native";
+import type { HumanDemoProject, OpenProjectResult, ProjectManifest, ProjectSummary, RunPlan, SystemPreflight } from "../types";
 
 export function Dashboard({
   onNew,
   onDemo,
+  onOpen,
 }: {
   onNew: () => void;
   onDemo: (manifest: ProjectManifest, plan: RunPlan) => void;
+  onOpen: (manifest: ProjectManifest, plan: RunPlan) => void;
 }) {
   const [preflight, setPreflight] = useState<SystemPreflight | null>(null);
   const [error, setError] = useState("");
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsError, setProjectsError] = useState("");
+  const [openingPath, setOpeningPath] = useState("");
 
   useEffect(() => {
     let active = true;
-    apiRequest<SystemPreflight>("/api/v1/system/preflight")
-      .then((data) => {
-        if (active) setPreflight(data);
-      })
-      .catch((reason: Error) => {
-        if (active) setError(reason.message);
-      });
+    const controller = new AbortController();
+    void apiRequest<SystemPreflight>("/api/v1/system/preflight", { signal: controller.signal }).then((result) => {
+      if (active) setPreflight(result);
+    }).catch((reason: unknown) => {
+      if (!active || controller.signal.aborted) return;
+      setError(reason instanceof Error ? reason.message : "System readiness could not be checked.");
+    });
+    void apiRequest<ProjectSummary[]>("/api/v1/projects", { signal: controller.signal }).then((result) => {
+      if (active) setProjects(result);
+    }).catch((reason: unknown) => {
+      if (!active || controller.signal.aborted) return;
+      setProjectsError(reason instanceof Error ? reason.message : "Recent projects could not be loaded.");
+    });
     return () => {
       active = false;
+      controller.abort();
     };
   }, []);
 
@@ -45,6 +58,31 @@ export function Dashboard({
     }
   };
 
+  const openProject = async (manifestPath: string) => {
+    setOpeningPath(manifestPath);
+    setProjectsError("");
+    try {
+      const project = await apiRequest<OpenProjectResult>("/api/v1/projects/open", {
+        method: "POST",
+        body: JSON.stringify({ manifest_path: manifestPath }),
+      });
+      onOpen(project.manifest, project.plan);
+    } catch (reason) {
+      setProjectsError(reason instanceof Error ? reason.message : "The saved project could not be opened.");
+    } finally {
+      setOpeningPath("");
+    }
+  };
+
+  const chooseProject = async () => {
+    try {
+      const selected = await selectFiles("Open saved Missus Tom project");
+      if (selected?.[0]) await openProject(selected[0]);
+    } catch (reason) {
+      setProjectsError(reason instanceof Error ? reason.message : "Project selection could not be opened.");
+    }
+  };
+
   return (
     <div className="page-stack">
       <header className="page-header hero-header">
@@ -60,6 +98,9 @@ export function Dashboard({
           <button type="button" className="button secondary large" onClick={onNew}>
             New project
           </button>
+          <button type="button" className="button secondary large" onClick={() => void chooseProject()} disabled={Boolean(openingPath)}>
+            Open project
+          </button>
         </div>
       </header>
 
@@ -70,8 +111,8 @@ export function Dashboard({
           i
         </span>
         <div>
-          <strong>Controlled human demo</strong>
-          <p>Runs local QC, adapter trimming, and kallisto quantification. Differential expression is disabled.</p>
+          <strong>Local bulk RNA-seq execution</strong>
+          <p>Runs paired-end human QC, trimming, kallisto quantification, and manifest-defined differential expression.</p>
         </div>
       </section>
 
@@ -113,15 +154,12 @@ export function Dashboard({
               <p className="eyebrow">Workspace</p>
               <h2>Recent projects</h2>
             </div>
-            <span className="count-pill">0</span>
+            <span className="count-pill">{projects.length}</span>
           </div>
-          <div className="empty-state compact">
-            <div className="empty-orbit" aria-hidden="true">
-              ◌
-            </div>
-            <h3>No saved projects</h3>
-            <p>Recent-project loading is not implemented.</p>
-          </div>
+          {projectsError && <div className="inline-error" role="alert">{projectsError}</div>}
+          {projects.length === 0 ? <div className="empty-state compact"><div className="empty-orbit" aria-hidden="true">◌</div><h3>No saved projects</h3><p>Open a saved manifest or create a project to begin.</p></div> : <div className="recent-project-list">
+            {projects.map((project) => <article className="recent-project" key={project.manifest_path}><div><h3>{project.project_name}</h3><p>{project.project_identifier} · Updated {new Date(project.updated_at).toLocaleString()}</p><small>{project.manifest_path}</small></div><button type="button" className="button secondary" disabled={!project.available || openingPath === project.manifest_path} onClick={() => void openProject(project.manifest_path)}>{openingPath === project.manifest_path ? "Opening…" : project.available ? "Open" : "Unavailable"}</button></article>)}
+          </div>}
         </section>
       </div>
 

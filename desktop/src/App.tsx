@@ -65,13 +65,13 @@ export default function App() {
 
         <div className="sidebar-foot">
           <span className="version-chip">v0.3.0</span>
-          <p>Full human demo</p>
+          <p>Bulk RNA-seq workbench</p>
         </div>
       </aside>
 
       <main className="main-content" id="main-content">
         {activeView === "dashboard" && (
-          <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} />
+          <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
         )}
         {activeView === "wizard" && <NewProjectWizard onProjectReady={projectReady} />}
         {activeView === "run-plan" && (

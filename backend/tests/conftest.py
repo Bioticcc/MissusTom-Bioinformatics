@@ -28,7 +28,8 @@ def manifest_payload(tmp_path: Path) -> dict[str, Any]:
     transcriptome = reference_directory / "transcripts.fa"
     annotation = reference_directory / "annotation.gtf"
     biomart = reference_directory / "biomart.tsv"
-    for path in (r1, r2, r1_b, r2_b, transcriptome, annotation, biomart):
+    kallisto_index = reference_directory / "transcripts.idx"
+    for path in (r1, r2, r1_b, r2_b, transcriptome, annotation, biomart, kallisto_index):
         path.touch()
 
     return {
@@ -47,6 +48,7 @@ def manifest_payload(tmp_path: Path) -> dict[str, Any]:
             "transcriptome_fasta": str(transcriptome),
             "annotation_gtf": str(annotation),
             "biomart": str(biomart),
+            "kallisto_index": str(kallisto_index),
         },
         "library_type": "total RNA",
         "read_layout": "paired-end",

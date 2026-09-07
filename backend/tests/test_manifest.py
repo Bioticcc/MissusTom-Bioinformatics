@@ -29,12 +29,15 @@ def test_duplicate_sample_identifiers_are_rejected(manifest_payload: dict[str, A
         ProjectManifest.model_validate(payload)
 
 
-def test_paired_sample_requires_equal_mate_counts(manifest_payload: dict[str, Any]) -> None:
+def test_paired_sample_with_unequal_mates_is_blocking(manifest_payload: dict[str, Any]) -> None:
     payload = deepcopy(manifest_payload)
     payload["samples"][0]["r2_files"] = []
+    manifest = ProjectManifest.model_validate(payload)
 
-    with pytest.raises(ValidationError, match="has no R2 files"):
-        ProjectManifest.model_validate(payload)
+    result = validate_project(manifest)
+
+    assert result.valid is False
+    assert any(check.check_id == "fastq_pairing" for check in result.checks)
 
 
 def test_contrast_groups_must_differ(manifest_payload: dict[str, Any]) -> None:
@@ -54,6 +57,18 @@ def test_unknown_contrast_group_is_blocking(manifest_payload: dict[str, Any]) ->
 
     assert result.valid is False
     assert any(check.check_id == "comparisons" for check in result.checks)
+
+
+def test_unknown_intervention_filter_is_blocking(manifest_payload: dict[str, Any]) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["comparisons"][0]["intervention"] = "D"
+    manifest = ProjectManifest.model_validate(payload)
+
+    result = validate_project(manifest)
+
+    comparison = next(check for check in result.checks if check.check_id == "comparisons")
+    assert comparison.status.value == "blocking_failure"
+    assert "unknown interventions" in comparison.message
 
 
 def test_output_ancestor_of_input_is_blocking(manifest_payload: dict[str, Any]) -> None:
@@ -78,3 +93,87 @@ def test_duplicate_fastq_assignment_is_blocking(manifest_payload: dict[str, Any]
     assert result.valid is False
     fastq_check = next(check for check in result.checks if check.check_id == "fastq_pairing")
     assert fastq_check.details["duplicate_assignment_count"] == 1
+
+
+def test_condition_allows_human_readable_labels(manifest_payload: dict[str, Any]) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["samples"][0]["condition"] = "Drug treated"
+    payload["comparisons"][0]["denominator"] = "Drug treated"
+
+    manifest = ProjectManifest.model_validate(payload)
+
+    assert manifest.samples[0].condition == "Drug treated"
+
+
+def test_design_fields_reject_line_breaks(manifest_payload: dict[str, Any]) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["samples"][0]["condition"] = "control\nmalformed"
+
+    with pytest.raises(ValidationError, match="line breaks"):
+        ProjectManifest.model_validate(payload)
+
+
+def test_missing_biological_replicates_are_optional(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    for sample in payload["samples"]:
+        sample["biological_replicate"] = ""
+    manifest = ProjectManifest.model_validate(payload)
+
+    result = validate_project(manifest)
+
+    replicate_check = next(
+        check for check in result.checks if check.check_id == "replicate_assignments"
+    )
+    assert result.valid is True
+    assert replicate_check.status.value == "warning"
+    assert "Optional biological replicate IDs" in replicate_check.message
+
+
+def test_intervention_fields_reject_line_breaks(manifest_payload: dict[str, Any]) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["samples"][0]["covariates"]["intervention"] = "D\nmalformed"
+
+    with pytest.raises(ValidationError, match="line breaks"):
+        ProjectManifest.model_validate(payload)
+
+
+def test_invalid_pipeline_threshold_is_blocking(manifest_payload: dict[str, Any]) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["adjusted_p_value"] = 0
+    manifest = ProjectManifest.model_validate(payload)
+
+    result = validate_project(manifest)
+
+    assert result.valid is False
+    assert any(check.check_id == "pipeline_parameters" for check in result.checks)
+
+
+def test_analysis_only_uses_kallisto_tables_instead_of_fastqs(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["start_stage"] = "analysis"
+    payload["reference_resources"].pop("kallisto_index")
+    for sample in payload["samples"]:
+        abundance = Path(payload["input_directory"]) / sample["sample_id"] / "abundance.tsv"
+        abundance.parent.mkdir()
+        abundance.write_text(
+            "target_id\tlength\teff_length\test_counts\ttpm\n",
+            encoding="utf-8",
+        )
+        sample["r1_files"] = []
+        sample["r2_files"] = []
+        sample["abundance_tsv"] = str(abundance)
+    manifest = ProjectManifest.model_validate(payload)
+
+    result = validate_project(manifest)
+
+    assert result.valid is True
+    fastq_check = next(check for check in result.checks if check.check_id == "fastq_pairing")
+    abundance_check = next(
+        check for check in result.checks if check.check_id == "quantification_inputs"
+    )
+    assert fastq_check.status.value == "not_yet_configured"
+    assert abundance_check.status.value == "passed"

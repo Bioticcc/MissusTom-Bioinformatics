@@ -56,11 +56,12 @@ Scalar = str | int | float | bool | None
 
 
 class SampleRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     sample_id: str
-    r1_files: list[str] = Field(min_length=1)
+    r1_files: list[str] = Field(default_factory=list)
     r2_files: list[str] = Field(default_factory=list)
+    abundance_tsv: str | None = None
     condition: str
     biological_replicate: str
     batch: str | None = None
@@ -77,10 +78,10 @@ class SampleRecord(BaseModel):
 
     @field_validator("condition", "biological_replicate")
     @classmethod
-    def non_empty_text(cls, value: str) -> str:
+    def normalize_design_text(cls, value: str) -> str:
         value = value.strip()
-        if not value:
-            raise ValueError("value must not be empty")
+        if any(character in value for character in "\t\r\n"):
+            raise ValueError("tabs and line breaks are not allowed")
         return value
 
     @field_validator("batch")
@@ -91,19 +92,39 @@ class SampleRecord(BaseModel):
         value = value.strip()
         return value or None
 
+    @field_validator("covariates")
+    @classmethod
+    def normalize_covariates(cls, values: dict[str, Scalar]) -> dict[str, Scalar]:
+        normalized = dict(values)
+        intervention = normalized.get("intervention")
+        if intervention is not None and not isinstance(intervention, str):
+            raise ValueError("intervention covariate must be text")
+        if isinstance(intervention, str):
+            intervention = intervention.strip()
+            if any(character in intervention for character in "\t\r\n"):
+                raise ValueError("intervention cannot contain tabs or line breaks")
+            normalized["intervention"] = intervention or None
+        return normalized
+
     @field_validator("r1_files", "r2_files")
     @classmethod
     def normalize_fastq_paths(cls, values: list[str]) -> list[str]:
         return [normalize_user_path(value) for value in values]
 
+    @field_validator("abundance_tsv")
+    @classmethod
+    def normalize_abundance_path(cls, value: str | None) -> str | None:
+        return normalize_user_path(value) if value else None
+
 
 class Comparison(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     comparison_id: str
     numerator: str
     denominator: str
     label: str | None = None
+    intervention: str | None = None
 
     @field_validator("comparison_id")
     @classmethod
@@ -119,7 +140,19 @@ class Comparison(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("comparison group must not be empty")
+        if any(character in value for character in "\t\r\n"):
+            raise ValueError("comparison groups cannot contain tabs or line breaks")
         return value
+
+    @field_validator("intervention")
+    @classmethod
+    def normalize_intervention(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if any(character in value for character in "\t\r\n"):
+            raise ValueError("intervention cannot contain tabs or line breaks")
+        return value or None
 
     @model_validator(mode="after")
     def groups_must_differ(self) -> Comparison:
@@ -129,15 +162,17 @@ class Comparison(BaseModel):
 
 
 class ResourceProfile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    cpus: int = Field(default=4, ge=1)
-    memory_gb: float = Field(default=8, gt=0)
-    max_parallel_tasks: int = Field(default=1, ge=1)
+    cpus: int = Field(default=4, ge=1, description="Total workflow CPU budget")
+    memory_gb: float = Field(default=8, gt=0, description="Total workflow memory budget in GiB")
+    max_parallel_tasks: int = Field(
+        default=1, ge=1, description="Maximum concurrent tasks across the whole workflow"
+    )
 
 
 class ProjectManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     schema_version: str = "1.0.0"
     project_name: str = Field(min_length=1, max_length=120)
@@ -199,18 +234,6 @@ class ProjectManifest(BaseModel):
         if len(comparison_ids) != len(set(comparison_ids)):
             raise ValueError("comparison identifiers must be unique")
 
-        for sample in self.samples:
-            if not sample.included:
-                continue
-            if self.read_layout == ReadLayout.PAIRED_END:
-                if not sample.r2_files:
-                    raise ValueError(f"paired-end sample {sample.sample_id} has no R2 files")
-                if len(sample.r1_files) != len(sample.r2_files):
-                    raise ValueError(
-                        f"paired-end sample {sample.sample_id} has unequal R1 and R2 file counts"
-                    )
-            elif sample.r2_files:
-                raise ValueError(f"single-end sample {sample.sample_id} must not contain R2 files")
         return self
 
 

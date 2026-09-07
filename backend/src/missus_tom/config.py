@@ -15,7 +15,7 @@ class Settings:
 
     @property
     def execution_enabled(self) -> bool:
-        return os.getenv("MISSUS_TOM_EXECUTION_ENABLED", "0").strip().lower() in {
+        return os.getenv("MISSUS_TOM_EXECUTION_ENABLED", "1").strip().lower() in {
             "1",
             "true",
             "yes",

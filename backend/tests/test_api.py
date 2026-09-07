@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -19,14 +20,14 @@ async def client() -> AsyncClient:
         yield test_client
 
 
-async def test_health_reports_execution_disabled(client: AsyncClient) -> None:
+async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
     response = await client.get("/health")
 
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
     assert body["data"]["status"] == "ok"
-    assert body["data"]["execution_enabled"] is False
+    assert body["data"]["execution_enabled"] is True
 
 
 async def test_tauri_origin_preflight_is_allowed(client: AsyncClient) -> None:
@@ -53,6 +54,23 @@ async def test_discovery_endpoint(tmp_path: Path, client: AsyncClient) -> None:
     assert response.json()["data"]["samples"][0]["pairing_status"] == "paired"
 
 
+async def test_quantification_discovery_endpoint(tmp_path: Path, client: AsyncClient) -> None:
+    abundance = tmp_path / "sample_A" / "abundance.tsv"
+    abundance.parent.mkdir()
+    abundance.write_text(
+        "target_id\tlength\teff_length\test_counts\ttpm\n",
+        encoding="utf-8",
+    )
+
+    response = await client.post(
+        "/api/v1/quantifications/discover",
+        json={"directory": str(tmp_path)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["samples"][0]["abundance_tsv"] == str(abundance)
+
+
 async def test_directory_preview_endpoint(tmp_path: Path, client: AsyncClient) -> None:
     (tmp_path / "sample_R1.fastq.gz").write_bytes(b"reads")
 
@@ -62,6 +80,24 @@ async def test_directory_preview_endpoint(tmp_path: Path, client: AsyncClient) -
     preview = response.json()["data"]
     assert preview["total_entries"] == 1
     assert preview["entries"][0]["file_type"] == "FASTQ.GZ"
+
+
+async def test_metadata_csv_endpoint(tmp_path: Path, client: AsyncClient) -> None:
+    metadata = tmp_path / "metadata.csv"
+    metadata.write_text("SampleID,condition,batch\nsample_01,HFD,run_1\n", encoding="utf-8")
+
+    response = await client.post("/api/v1/metadata/csv", json={"path": str(metadata)})
+
+    assert response.status_code == 200
+    row = response.json()["data"]["rows"][0]
+    assert row == {
+        "sample_id": "sample_01",
+        "condition": "HFD",
+        "batch": "run_1",
+        "biological_replicate": None,
+        "intervention": None,
+        "matched_sample_id": None,
+    }
 
 
 async def test_discovery_error_has_structured_envelope(tmp_path: Path, client: AsyncClient) -> None:
@@ -101,21 +137,50 @@ async def test_validate_save_and_plan_endpoints(
     assert plan_data["execution_enabled"] is False
     assert plan_data["command_preview"][0] == "nextflow"
     assert "run" in plan_data["command_preview"]
+    assert plan_data["command_preview"][-2:] == ["--start_stage", "quantification"]
     assert len(plan_data["stages"]) == 8
 
     start = await client.post(
         "/api/v1/runs/start", json={"manifest": manifest_payload, "resume": True}
     )
     assert start.status_code == 409
-    assert "disabled" in start.json()["errors"][0]["message"]
+    assert "unsupported" in start.json()["errors"][0]["message"]
 
 
-async def test_pipeline_status_is_preview_only(client: AsyncClient) -> None:
+async def test_run_start_rejects_unknown_start_stage(
+    manifest_payload: dict[str, Any], client: AsyncClient
+) -> None:
+    response = await client.post(
+        "/api/v1/runs/start",
+        json={"manifest": manifest_payload, "start_stage": "alignment"},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_repeated_structural_errors_are_grouped(
+    manifest_payload: dict[str, Any], client: AsyncClient
+) -> None:
+    payload = deepcopy(manifest_payload)
+    for sample in payload["samples"]:
+        sample["sample_id"] = "invalid sample id"
+
+    response = await client.post("/api/v1/projects/validate", json=payload)
+
+    assert response.status_code == 422
+    matching = [
+        error for error in response.json()["errors"] if "letters, numbers" in error["message"]
+    ]
+    assert len(matching) == 1
+    assert "2 fields" in matching[0]["message"]
+
+
+async def test_pipeline_status_allows_execution(client: AsyncClient) -> None:
     response = await client.get("/api/v1/pipelines/bulk-rnaseq/status")
 
     assert response.status_code == 200
     assert response.json()["data"]["available"] is True
-    assert response.json()["data"]["execution_enabled"] is False
+    assert response.json()["data"]["execution_enabled"] is True
 
 
 async def test_pipeline_listing_contains_bulk_adapter(client: AsyncClient) -> None:
@@ -125,7 +190,20 @@ async def test_pipeline_listing_contains_bulk_adapter(client: AsyncClient) -> No
     assert response.json()["data"][0]["pipeline_identifier"] == "bulk-rnaseq"
 
 
-async def test_system_preflight_keeps_framework_available(client: AsyncClient) -> None:
+async def test_system_preflight_keeps_framework_available(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from missus_tom.models.preflight import CheckStatus, PreflightCheck
+    from missus_tom.services import preflight
+
+    monkeypatch.setenv("MISSUS_TOM_EXECUTION_ENABLED", "0")
+    monkeypatch.setattr(
+        preflight,
+        "_version_check",
+        lambda check_id, label, *args, **kwargs: PreflightCheck(
+            check_id=check_id, label=label, status=CheckStatus.PASSED, message="fixture version"
+        ),
+    )
     response = await client.get("/api/v1/system/preflight")
 
     assert response.status_code == 200

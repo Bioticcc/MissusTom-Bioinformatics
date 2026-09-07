@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { apiRequest } from "../api";
 import { FolderPreview } from "../components/FolderPreview";
 import { openDirectory } from "../native";
-import type { DirectoryPreview, ProjectManifest, RunPlan, RunRecord } from "../types";
+import type { DirectoryPreview, ProjectManifest, RunPlan, RunRecord, RunStartStage } from "../types";
 
 function formatBytes(bytes: number) {
   if (bytes === 0) return "0 B";
@@ -10,6 +10,13 @@ function formatBytes(bytes: number) {
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index > 2 ? 1 : 0)} ${units[index]}`;
 }
+
+const analysisOnlySkippedStages = new Set([
+  "raw_read_qc",
+  "adapter_trimming",
+  "clean_read_qc",
+  "quantification",
+]);
 
 export function RunPlanScreen({
   manifest,
@@ -21,9 +28,24 @@ export function RunPlanScreen({
   onStarted: (record: RunRecord) => void;
 }) {
   const [starting, setStarting] = useState(false);
+  const [resume, setResume] = useState(true);
+  const configuredStartStage: RunStartStage = manifest?.parameters.start_stage === "analysis"
+    ? "analysis"
+    : "quantification";
+  const [startStage, setStartStage] = useState<RunStartStage>(configuredStartStage);
   const [error, setError] = useState("");
   const [inputPreview, setInputPreview] = useState<DirectoryPreview | null>(null);
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
+  const canQuantify = Boolean(
+    manifest?.reference_resources.kallisto_index
+    && manifest?.samples.filter((sample) => sample.included).every(
+      (sample) => sample.r1_files.length > 0 && sample.r1_files.length === sample.r2_files.length,
+    ),
+  );
+
+  useEffect(() => {
+    setStartStage(configuredStartStage);
+  }, [configuredStartStage, manifest?.project_identifier]);
 
   useEffect(() => {
     let active = true;
@@ -70,7 +92,7 @@ export function RunPlanScreen({
     try {
       const record = await apiRequest<RunRecord>("/api/v1/runs/start", {
         method: "POST",
-        body: JSON.stringify({ manifest, resume: true }),
+        body: JSON.stringify({ manifest, resume, start_stage: startStage }),
       });
       onStarted(record);
     } catch (reason) {
@@ -105,10 +127,73 @@ export function RunPlanScreen({
       {!plan.execution_enabled && (
         <section className="development-banner warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
-          <div><strong>Execution unavailable</strong><p>Only the prepared human demo manifest is enabled for execution.</p></div>
+          <div><strong>Execution unavailable</strong><p>Resolve the validation notes or enable local execution.</p></div>
         </section>
       )}
       {error && <div className="inline-error" role="alert">{error}</div>}
+
+      <fieldset className="run-mode-panel" disabled={starting}>
+        <legend>Run mode</legend>
+        <label className={`run-mode-option${resume ? " selected" : ""}`}>
+          <input
+            type="radio"
+            name="run-mode"
+            checked={resume}
+            onChange={() => setResume(true)}
+          />
+          <span>
+            <strong>Resume previous run</strong>
+            <small>Reuse completed tasks from the existing Nextflow work directory.</small>
+          </span>
+        </label>
+        <label className={`run-mode-option${resume ? "" : " selected"}`}>
+          <input
+            type="radio"
+            name="run-mode"
+            checked={!resume}
+            onChange={() => setResume(false)}
+          />
+          <span>
+            <strong>Start from beginning</strong>
+            <small>Run every pipeline task again without using cached completions.</small>
+          </span>
+        </label>
+        <p className="run-mode-note">
+          Starting from the beginning keeps existing work, results, and logs; Nextflow runs without <code>-resume</code>.
+        </p>
+      </fieldset>
+
+      <fieldset className="run-mode-panel" disabled={starting}>
+        <legend>Pipeline scope</legend>
+        <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}${canQuantify ? "" : " disabled"}`}>
+          <input
+            type="radio"
+            name="start-stage"
+            checked={startStage === "quantification"}
+            disabled={!canQuantify}
+            onChange={() => setStartStage("quantification")}
+          />
+          <span>
+            <strong>Quantification + analysis</strong>
+            <small>{canQuantify ? "Run FASTQ quality control, trimming, kallisto quantification, and downstream analysis." : "Unavailable: this project was created from existing Kallisto results and has no FASTQ/index inputs."}</small>
+          </span>
+        </label>
+        <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}>
+          <input
+            type="radio"
+            name="start-stage"
+            checked={startStage === "analysis"}
+            onChange={() => setStartStage("analysis")}
+          />
+          <span>
+            <strong>Analysis only</strong>
+            <small>Skip FASTQ processing and use existing kallisto abundance tables from this project.</small>
+          </span>
+        </label>
+        <p className="run-mode-note">
+          Analysis only requires <code>results/counts/kallisto/&lt;sample_id&gt;/abundance.tsv</code> for every included sample.
+        </p>
+      </fieldset>
 
       <div className="summary-grid">
         <article className="metric-card"><span>Samples</span><strong>{manifest.samples.filter((sample) => sample.included).length}</strong></article>
@@ -129,7 +214,11 @@ export function RunPlanScreen({
             <article className="stage-row" key={stage.stage_id}>
               <span className="stage-number">{String(index + 1).padStart(2, "0")}</span>
               <div><h3>{stage.name}</h3><p>{stage.description}</p><small>{stage.source_mapping}</small></div>
-              <span className="stage-state">Planned</span>
+              {startStage === "analysis" && analysisOnlySkippedStages.has(stage.stage_id) ? (
+                <span className="stage-state skipped">Skipped</span>
+              ) : (
+                <span className="stage-state">Planned</span>
+              )}
             </article>
           ))}
         </div>
@@ -140,7 +229,13 @@ export function RunPlanScreen({
           <p className="eyebrow">Argument array</p>
           <h2>Generated command</h2>
           <pre className="command-preview" aria-label="Generated command argument array">
-            {JSON.stringify(plan.command_preview, null, 2)}
+            {JSON.stringify(
+              plan.command_preview.map((argument, index, command) => (
+                command[index - 1] === "--start_stage" ? startStage : argument
+              )),
+              null,
+              2,
+            )}
           </pre>
         </section>
         <section className="panel destination-list">

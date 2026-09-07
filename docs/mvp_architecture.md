@@ -8,12 +8,12 @@
    proposals and future execution.
 3. Put filesystem inspection, validation, persistence, and run planning in a
    loopback-only Python API.
-4. Put every pipeline behind an adapter; restrict bulk RNA-seq execution to the
-   validated internal human demo.
+4. Put every pipeline behind an adapter and validate supported bulk RNA-seq
+   projects before execution.
 5. Build an accessible Tauri/React workbench around discovery, design, preflight,
    save, and plan workflows.
-6. Run FastQC, MultiQC, Cutadapt, kallisto, tximport, and the fixed OD1-versus-H
-   DESeq2 analysis through controlled containers.
+6. Run FastQC, MultiQC, Cutadapt, kallisto, tximport, and manifest-defined
+   two-group DESeq2 analyses through controlled containers.
 
 No inspected incompatibility required deviation from the requested technology
 stack.
@@ -32,17 +32,22 @@ stack.
 - **Adapters (`pipeline_adapters/`)** — a generic interface for availability,
   validation, stage/output descriptions, plans, and argument-array commands.
 - **Workflow (`workflows/`)** — Nextflow DSL2 configuration and profiles. The
-  0.3.0 demo contains raw QC, paired trimming, clean QC, transcript
-  quantification, mRNA/lncRNA DESeq2, and reporting. Container bases are pinned
+  human paired-end workflow contains raw QC, paired trimming, clean QC,
+  transcript quantification, manifest-defined mRNA/lncRNA DESeq2 comparisons,
+  and reporting. Container bases are pinned
   by registry digest and analysis package versions are recorded with outputs.
-- **History** — a minimal SQLite table records saved project identity and
-  manifest location. It is not a job database yet.
+- **History** — SQLite records saved project identity and manifest location for
+  dashboard reopening. Atomic JSON job records live in the application state
+  directory and project logs. Recovery reads both the registry and legacy logs
+  located through project history.
 
 ## Request flow
 
 ```text
 React wizard
   -> POST /fastq/discover       -> metadata-only scanner
+  -> POST /metadata/csv         -> local experimental-metadata parser and matcher
+  -> POST /quantifications/discover -> existing kallisto abundance tables
   -> POST /directories/preview  -> selected folder's immediate metadata
   -> user edits proposals       -> biological confirmation
   -> POST /projects/validate    -> structural + project preflight
@@ -68,9 +73,12 @@ validation errors use the same shape with typed `code`, `message`, optional
 - `GET /health`
 - `GET /api/v1/system/preflight`
 - `POST /api/v1/fastq/discover`
+- `POST /api/v1/quantifications/discover`
 - `POST /api/v1/directories/preview`
 - `POST /api/v1/projects/validate`
 - `POST /api/v1/projects/save`
+- `GET /api/v1/projects`
+- `POST /api/v1/projects/open`
 - `POST /api/v1/runs/plan`
 - `GET /api/v1/demos/human`
 - `POST /api/v1/runs/start`
@@ -84,10 +92,30 @@ validation errors use the same shape with typed `code`, `message`, optional
 
 ## Resumability and logging model
 
-Job records store queued/preparing/running/completed/failed/cancelled state,
-timestamps, command arguments, exit code, and a local log path. Run-state JSON,
-Nextflow reports, scientific outputs, and the work directory persist under the
-configured demo project. Work directories are never automatically deleted.
+Job records store queued/preparing/running/cancelling/completed/failed/cancelled/
+interrupted state, timestamps, command arguments, exit code, and a local log path.
+Persisted admission state and Linux process identity support conservative
+reconciliation after a backend restart. Global and project filesystem locks are
+inherited by the child process. Cancellation retains admission until the process
+group and job-labelled Docker containers have stopped. Engine logs are unique to
+each run. Explicit Nextflow run names keep resume scoped to the same project;
+legacy session names can be recovered from bounded local logs. Nextflow reports
+and scientific outputs remain shared project outputs; work directories are never
+automatically deleted. Saving uses the project lock too, preventing manifest
+changes during an active run or replacement by a different project identity.
+
+Blocking filesystem and runtime operations execute through FastAPI's worker pool.
+Jobs fetches logs when expanded and performs a final refresh on completion.
+Results uses abort and generation guards for selection and manual refresh so
+stale responses cannot replace the selected run. Automatic polling waits for
+each request to finish before scheduling another.
+
+Execution admission compares workflow budgets against available CPU/RAM with
+desktop reserves and estimates disk requirements on the output filesystem. The
+Nextflow local executor applies total CPU, memory, and task-queue limits; Docker
+enforces per-task CPU/memory/no-extra-swap limits. A lightweight runtime monitor
+requests controlled cancellation after sustained critical host pressure. Policy
+thresholds and user recovery steps are documented in `README.md`.
 
 The Python logger emits local JSON and redacts values adjacent to common secret
 labels. The application does not enumerate the environment or transmit logs.

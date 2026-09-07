@@ -2,18 +2,22 @@ import { useMemo, useState } from "react";
 import { apiRequest } from "../api";
 import { CheckList } from "../components/CheckList";
 import { FolderPreview } from "../components/FolderPreview";
-import { selectDirectory } from "../native";
+import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
+import { loadProjectDefaults } from "../preferences";
 import type {
   Comparison,
   DirectoryPreview,
   FastqDiscoveryResult,
+  MetadataCsvResult,
   ProjectManifest,
   ProjectValidation,
   ProposedSample,
+  QuantificationDiscoveryResult,
   RunPlan,
+  RunStartStage,
 } from "../types";
 
-const steps = [
+const defaultSteps = [
   "Project & directories",
   "FASTQ discovery",
   "Sample review",
@@ -23,6 +27,8 @@ const steps = [
   "Preflight validation",
   "Review & save",
 ];
+
+type InputDiscoveryResult = FastqDiscoveryResult | QuantificationDiscoveryResult;
 
 interface DetailsState {
   projectName: string;
@@ -36,6 +42,7 @@ interface OptionsState {
   annotationSource: string;
   transcriptomeFasta: string;
   annotationGtf: string;
+  kallistoIndex: string;
   biomart: string;
   libraryType: string;
   readLayout: "paired-end" | "single-end";
@@ -44,6 +51,27 @@ interface OptionsState {
   cpus: number;
   memoryGb: number;
   minimumReadLength: number;
+  trimQuality: number;
+  adapterR1: string;
+  adapterR2: string;
+  minimumGroupSize: number;
+  adjustedPValue: number;
+  absoluteLog2FoldChange: number;
+}
+
+interface MetadataImportStatus {
+  path: string;
+  matched: number;
+  unmatchedSamples: string[];
+  unusedRows: string[];
+  warnings: string[];
+}
+
+interface AssignmentHistoryEntry {
+  timestamp: string;
+  action: string;
+  matched: number;
+  details: Record<string, string>;
 }
 
 function toSafeId(value: string) {
@@ -57,46 +85,96 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** index).toFixed(index > 2 ? 1 : 0)} ${units[index]}`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeSearchText(value: string) {
+  return value.toLocaleLowerCase().replace(/[\s._-]+/g, "");
+}
+
+function normalizeDiscoveredSample(sample: ProposedSample): ProposedSample {
+  return {
+    ...sample,
+    r1_files: Array.isArray(sample.r1_files) ? sample.r1_files : [],
+    r2_files: Array.isArray(sample.r2_files) ? sample.r2_files : [],
+    abundance_tsv: typeof sample.abundance_tsv === "string" ? sample.abundance_tsv : null,
+    lanes: Array.isArray(sample.lanes) ? sample.lanes : [],
+    warnings: Array.isArray(sample.warnings) ? sample.warnings : [],
+    condition: typeof sample.condition === "string" ? sample.condition : "",
+    biological_replicate:
+      typeof sample.biological_replicate === "string" ? sample.biological_replicate : "",
+    batch: typeof sample.batch === "string" ? sample.batch : null,
+    covariates: isRecord(sample.covariates) ? sample.covariates : {},
+    included: typeof sample.included === "boolean" ? sample.included : true,
+  };
+}
+
 export function NewProjectWizard({
   onProjectReady,
 }: {
   onProjectReady: (manifest: ProjectManifest, plan: RunPlan) => void;
 }) {
+  const [projectDefaults] = useState(loadProjectDefaults);
   const [step, setStep] = useState(0);
+  const [startStage, setStartStage] = useState<RunStartStage>("quantification");
   const [details, setDetails] = useState<DetailsState>({
     projectName: "",
     inputDirectory: "",
-    outputDirectory: "",
+    outputDirectory: projectDefaults.projectParentDirectory ? `${projectDefaults.projectParentDirectory.replace(/[\\/]+$/, "")}/untitled-project` : "",
   });
   const [options, setOptions] = useState<OptionsState>({
-    organism: "Mus musculus",
-    referenceGenome: "GRCm39",
-    annotationSource: "GENCODE (confirm release)",
+    organism: "Homo sapiens",
+    referenceGenome: "GRCh38",
+    annotationSource: "GENCODE",
     transcriptomeFasta: "",
     annotationGtf: "",
+    kallistoIndex: "",
     biomart: "",
     libraryType: "total RNA",
     readLayout: "paired-end",
-    strandedness: "unknown",
-    executionProfile: "local",
-    cpus: 4,
-    memoryGb: 8,
+    strandedness: "reverse",
+    executionProfile: "docker",
+    cpus: projectDefaults.cpus,
+    memoryGb: projectDefaults.memoryGb,
     minimumReadLength: 20,
+    trimQuality: 20,
+    adapterR1: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+    adapterR2: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+    minimumGroupSize: 2,
+    adjustedPValue: 0.05,
+    absoluteLog2FoldChange: 0.3,
   });
-  const [discovery, setDiscovery] = useState<FastqDiscoveryResult | null>(null);
+  const [discovery, setDiscovery] = useState<InputDiscoveryResult | null>(null);
   const [samples, setSamples] = useState<ProposedSample[]>([]);
   const [comparisons, setComparisons] = useState<Comparison[]>([]);
   const [numerator, setNumerator] = useState("");
   const [denominator, setDenominator] = useState("");
+  const [comparisonIntervention, setComparisonIntervention] = useState("");
+  const [assignmentSearch, setAssignmentSearch] = useState("");
+  const [assignmentCondition, setAssignmentCondition] = useState("");
+  const [assignmentReplicate, setAssignmentReplicate] = useState("");
+  const [assignmentBatch, setAssignmentBatch] = useState("");
+  const [assignmentIntervention, setAssignmentIntervention] = useState("");
   const [validation, setValidation] = useState<ProjectValidation | null>(null);
   const [validatedManifest, setValidatedManifest] = useState<ProjectManifest | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [savedPath, setSavedPath] = useState("");
+  const [exportPath, setExportPath] = useState("");
+  const [importPath, setImportPath] = useState("");
   const [inputPreview, setInputPreview] = useState<DirectoryPreview | null>(null);
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
-  const projectId = useMemo(() => crypto.randomUUID(), []);
-  const createdAt = useMemo(() => new Date().toISOString(), []);
+  const [metadataImport, setMetadataImport] = useState<MetadataImportStatus | null>(null);
+  const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
+  const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
+  const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
+  const steps = useMemo(
+    () => defaultSteps.map((label, index) => (
+      index === 1 ? (startStage === "analysis" ? "Kallisto discovery" : "FASTQ discovery") : label
+    )),
+    [startStage],
+  );
 
   const groups = useMemo(
     () =>
@@ -105,6 +183,21 @@ export function NewProjectWizard({
         .sort(),
     [samples],
   );
+  const interventions = useMemo(
+    () => [...new Set(samples
+      .filter((sample) => sample.included)
+      .map((sample) => sample.covariates.intervention)
+      .filter((value): value is string => typeof value === "string" && Boolean(value.trim())))]
+      .sort(),
+    [samples],
+  );
+  const assignmentMatchCount = useMemo(() => {
+    const match = normalizeSearchText(assignmentSearch.trim());
+    if (!match) return 0;
+    return samples.filter(
+      (sample) => sample.included && normalizeSearchText(sample.sample_id).includes(match),
+    ).length;
+  }, [assignmentSearch, samples]);
 
   const invalidateValidation = () => {
     setValidation(null);
@@ -112,8 +205,26 @@ export function NewProjectWizard({
     setSavedPath("");
   };
 
+  const updateStartStage = (value: RunStartStage) => {
+    setStartStage(value);
+    setDetails((current) => ({ ...current, inputDirectory: "" }));
+    setInputPreview(null);
+    setDiscovery(null);
+    setSamples([]);
+    setMetadataImport(null);
+    setComparisons([]);
+    invalidateValidation();
+  };
+
   const updateDetails = (key: keyof DetailsState, value: string) => {
-    setDetails((current) => ({ ...current, [key]: value }));
+    setDetails((current) => {
+      if (key === "projectName" && projectDefaults.projectParentDirectory) {
+        const parent = projectDefaults.projectParentDirectory.replace(/[\\/]+$/, "");
+        const currentDefault = `${parent}/${toSafeId(current.projectName) || "untitled-project"}`;
+        if (current.outputDirectory === currentDefault) return { ...current, projectName: value, outputDirectory: `${parent}/${toSafeId(value) || "untitled-project"}` };
+      }
+      return { ...current, [key]: value };
+    });
     if (key === "inputDirectory") setInputPreview(null);
     if (key === "outputDirectory") setOutputPreview(null);
     invalidateValidation();
@@ -142,7 +253,9 @@ export function NewProjectWizard({
     setError("");
     try {
       const directory = await selectDirectory(
-        kind === "input" ? "Select input FASTQ folder" : "Select project output folder",
+        kind === "input"
+          ? (startStage === "analysis" ? "Select Kallisto results folder" : "Select input FASTQ folder")
+          : "Select project output folder",
       );
       if (!directory) return;
       const key = kind === "input" ? "inputDirectory" : "outputDirectory";
@@ -171,19 +284,159 @@ export function NewProjectWizard({
         sampleIndex === index ? { ...sample, [key]: value } : sample,
       ),
     );
+    setMetadataImport(null);
     invalidateValidation();
   };
+
+  const chooseReferenceFile = async (
+    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf",
+    title: string,
+  ) => {
+    const busyKey = `reference-${key}`;
+    setBusy(busyKey);
+    setError("");
+    try {
+      const selected = await selectFiles(title);
+      if (selected?.[0]) updateOptions(key, selected[0]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The file could not be selected.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const chooseSampleInput = async (
+    index: number,
+    key: "r1_files" | "r2_files" | "abundance_tsv",
+  ) => {
+    const multiple = key !== "abundance_tsv";
+    const busyKey = `sample-${index}-${key}`;
+    setBusy(busyKey);
+    setError("");
+    try {
+      const selected = await selectFiles(
+        key === "abundance_tsv" ? "Select Kallisto abundance.tsv" : `Select ${key === "r1_files" ? "R1" : "R2"} FASTQ file(s)`,
+        multiple,
+      );
+      if (!selected) return;
+      if (key === "abundance_tsv") updateSample(index, key, selected[0] ?? null);
+      else updateSample(index, key, selected);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The file could not be selected.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const importMetadataCsv = async () => {
+    setBusy("metadata-csv");
+    setError("");
+    try {
+      const selected = await selectFiles("Select experimental metadata CSV");
+      if (!selected?.[0]) return;
+      const result = await apiRequest<MetadataCsvResult>("/api/v1/metadata/csv", {
+        method: "POST",
+        body: JSON.stringify({ path: selected[0], sample_ids: samples.map((sample) => sample.sample_id) }),
+      });
+      const rowsBySample = new Map(result.rows
+        .filter((row) => row.matched_sample_id)
+        .map((row) => [row.matched_sample_id as string, row]));
+      const matched = rowsBySample.size;
+      const updatedSamples = samples.map((sample) => {
+        const row = rowsBySample.get(sample.sample_id);
+        if (!row) return sample;
+        return {
+          ...sample,
+          condition: row.condition,
+          batch: row.batch,
+          biological_replicate: row.biological_replicate ?? sample.biological_replicate,
+          covariates: {
+            ...sample.covariates,
+            ...(row.intervention ? { intervention: row.intervention } : {}),
+          },
+        };
+      });
+      setSamples(updatedSamples);
+      setMetadataImport({
+        path: result.path,
+        matched,
+        unmatchedSamples: result.unmatched_samples,
+        unusedRows: result.unused_rows,
+        warnings: result.warnings,
+      });
+      setAssignmentHistory((current) => [...current, {
+        timestamp: new Date().toISOString(),
+        action: "metadata_csv_import",
+        matched,
+        details: { path: result.path },
+      }]);
+      if (matched > 0) {
+        setComparisons([]);
+        setNumerator("");
+        setDenominator("");
+        setComparisonIntervention("");
+      }
+      invalidateValidation();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The metadata CSV could not be imported.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const referenceFileField = (
+    label: string,
+    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf",
+    placeholder: string,
+    required = false,
+  ) => (
+    <div className="path-file-field"><label htmlFor={`reference-${key}`}>{label} {required && <span aria-hidden="true">*</span>}</label><div className="path-input-row"><input id={`reference-${key}`} value={options[key]} onChange={(event) => updateOptions(key, event.target.value)} placeholder={placeholder} /><button className="button secondary" type="button" onClick={() => void chooseReferenceFile(key, `Select ${label}`)} disabled={busy === `reference-${key}`}>{busy === `reference-${key}` ? "Selecting…" : "Browse…"}</button></div></div>
+  );
 
   const discover = async () => {
     setBusy("discover");
     setError("");
     try {
-      const result = await apiRequest<FastqDiscoveryResult>("/api/v1/fastq/discover", {
+      const endpoint = startStage === "analysis"
+        ? "/api/v1/quantifications/discover"
+        : "/api/v1/fastq/discover";
+      const result = await apiRequest<InputDiscoveryResult>(endpoint, {
         method: "POST",
         body: JSON.stringify({ directory: details.inputDirectory, recursive: true }),
       });
-      setDiscovery(result);
-      setSamples(result.samples);
+      const discoveredSamples = result.samples.map(normalizeDiscoveredSample);
+      setDiscovery({ ...result, samples: discoveredSamples });
+      const previousById = new Map(samples.map((sample) => [sample.sample_id, sample]));
+      const mergedSamples = discoveredSamples.map((sample) => {
+        const previous = previousById.get(sample.sample_id);
+        return previous
+          ? {
+              ...sample,
+              condition: typeof previous.condition === "string" ? previous.condition : "",
+              biological_replicate:
+                typeof previous.biological_replicate === "string"
+                  ? previous.biological_replicate
+                  : "",
+              batch: typeof previous.batch === "string" ? previous.batch : null,
+              covariates: isRecord(previous.covariates) ? previous.covariates : {},
+              included: typeof previous.included === "boolean" ? previous.included : true,
+            }
+          : sample;
+      });
+      const remainingGroups = new Set(mergedSamples
+        .filter((sample) => sample.included && sample.condition.trim())
+        .map((sample) => sample.condition.trim()));
+      setSamples(mergedSamples);
+      setAssignmentHistory((current) => [...current, {
+        timestamp: new Date().toISOString(),
+        action: "input_rediscovery",
+        matched: mergedSamples.filter((sample) => Boolean(previousById.get(sample.sample_id))).length,
+        details: { preserved_existing_design: "true" },
+      }]);
+      setComparisons((current) => current.filter((comparison) =>
+        remainingGroups.has(comparison.numerator) && remainingGroups.has(comparison.denominator),
+      ));
+      setMetadataImport(null);
       invalidateValidation();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "FASTQ discovery failed");
@@ -194,8 +447,11 @@ export function NewProjectWizard({
 
   const buildManifest = (): ProjectManifest => {
     const referenceResources: Record<string, string> = {};
-    if (options.transcriptomeFasta.trim()) referenceResources.transcriptome_fasta = options.transcriptomeFasta;
-    if (options.annotationGtf.trim()) referenceResources.annotation_gtf = options.annotationGtf;
+    if (startStage === "quantification") {
+      if (options.transcriptomeFasta.trim()) referenceResources.transcriptome_fasta = options.transcriptomeFasta;
+      if (options.annotationGtf.trim()) referenceResources.annotation_gtf = options.annotationGtf;
+      if (options.kallistoIndex.trim()) referenceResources.kallisto_index = options.kallistoIndex;
+    }
     if (options.biomart.trim()) referenceResources.biomart = options.biomart;
 
     return {
@@ -206,7 +462,7 @@ export function NewProjectWizard({
       input_directory: details.inputDirectory,
       output_directory: details.outputDirectory,
       pipeline_identifier: "bulk-rnaseq",
-      pipeline_version: "0.3.0-full-demo",
+      pipeline_version: "0.4.0",
       organism: options.organism,
       reference_genome: options.referenceGenome,
       annotation_source: options.annotationSource,
@@ -218,19 +474,175 @@ export function NewProjectWizard({
         sample_id: sample.sample_id,
         r1_files: sample.r1_files,
         r2_files: options.readLayout === "single-end" ? [] : sample.r2_files,
+        abundance_tsv: sample.abundance_tsv,
         condition: sample.condition,
         biological_replicate: sample.biological_replicate,
         batch: sample.batch,
-        covariates: {},
+        covariates: sample.covariates,
         included: sample.included,
       })),
       comparisons,
-      parameters: { minimum_read_length: options.minimumReadLength },
+      parameters: {
+        start_stage: startStage,
+        ...(startStage === "quantification" ? {
+          adapter_r1: options.adapterR1,
+          adapter_r2: options.adapterR2,
+          trim_quality: options.trimQuality,
+          trim_minimum_length: options.minimumReadLength,
+        } : {}),
+        differential_expression: true,
+        minimum_group_size: options.minimumGroupSize,
+        adjusted_p_value: options.adjustedPValue,
+        absolute_log2_fold_change: options.absoluteLog2FoldChange,
+      },
       resource_profile: { cpus: options.cpus, memory_gb: options.memoryGb, max_parallel_tasks: 1 },
       execution_profile: options.executionProfile,
       application_version: "0.3.0",
       pipeline_status: "draft",
     };
+  };
+
+  const exportSettings = async () => {
+    setBusy("export-settings");
+    setError("");
+    setExportPath("");
+    try {
+      const payload = {
+        export_format: "missus-tom-project-debug",
+        export_version: 2,
+        exported_at: new Date().toISOString(),
+        warning: "Contains local file paths and sample identifiers. Review before sharing.",
+        wizard: {
+          current_step: step + 1,
+          current_step_label: steps[step],
+          start_stage: startStage,
+          details,
+          options,
+          samples,
+          comparisons,
+          discovery,
+          metadata_import: metadataImport,
+          pending_assignment: {
+            search: assignmentSearch,
+            condition: assignmentCondition,
+            biological_replicate: assignmentReplicate,
+            batch: assignmentBatch,
+            intervention: assignmentIntervention,
+          },
+          pending_comparison: { numerator, denominator, intervention: comparisonIntervention },
+          assignment_history: assignmentHistory,
+          validation,
+        },
+        manifest_draft: buildManifest(),
+      };
+      const baseName = toSafeId(details.projectName) || "untitled-project";
+      const path = await saveTextFile(
+        "Export Missus Tom project settings",
+        `${baseName}-debug-settings.json`,
+        `${JSON.stringify(payload, null, 2)}\n`,
+      );
+      if (path) setExportPath(path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Project settings could not be exported.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const importSettings = async () => {
+    setBusy("import-settings");
+    setError("");
+    setImportPath("");
+    try {
+      const selected = await selectFiles("Import Missus Tom project settings");
+      if (!selected?.[0]) return;
+      const parsed: unknown = JSON.parse(await readTextFile(selected[0]));
+      if (!isRecord(parsed) || parsed.export_format !== "missus-tom-project-debug") {
+        throw new Error("This is not a Missus Tom project-settings export.");
+      }
+      if (!isRecord(parsed.wizard)) {
+        throw new Error("The settings export does not contain wizard state.");
+      }
+      const imported = parsed.wizard;
+      if (
+        !isRecord(imported.details)
+        || !isRecord(imported.options)
+        || !Array.isArray(imported.samples)
+        || !Array.isArray(imported.comparisons)
+        || (imported.start_stage !== "quantification" && imported.start_stage !== "analysis")
+      ) {
+        throw new Error("The settings export is incomplete or malformed.");
+      }
+      const samplesAreValid = imported.samples.every((sample) =>
+        isRecord(sample)
+        && typeof sample.sample_id === "string"
+        && Array.isArray(sample.r1_files)
+        && Array.isArray(sample.r2_files)
+        && typeof sample.condition === "string"
+        && typeof sample.biological_replicate === "string"
+        && typeof sample.included === "boolean");
+      const comparisonsAreValid = imported.comparisons.every((comparison) =>
+        isRecord(comparison)
+        && typeof comparison.comparison_id === "string"
+        && typeof comparison.numerator === "string"
+        && typeof comparison.denominator === "string");
+      if (!samplesAreValid || !comparisonsAreValid) {
+        throw new Error("The settings export contains malformed samples or comparisons.");
+      }
+
+      const importedSamples = (imported.samples as ProposedSample[]).map((sample) => ({
+        ...sample,
+        covariates: isRecord(sample.covariates) ? sample.covariates : {},
+      }));
+      const importedComparisons = (imported.comparisons as Comparison[]).map((comparison) => ({
+        ...comparison,
+        intervention: comparison.intervention ?? null,
+      }));
+      const pendingAssignment = isRecord(imported.pending_assignment)
+        ? imported.pending_assignment
+        : {};
+      const pendingComparison = isRecord(imported.pending_comparison)
+        ? imported.pending_comparison
+        : {};
+      const manifestDraft = isRecord(parsed.manifest_draft) ? parsed.manifest_draft : {};
+
+      setStartStage(imported.start_stage);
+      setDetails(imported.details as unknown as DetailsState);
+      setOptions((current) => ({ ...current, ...(imported.options as Partial<OptionsState>) }));
+      setSamples(importedSamples);
+      setComparisons(importedComparisons);
+      setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
+      setMetadataImport((imported.metadata_import as MetadataImportStatus | null) ?? null);
+      setAssignmentSearch(typeof pendingAssignment.search === "string" ? pendingAssignment.search : "");
+      setAssignmentCondition(typeof pendingAssignment.condition === "string" ? pendingAssignment.condition : "");
+      setAssignmentReplicate(typeof pendingAssignment.biological_replicate === "string" ? pendingAssignment.biological_replicate : "");
+      setAssignmentBatch(typeof pendingAssignment.batch === "string" ? pendingAssignment.batch : "");
+      setAssignmentIntervention(typeof pendingAssignment.intervention === "string" ? pendingAssignment.intervention : "");
+      setNumerator(typeof pendingComparison.numerator === "string" ? pendingComparison.numerator : "");
+      setDenominator(typeof pendingComparison.denominator === "string" ? pendingComparison.denominator : "");
+      setComparisonIntervention(typeof pendingComparison.intervention === "string" ? pendingComparison.intervention : "");
+      setAssignmentHistory(Array.isArray(imported.assignment_history)
+        ? imported.assignment_history as AssignmentHistoryEntry[]
+        : []);
+      if (typeof manifestDraft.project_identifier === "string") {
+        setProjectId(manifestDraft.project_identifier);
+      }
+      if (typeof manifestDraft.created_at === "string") setCreatedAt(manifestDraft.created_at);
+      if (typeof imported.current_step === "number") {
+        setStep(Math.max(0, Math.min(steps.length - 1, imported.current_step - 1)));
+      }
+      setValidation(null);
+      setValidatedManifest(null);
+      setInputPreview(null);
+      setOutputPreview(null);
+      setSavedPath("");
+      setExportPath("");
+      setImportPath(selected[0]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Project settings could not be imported.");
+    } finally {
+      setBusy("");
+    }
   };
 
   const validate = async () => {
@@ -255,16 +667,17 @@ export function NewProjectWizard({
     setBusy("save");
     setError("");
     try {
+      const plannedManifest = { ...validatedManifest, pipeline_status: "planned" as const };
       const saved = await apiRequest<{ manifest_path: string }>("/api/v1/projects/save", {
         method: "POST",
-        body: JSON.stringify(validatedManifest),
+        body: JSON.stringify(plannedManifest),
       });
       const plan = await apiRequest<RunPlan>("/api/v1/runs/plan", {
         method: "POST",
-        body: JSON.stringify({ manifest: validatedManifest }),
+        body: JSON.stringify({ manifest: plannedManifest }),
       });
       setSavedPath(saved.manifest_path);
-      onProjectReady({ ...validatedManifest, pipeline_status: "planned" }, plan);
+      onProjectReady(plannedManifest, plan);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Project save failed");
     } finally {
@@ -272,12 +685,82 @@ export function NewProjectWizard({
     }
   };
 
+  const applyDesignAssignment = () => {
+    const search = assignmentSearch.trim();
+    const condition = assignmentCondition.trim();
+    const replicate = assignmentReplicate.trim();
+    const batch = assignmentBatch.trim();
+    const intervention = assignmentIntervention.trim();
+    if (!search) {
+      setError("Enter text to find in the sample identifiers.");
+      return;
+    }
+    if (!condition && !replicate && !batch && !intervention) {
+      setError("Enter a condition, biological replicate, batch, or intervention to assign.");
+      return;
+    }
+    if (assignmentMatchCount === 0) {
+      setError(`No included sample identifiers contain "${search}".`);
+      return;
+    }
+    const match = normalizeSearchText(search);
+    setSamples((current) => current.map((sample) =>
+      sample.included && normalizeSearchText(sample.sample_id).includes(match)
+        ? {
+            ...sample,
+            condition: condition || sample.condition,
+            biological_replicate: replicate || sample.biological_replicate,
+            batch: batch || sample.batch,
+            covariates: {
+              ...sample.covariates,
+              ...(intervention ? { intervention } : {}),
+            },
+          }
+        : sample,
+    ));
+    setAssignmentSearch("");
+    setAssignmentCondition("");
+    setAssignmentReplicate("");
+    setAssignmentBatch("");
+    setAssignmentIntervention("");
+    setComparisons([]);
+    setNumerator("");
+    setDenominator("");
+    setComparisonIntervention("");
+    setMetadataImport(null);
+    setAssignmentHistory((current) => [...current, {
+      timestamp: new Date().toISOString(),
+      action: "bulk_design_assignment",
+      matched: assignmentMatchCount,
+      details: { search, condition, biological_replicate: replicate, batch, intervention },
+    }]);
+    setError("");
+    invalidateValidation();
+  };
+
+  const useSampleIdsAsReplicates = () => {
+    setSamples((current) => current.map((sample) =>
+      sample.included ? { ...sample, biological_replicate: sample.sample_id } : sample,
+    ));
+    setMetadataImport(null);
+    setAssignmentHistory((current) => [...current, {
+      timestamp: new Date().toISOString(),
+      action: "sample_ids_as_replicates",
+      matched: samples.filter((sample) => sample.included).length,
+      details: {},
+    }]);
+    setError("");
+    invalidateValidation();
+  };
+
   const addComparison = () => {
     if (!numerator || !denominator || numerator === denominator) {
       setError("Choose two different groups for the comparison.");
       return;
     }
-    const comparisonId = toSafeId(`${numerator}_vs_${denominator}`);
+    const comparisonId = toSafeId(
+      `${numerator}_vs_${denominator}${comparisonIntervention ? `_within_${comparisonIntervention}` : ""}`,
+    );
     if (comparisons.some((comparison) => comparison.comparison_id === comparisonId)) {
       setError("That comparison has already been added.");
       return;
@@ -288,7 +771,8 @@ export function NewProjectWizard({
         comparison_id: comparisonId,
         numerator,
         denominator,
-        label: `${numerator} (test) vs ${denominator} (reference)`,
+        label: `${numerator} (test) vs ${denominator} (reference)${comparisonIntervention ? ` within ${comparisonIntervention}` : ""}`,
+        intervention: comparisonIntervention || null,
       },
     ]);
     setError("");
@@ -308,15 +792,21 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 1</p><h2>Project details</h2></div></div>
-            <p className="helper-copy">Folder contents are read only after you select a folder or request a preview. FASTQs remain in place.</p>
-            <label>Project name <span aria-hidden="true">*</span><input value={details.projectName} onChange={(event) => updateDetails("projectName", event.target.value)} placeholder="e.g. Mouse intervention pilot" /></label>
+            <p className="helper-copy">Choose where this project starts before selecting its input folder.</p>
+            <fieldset className="run-mode-panel setup-mode-panel">
+              <legend>Starting point</legend>
+              <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "quantification"} onChange={() => updateStartStage("quantification")} /><span><strong>Start with FASTQ files</strong><small>Run raw QC, trimming, Kallisto quantification, and analysis. Select a folder containing paired R1/R2 FASTQs.</small></span></label>
+              <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "analysis"} onChange={() => updateStartStage("analysis")} /><span><strong>Skip quantification</strong><small>Run analysis from existing Kallisto results. Select a folder containing one abundance.tsv file per sample.</small></span></label>
+              {startStage === "analysis" && <p className="run-mode-note input-warning"><strong>Different inputs required:</strong> a Kallisto <code>abundance.tsv</code> for every sample, normally arranged as <code>&lt;input&gt;/&lt;sample_id&gt;/abundance.tsv</code>, plus a matching human BioMart table. The tables must come from a compatible human transcript index whose target identifiers retain Ensembl gene metadata. FASTQs and the index file itself are not required.</p>}
+            </fieldset>
+            <label>Project name <span aria-hidden="true">*</span><input value={details.projectName} onChange={(event) => updateDetails("projectName", event.target.value)} placeholder="e.g. Human intervention study" /></label>
             <div className="directory-field">
-              <label>Input FASTQ directory <span aria-hidden="true">*</span><input value={details.inputDirectory} onChange={(event) => updateDetails("inputDirectory", event.target.value)} placeholder="/data/sequencing/run-01" /></label>
-              <div className="directory-actions"><button className="button secondary" type="button" onClick={() => void chooseFolder("input")} disabled={busy.startsWith("input-")}>Select input folder</button><button className="text-button" type="button" onClick={() => void loadFolderPreview("input", details.inputDirectory)} disabled={!details.inputDirectory || busy === "input-preview"}>Preview typed path</button></div>
+              <label>{startStage === "analysis" ? "Kallisto results directory" : "Input FASTQ directory"} <span aria-hidden="true">*</span><input value={details.inputDirectory} onChange={(event) => updateDetails("inputDirectory", event.target.value)} placeholder={startStage === "analysis" ? "/data/kallisto-results" : "/data/sequencing/run-01"} /></label>
+              <div className="directory-actions"><button className="button secondary" type="button" onClick={() => void chooseFolder("input")} disabled={busy.startsWith("input-")}>Select {startStage === "analysis" ? "Kallisto results" : "FASTQ"} folder</button><button className="text-button" type="button" onClick={() => void loadFolderPreview("input", details.inputDirectory)} disabled={!details.inputDirectory || busy === "input-preview"}>Preview typed path</button></div>
             </div>
             {inputPreview && <FolderPreview label="Input folder" preview={inputPreview} />}
             <div className="directory-field">
-              <label>Project output directory <span aria-hidden="true">*</span><input value={details.outputDirectory} onChange={(event) => updateDetails("outputDirectory", event.target.value)} placeholder="/data/projects/mouse-intervention-pilot" /></label>
+              <label>Project output directory <span aria-hidden="true">*</span><input value={details.outputDirectory} onChange={(event) => updateDetails("outputDirectory", event.target.value)} placeholder="/data/projects/human-intervention-study" /></label>
               <div className="directory-actions"><button className="button secondary" type="button" onClick={() => void chooseFolder("output")} disabled={busy.startsWith("output-")}>Select output folder</button><button className="text-button" type="button" onClick={() => void loadFolderPreview("output", details.outputDirectory)} disabled={!details.outputDirectory || busy === "output-preview"}>Preview typed path</button></div>
             </div>
             {outputPreview && <FolderPreview label="Output folder" preview={outputPreview} />}
@@ -326,13 +816,13 @@ export function NewProjectWizard({
       case 1:
         return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>Discover FASTQ files</h2></div><button className="button primary" type="button" onClick={discover} disabled={busy === "discover" || !details.inputDirectory}>{busy === "discover" ? "Scanning…" : "Scan directory"}</button></div>
-            <p className="helper-copy">The scanner reads names and file metadata only. Symlinked directories are skipped.</p>
+            <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>{startStage === "analysis" ? "Discover Kallisto results" : "Discover FASTQ files"}</h2></div><button className="button primary" type="button" onClick={discover} disabled={busy === "discover" || !details.inputDirectory}>{busy === "discover" ? "Scanning…" : "Scan directory"}</button></div>
+            <p className="helper-copy">{startStage === "analysis" ? "The scanner finds Kallisto abundance.tsv files and proposes the parent folder as each sample identifier." : "The scanner reads names and file metadata only."} Symlinked directories are skipped.</p>
             {discovery ? (
               <>
-                <div className="summary-grid three"><article className="metric-card"><span>FASTQs</span><strong>{discovery.total_files}</strong></article><article className="metric-card"><span>Proposed samples</span><strong>{discovery.samples.length}</strong></article><article className="metric-card"><span>Total size</span><strong>{formatBytes(discovery.total_bytes)}</strong></article></div>
+                <div className="summary-grid three"><article className="metric-card"><span>{startStage === "analysis" ? "Abundance tables" : "FASTQs"}</span><strong>{discovery.total_files}</strong></article><article className="metric-card"><span>Proposed samples</span><strong>{discovery.samples.length}</strong></article><article className="metric-card"><span>Total size</span><strong>{formatBytes(discovery.total_bytes)}</strong></article></div>
                 {discovery.warnings.length > 0 && <div className="warning-list"><strong>Discovery notes</strong><ul>{discovery.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
-                <div className="file-preview"><h3>Detected files</h3>{discovery.files.slice(0, 12).map((file) => <div key={file.path}><span className={`read-chip read-${file.read.toLowerCase()}`}>{file.read}</span><code>{file.path}</code><small>{formatBytes(file.size_bytes)}</small></div>)}{discovery.files.length > 12 && <p>+ {discovery.files.length - 12} more files</p>}</div>
+                <div className="file-preview"><h3>Detected files</h3><div className="file-preview-list">{discovery.files.slice(0, 12).map((file) => <div key={file.path}>{"read" in file ? <span className={`read-chip read-${file.read.toLowerCase()}`}>{file.read}</span> : <span className="read-chip">Kallisto</span>}<code>{file.path}</code><small>{formatBytes(file.size_bytes)}</small></div>)}</div>{discovery.files.length > 12 && <p>+ {discovery.files.length - 12} more files</p>}</div>
               </>
             ) : <div className="empty-state compact"><div className="empty-orbit" aria-hidden="true">⌁</div><h3>No scan results</h3><p>Enter an input directory in step 1.</p></div>}
           </section>
@@ -340,10 +830,10 @@ export function NewProjectWizard({
       case 2:
         return (
           <section className="wizard-card wide-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>Review samples and read pairs</h2></div><span className="count-pill">{samples.length}</span></div>
-            <p className="helper-copy">Review all assignments. Resolve pairing warnings before validation.</p>
-            {samples.length === 0 ? <p className="empty-copy">No sample proposals. Return to FASTQ discovery first.</p> : (
-              <div className="table-scroll"><table className="sample-table"><thead><tr><th>Use</th><th>Sample identifier</th><th>R1 files</th><th>R2 files</th><th>Condition</th><th>Replicate</th><th>Batch</th><th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td><td><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /></td><td><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /></td><td><input value={sample.condition} onChange={(event) => updateSample(index, "condition", event.target.value)} aria-label={`Condition for ${sample.sample_id}`} /></td><td><input value={sample.biological_replicate} onChange={(event) => updateSample(index, "biological_replicate", event.target.value)} aria-label={`Replicate for ${sample.sample_id}`} /></td><td><input value={sample.batch ?? ""} onChange={(event) => updateSample(index, "batch", event.target.value || null)} aria-label={`Batch for ${sample.sample_id}`} /></td><td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning) => <small className="cell-warning" key={warning}>{warning}</small>)}</td></tr>)}</tbody></table></div>
+            <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>{startStage === "analysis" ? "Review samples and abundance tables" : "Review samples and read pairs"}</h2></div><span className="count-pill">{samples.length}</span></div>
+            <p className="helper-copy">Review file assignments and sample identifiers. Experimental settings are configured in the next step.</p>
+            {samples.length === 0 ? <p className="empty-copy">No sample proposals. Return to input discovery first.</p> : (
+              <div className="table-scroll"><table className={`sample-table${startStage === "analysis" ? " analysis-input-table" : ""}`}><thead><tr><th>Use</th><th>Sample identifier</th>{startStage === "analysis" ? <th>abundance.tsv</th> : <><th>R1 files</th><th>R2 files</th></>}<th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td>{startStage === "analysis" ? <td><div className="sample-path-editor"><textarea rows={2} value={sample.abundance_tsv ?? ""} onChange={(event) => updateSample(index, "abundance_tsv", event.target.value.trim() || null)} aria-label={`Abundance table for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "abundance_tsv")}>Browse…</button></div></td> : <><td><div className="sample-path-editor"><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r1_files")}>Browse…</button></div></td><td><div className="sample-path-editor"><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r2_files")}>Browse…</button></div></td></>}<td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning) => <small className="cell-warning" key={warning}>{warning}</small>)}</td></tr>)}</tbody></table></div>
             )}
           </section>
         );
@@ -351,32 +841,45 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>Confirm experimental design</h2></div></div>
-            <p className="helper-copy">Confirm condition, replicate, and batch values. Filenames are not used to infer them.</p>
-            {samples.filter((sample) => sample.included).map((sample, index) => {
+            <div className="concept-explainer"><p><strong>Experimental design</strong> tells the analysis which biological group each sample belongs to.</p><ul><li><strong>Condition:</strong> the required group being studied, such as Control or Treated.</li><li><strong>Biological replicate:</strong> optional subject/specimen metadata retained for future paired analyses. The current unpaired analysis does not use it.</li><li><strong>Batch:</strong> optional provenance for when or where a sample was processed. It is recorded, but the current analysis does not adjust for batch.</li></ul><p>Missus Tom never guesses these biological facts from filenames.</p></div>
+            <div className="category-assignment-panel">
+              <div className="category-assignment-heading"><div><strong>Bulk-assign experimental settings</strong><p>Find included samples by text in their identifiers, then assign any combination of condition, biological replicate, batch, and intervention. Matching ignores letter case and separators such as <code>_</code> and <code>-</code>.</p></div><button className="text-button" type="button" onClick={useSampleIdsAsReplicates}>Use each sample ID as its replicate ID</button></div>
+              <div className="table-scroll"><table className="category-assignment-table"><thead><tr><th>Sample ID contains</th><th>Condition</th><th>Biological replicate (optional)</th><th>Batch</th><th>Intervention</th><th>Matches</th><th></th></tr></thead><tbody><tr><td><input value={assignmentSearch} onChange={(event) => setAssignmentSearch(event.target.value)} placeholder="e.g. O_D1" /></td><td><input value={assignmentCondition} onChange={(event) => setAssignmentCondition(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentReplicate} onChange={(event) => setAssignmentReplicate(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentBatch} onChange={(event) => setAssignmentBatch(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentIntervention} onChange={(event) => setAssignmentIntervention(event.target.value)} placeholder="Optional" /></td><td><strong>{assignmentMatchCount}</strong></td><td><button className="button primary" type="button" onClick={applyDesignAssignment} disabled={!assignmentSearch.trim() || assignmentMatchCount === 0 || (!assignmentCondition.trim() && !assignmentReplicate.trim() && !assignmentBatch.trim() && !assignmentIntervention.trim())}>Apply</button></td></tr></tbody></table></div>
+              <p className="helper-copy">Example: search for <code>OD1</code> and enter condition <code>OD1</code>. For replicates, search for a replicate-specific name fragment and enter its replicate ID. New values overwrite those fields for matching samples, so review the assignments below. Use the sample-ID shortcut only when every sample represents a separate biological specimen.</p>
+            </div>
+            <div className="metadata-import-panel">
+              <div><strong>Import experimental metadata</strong><p><strong>CSV requirement:</strong> the file MUST include <code>SampleID</code>, <code>Condition</code>, and <code>Batch</code> columns.</p><small><code>Patient</code> maps to biological replicate, and <code>Intervention</code> is imported for filtered comparisons. Column matching ignores letter case; legacy sample-ID separators and suffixes are normalized and reported.</small></div>
+              <button className="button secondary" type="button" onClick={() => void importMetadataCsv()} disabled={busy === "metadata-csv" || samples.length === 0}>{busy === "metadata-csv" ? "Importing…" : "Select metadata CSV…"}</button>
+            </div>
+            {metadataImport && <div className={metadataImport.unmatchedSamples.length || metadataImport.unusedRows.length || metadataImport.warnings.length ? "warning-list metadata-import-result" : "success-message metadata-import-result"}><strong>Imported metadata for {metadataImport.matched} sample(s)</strong><p><code>{metadataImport.path}</code></p>{metadataImport.unmatchedSamples.length > 0 && <p>No matching CSV row for: {metadataImport.unmatchedSamples.slice(0, 8).join(", ")}{metadataImport.unmatchedSamples.length > 8 ? ` (+${metadataImport.unmatchedSamples.length - 8} more)` : ""}</p>}{metadataImport.unusedRows.length > 0 && <p>Unused CSV rows, including superseded legacy duplicates: {metadataImport.unusedRows.slice(0, 8).join(", ")}{metadataImport.unusedRows.length > 8 ? ` (+${metadataImport.unusedRows.length - 8} more)` : ""}</p>}{metadataImport.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+            <div className="design-list">{samples.filter((sample) => sample.included).map((sample, index) => {
               const realIndex = samples.indexOf(sample);
-              return <article className="design-row" key={`${sample.sample_id}-${index}`}><strong>{sample.sample_id}</strong><label>Condition<input value={sample.condition} onChange={(event) => updateSample(realIndex, "condition", event.target.value)} /></label><label>Biological replicate<input value={sample.biological_replicate} onChange={(event) => updateSample(realIndex, "biological_replicate", event.target.value)} /></label><label>Batch<input value={sample.batch ?? ""} onChange={(event) => updateSample(realIndex, "batch", event.target.value || null)} /></label></article>;
-            })}
-            {groups.length > 0 && <div className="group-summary"><strong>Current groups</strong>{groups.map((group) => <span key={group}>{group}: {samples.filter((sample) => sample.included && sample.condition === group).length} sample(s)</span>)}</div>}
+              return <article className="design-row" key={`${sample.sample_id}-${index}`}><strong>{sample.sample_id}</strong><label>Condition<input value={sample.condition} onChange={(event) => updateSample(realIndex, "condition", event.target.value)} /></label><label>Biological replicate (optional)<input value={sample.biological_replicate} onChange={(event) => updateSample(realIndex, "biological_replicate", event.target.value)} /></label><label>Batch<input value={sample.batch ?? ""} onChange={(event) => updateSample(realIndex, "batch", event.target.value || null)} /></label><label>Intervention<input value={typeof sample.covariates.intervention === "string" ? sample.covariates.intervention : ""} onChange={(event) => updateSample(realIndex, "covariates", { ...sample.covariates, intervention: event.target.value || null })} /></label></article>;
+            })}</div>
+            {groups.length > 0 && <div className="group-summary"><strong>Current groups</strong>{groups.map((group) => <span key={group}>{group}: {samples.filter((sample) => sample.included && sample.condition.trim() === group).length} sample(s)</span>)}</div>}
           </section>
         );
       case 4:
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Build comparisons</h2></div></div>
-            <p className="helper-copy">Contrast: numerator minus denominator. Positive fold change indicates higher expression in the numerator.</p>
-            {groups.length < 2 ? <div className="warning-list">Assign at least two conditions in the experimental design step.</div> : <div className="comparison-builder"><label>Numerator / test group<select value={numerator} onChange={(event) => setNumerator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><span className="direction-mark" aria-hidden="true">versus</span><label>Denominator / reference group<select value={denominator} onChange={(event) => setDenominator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><button className="button primary" type="button" onClick={addComparison}>Add comparison</button></div>}
-            <div className="comparison-list">{comparisons.length === 0 ? <p className="empty-copy">No comparisons requested.</p> : comparisons.map((comparison) => <article key={comparison.comparison_id}><div><strong>{comparison.numerator} <span>−</span> {comparison.denominator}</strong><p>{comparison.label}</p></div><button type="button" className="text-button danger" onClick={() => removeComparison(comparison.comparison_id)}>Remove</button></article>)}</div>
+            <div className="concept-explainer"><p><strong>Comparisons</strong> specify the questions DESeq2 should test. Each comparison uses two conditions from the experimental design and produces its own differential-expression tables and plots.</p><p><strong>Numerator − denominator:</strong> for Treated versus Control, positive log2 fold change means higher expression in Treated; negative means higher in Control.</p></div>
+            {groups.length < 2 ? <div className="warning-list">Assign at least two conditions in the experimental design step.</div> : <div className="comparison-builder filtered-comparison-builder"><label>Numerator / test group<select value={numerator} onChange={(event) => setNumerator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><span className="direction-mark" aria-hidden="true">versus</span><label>Denominator / reference group<select value={denominator} onChange={(event) => setDenominator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><label>Intervention filter<select value={comparisonIntervention} onChange={(event) => setComparisonIntervention(event.target.value)}><option value="">All interventions</option>{interventions.map((intervention) => <option key={intervention}>{intervention}</option>)}</select></label><button className="button primary" type="button" onClick={addComparison}>Add comparison</button></div>}
+            <div className="comparison-list">{comparisons.length === 0 ? <p className="empty-copy">No comparisons requested.</p> : comparisons.map((comparison) => <article key={comparison.comparison_id}><div><strong>{comparison.numerator} <span>−</span> {comparison.denominator}</strong><p>{comparison.label}{comparison.intervention ? ` · Intervention: ${comparison.intervention}` : ""}</p></div><button type="button" className="text-button danger" onClick={() => removeComparison(comparison.comparison_id)}>Remove</button></article>)}</div>
           </section>
         );
       case 5:
         return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Pipeline options</h2></div></div>
+            <p className="helper-copy">{startStage === "analysis" ? "Analysis-only execution requires existing Kallisto abundance tables and a human BioMart mapping." : "Full execution supports human paired-end libraries with a supplied Kallisto index and BioMart mapping."}</p>
             <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<select value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)}><option>total RNA</option><option>lncRNA</option><option>mRNA</option><option>other (confirm)</option></select></label></div>
-            <div className="field-pair"><label>Read layout<select value={options.readLayout} onChange={(event) => updateOptions("readLayout", event.target.value as OptionsState["readLayout"])}><option value="paired-end">Paired-end</option><option value="single-end">Single-end</option></select></label><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as OptionsState["strandedness"])}><option value="unknown">Unknown (confirm)</option><option value="reverse">Reverse / RF</option><option value="forward">Forward / FR</option><option value="unstranded">Unstranded</option></select></label></div>
-            <fieldset><legend>Reference resource paths</legend><p className="helper-copy">Optional for framework validation; required before real execution can be enabled.</p><label>Transcriptome FASTA<input value={options.transcriptomeFasta} onChange={(event) => updateOptions("transcriptomeFasta", event.target.value)} placeholder="/references/transcripts.fa" /></label><label>Annotation GTF<input value={options.annotationGtf} onChange={(event) => updateOptions("annotationGtf", event.target.value)} placeholder="/references/annotation.gtf" /></label><label>BioMart table<input value={options.biomart} onChange={(event) => updateOptions("biomart", event.target.value)} placeholder="/references/biomart.tsv" /></label></fieldset>
-            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local</option><option value="docker">Docker</option><option value="apptainer">Apptainer</option></select></label><label>CPUs<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Memory (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+            {startStage === "quantification" && <div className="field-pair"><label>Read layout<select value={options.readLayout} onChange={(event) => updateOptions("readLayout", event.target.value as OptionsState["readLayout"])}><option value="paired-end">Paired-end</option><option value="single-end">Single-end</option></select></label><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as OptionsState["strandedness"])}><option value="unknown">Unknown (confirm)</option><option value="reverse">Reverse / RF</option><option value="forward">Forward / FR</option><option value="unstranded">Unstranded</option></select></label></div>}
+            <fieldset><legend>Reference resource paths</legend><p className="helper-copy">{startStage === "analysis" ? "The human BioMart table must match the transcript annotation used for the supplied Kallisto results." : "Kallisto index and BioMart table are required. FASTA and GTF are retained as project provenance."}</p>{startStage === "quantification" && referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}{referenceFileField("BioMart table", "biomart", "/references/biomart.tsv", true)}{startStage === "quantification" && <>{referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa")}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}</>}</fieldset>
+            <fieldset><legend>{startStage === "analysis" ? "Analysis" : "Trimming and analysis"}</legend>{startStage === "quantification" && <><div className="field-pair"><label>R1 adapter<input value={options.adapterR1} onChange={(event) => updateOptions("adapterR1", event.target.value)} /></label><label>R2 adapter<input value={options.adapterR2} onChange={(event) => updateOptions("adapterR2", event.target.value)} /></label></div><div className="field-pair"><label>Trim quality<input type="number" min="0" max="50" value={options.trimQuality} onChange={(event) => updateOptions("trimQuality", Number(event.target.value))} /></label><label>Minimum read length<input type="number" min="1" value={options.minimumReadLength} onChange={(event) => updateOptions("minimumReadLength", Number(event.target.value))} /></label></div></>}<div className="field-triple"><label>Minimum group size<input type="number" min="2" value={options.minimumGroupSize} onChange={(event) => updateOptions("minimumGroupSize", Number(event.target.value))} /></label><label>Adjusted p-value<input type="number" min="0" max="1" step="0.01" value={options.adjustedPValue} onChange={(event) => updateOptions("adjustedPValue", Number(event.target.value))} /></label><label>Absolute log2 fold change<input type="number" min="0" step="0.05" value={options.absoluteLog2FoldChange} onChange={(event) => updateOptions("absoluteLog2FoldChange", Number(event.target.value))} /></label></div></fieldset>
+            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="docker">Docker</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+            <p className="field-help">These limits cover the workflow as a whole. Leave CPU and RAM available for the desktop and other local work.</p>
           </section>
         );
       case 6:
@@ -392,7 +895,7 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 8</p><h2>Review and save</h2></div></div>
-            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType} · {options.readLayout} · {options.strandedness}</dd><dt>Resources</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB</dd><dt>Execution</dt><dd>{options.executionProfile} preview only</dd></dl></div>
+            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Existing Kallisto results" : "FASTQ quantification"}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType}{startStage === "quantification" ? ` · ${options.readLayout} · ${options.strandedness}` : ""}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
             <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save"} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
@@ -405,8 +908,11 @@ export function NewProjectWizard({
     <div className="page-stack wizard-page">
       <header className="page-header">
         <div><p className="eyebrow">New bulk RNA-seq project</p><h1>{details.projectName || "Untitled project"}</h1><p className="lede">Step {step + 1} of {steps.length} · {steps[step]}</p></div>
-        <span className="draft-chip">Unsaved</span>
+        <div className="page-header-actions"><button className="button secondary" type="button" onClick={() => void importSettings()} disabled={busy === "import-settings"}>{busy === "import-settings" ? "Importing…" : "Import settings"}</button><button className="button secondary" type="button" onClick={() => void exportSettings()} disabled={busy === "export-settings"}>{busy === "export-settings" ? "Exporting…" : "Export settings"}</button><span className="draft-chip">Unsaved</span><small>Exports include local paths and sample IDs.</small></div>
       </header>
+
+      {importPath && <div className="warning-list settings-export-success" role="status">Settings imported from <code>{importPath}</code>. Run validation again before saving.</div>}
+      {exportPath && <div className="success-message settings-export-success" role="status">Settings exported to <code>{exportPath}</code></div>}
 
       <div className="wizard-layout">
         <ol className="wizard-steps" aria-label="Project setup steps">

@@ -7,37 +7,48 @@ suppressPackageStartupMessages({
 })
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 5) {
-  stop("Usage: full_human_analysis.R <samples.tsv> <biomart.tsv> <output> <case> <reference>")
+if (length(args) != 7) {
+  stop("Usage: full_human_analysis.R <samples.tsv> <biomart.tsv> <output> <comparisons.tsv> <q-value> <absolute-lfc> <minimum-group-size>")
 }
 
 sample_sheet_path <- args[[1]]
 biomart_path <- args[[2]]
 output_root <- args[[3]]
-case_group <- args[[4]]
-reference_group <- args[[5]]
-comparison_id <- paste0(case_group, "_vs_", reference_group)
-comparison_label <- paste(case_group, "vs", reference_group)
-q_value <- 0.05
-lfc_threshold <- 0.30
+comparison_sheet_path <- args[[4]]
+q_value <- as.numeric(args[[5]])
+lfc_threshold <- as.numeric(args[[6]])
+minimum_group_size <- as.integer(args[[7]])
+if (!is.finite(q_value) || q_value <= 0 || q_value > 1) stop("Adjusted p-value must be in (0, 1]")
+if (!is.finite(lfc_threshold) || lfc_threshold < 0) stop("Absolute log2 fold change must be non-negative")
+if (is.na(minimum_group_size) || minimum_group_size < 2) stop("Minimum group size must be at least 2")
 
 for (directory in c("differential_expression", "figures", "tables")) {
   dir.create(file.path(output_root, directory), recursive = TRUE, showWarnings = FALSE)
 }
 
 samples <- read.delim(sample_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
-required_columns <- c("sample_id", "condition", "abundance_tsv")
+required_columns <- c("sample_id", "condition", "intervention", "abundance_tsv")
 if (!all(required_columns %in% colnames(samples))) {
-  stop("Sample sheet must contain sample_id, condition, and abundance_tsv columns")
+  stop("Sample sheet must contain sample_id, condition, intervention, and abundance_tsv columns")
 }
 if (anyDuplicated(samples$sample_id)) stop("Sample identifiers must be unique")
 if (!all(file.exists(samples$abundance_tsv))) stop("One or more abundance tables are missing")
-if (!setequal(unique(samples$condition), c(reference_group, case_group))) {
-  stop("The sample sheet conditions do not match the requested comparison")
+
+comparisons <- read.delim(comparison_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+comparison_columns <- c("comparison_id", "numerator", "denominator", "intervention")
+if (!all(comparison_columns %in% colnames(comparisons)) || nrow(comparisons) == 0) {
+  stop("Comparison sheet must contain comparison_id, numerator, denominator, and intervention rows")
 }
-condition_counts <- table(samples$condition)
-if (any(condition_counts[c(reference_group, case_group)] < 4)) {
-  stop("Differential expression requires at least four samples per comparison group")
+if (anyDuplicated(comparisons$comparison_id)) stop("Comparison identifiers must be unique")
+known_conditions <- unique(samples$condition)
+if (!all(comparisons$numerator %in% known_conditions) || !all(comparisons$denominator %in% known_conditions)) {
+  stop("One or more comparisons reference an unknown condition")
+}
+requested_interventions <- comparisons$intervention[
+  !is.na(comparisons$intervention) & nzchar(comparisons$intervention)
+]
+if (!all(requested_interventions %in% unique(samples$intervention))) {
+  stop("One or more comparisons reference an unknown intervention")
 }
 
 read_target_annotation <- function(path) {
@@ -95,12 +106,6 @@ txi <- tximport(
   countsFromAbundance = "no"
 )
 
-col_data <- data.frame(
-  condition = factor(samples$condition, levels = c(reference_group, case_group)),
-  row.names = samples$sample_id
-)
-contrast <- c("condition", case_group, reference_group)
-
 safe_values <- function(values, fallback = 0) {
   values[!is.finite(values)] <- fallback
   values
@@ -111,7 +116,7 @@ save_ggplot <- function(plot, stem, width = 8, height = 6) {
   ggsave(paste0(stem, ".pdf"), plot, width = width, height = height)
 }
 
-plot_heatmap <- function(matrix, annotation_groups, filename, title, width = 1100, height = 900) {
+plot_heatmap <- function(matrix, annotation_groups, case_group, filename, title, width = 1100, height = 900) {
   colors <- colorRampPalette(c("#173331", "#f7faf8", "#a23b3b"))(100)
   png(filename, width = width, height = height, res = 130)
   tryCatch({
@@ -160,18 +165,58 @@ write_pca_html <- function(pca_df, percent_var, filename, title) {
   writeLines(html, filename, useBytes = TRUE)
 }
 
-analysis_results <- list()
 analysis_classes <- list(
   mRNA = gene_annotation$gene_id[gene_annotation$gene_type == "protein_coding"],
   lncRNA = gene_annotation$gene_id[grepl("lncRNA", gene_annotation$gene_type, ignore.case = TRUE)]
 )
 
+all_statuses <- list()
+status_index <- 0
+
+for (comparison_index in seq_len(nrow(comparisons))) {
+  comparison_id <- comparisons$comparison_id[[comparison_index]]
+  case_group <- comparisons$numerator[[comparison_index]]
+  reference_group <- comparisons$denominator[[comparison_index]]
+  intervention_filter <- comparisons$intervention[[comparison_index]]
+  if (is.na(intervention_filter)) intervention_filter <- ""
+  comparison_label <- paste(
+    case_group,
+    "vs",
+    reference_group,
+    if (nzchar(intervention_filter)) paste("within", intervention_filter) else ""
+  )
+  selected_samples <- samples[samples$condition %in% c(reference_group, case_group), , drop = FALSE]
+  if (nzchar(intervention_filter)) {
+    selected_samples <- selected_samples[
+      !is.na(selected_samples$intervention) & selected_samples$intervention == intervention_filter,
+      ,
+      drop = FALSE
+    ]
+  }
+  condition_counts <- table(selected_samples$condition)
+  if (any(condition_counts[c(reference_group, case_group)] < minimum_group_size)) {
+    stop(paste("Comparison", comparison_id, "does not meet the minimum group size"))
+  }
+  comparison_txi <- lapply(txi, function(value) {
+    if (is.matrix(value) && ncol(value) == nrow(samples)) {
+      value[, selected_samples$sample_id, drop = FALSE]
+    } else {
+      value
+    }
+  })
+  col_data <- data.frame(
+    condition = factor(selected_samples$condition, levels = c(reference_group, case_group)),
+    row.names = selected_samples$sample_id
+  )
+  contrast <- c("condition", case_group, reference_group)
+  analysis_results <- list()
+
 for (analysis_name in names(analysis_classes)) {
-  selected_genes <- intersect(rownames(txi$counts), analysis_classes[[analysis_name]])
+  selected_genes <- intersect(rownames(comparison_txi$counts), analysis_classes[[analysis_name]])
   if (length(selected_genes) < 2) stop(paste("Insufficient", analysis_name, "genes for analysis"))
 
-  class_txi <- lapply(txi, function(value) {
-    if (is.matrix(value) && nrow(value) == nrow(txi$counts)) value[selected_genes, , drop = FALSE] else value
+  class_txi <- lapply(comparison_txi, function(value) {
+    if (is.matrix(value) && nrow(value) == nrow(comparison_txi$counts)) value[selected_genes, , drop = FALSE] else value
   })
   de_dir <- file.path(output_root, "differential_expression", analysis_name, comparison_id)
   figure_dir <- file.path(output_root, "figures", analysis_name, comparison_id)
@@ -196,11 +241,15 @@ for (analysis_name in names(analysis_classes)) {
   significant <- result_df[!is.na(result_df$padj) & result_df$padj < q_value & abs(result_df$log2FoldChange) > lfc_threshold, ]
   up <- significant[significant$log2FoldChange > lfc_threshold, ]
   down <- significant[significant$log2FoldChange < -lfc_threshold, ]
+  threshold_suffix <- paste0(
+    "padj", format(q_value, trim = TRUE, scientific = FALSE),
+    "_lfc", format(lfc_threshold, trim = TRUE, scientific = FALSE)
+  )
 
   write.table(result_df, file.path(de_dir, "full_results.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
-  write.table(significant, file.path(de_dir, "significant_padj0.05_lfc0.30.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
-  write.table(up, file.path(de_dir, "upregulated_padj0.05_lfc0.30.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
-  write.table(down, file.path(de_dir, "downregulated_padj0.05_lfc0.30.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+  write.table(significant, file.path(de_dir, paste0("significant_", threshold_suffix, ".tsv")), sep = "\t", quote = FALSE, row.names = FALSE)
+  write.table(up, file.path(de_dir, paste0("upregulated_", threshold_suffix, ".tsv")), sep = "\t", quote = FALSE, row.names = FALSE)
+  write.table(down, file.path(de_dir, paste0("downregulated_", threshold_suffix, ".tsv")), sep = "\t", quote = FALSE, row.names = FALSE)
   write.table(as.data.frame(counts(dds, normalized = TRUE)), file.path(table_dir, "library_size_normalized_counts.tsv"), sep = "\t", quote = FALSE, col.names = NA)
 
   rld <- rlog(dds, blind = FALSE)
@@ -243,7 +292,7 @@ for (analysis_name in names(analysis_classes)) {
   heatmap_genes <- if (nrow(significant) >= 2) head(significant$gene_id, 50) else head(ranked$gene_id, 50)
   heatmap_matrix <- rlog_matrix[intersect(heatmap_genes, rownames(rlog_matrix)), , drop = FALSE]
   if (nrow(heatmap_matrix) >= 2) {
-    plot_heatmap(heatmap_matrix, samples$condition, file.path(figure_dir, "Heatmap_topDEG_rlog.png"), paste("Top differential", analysis_name, "genes"))
+    plot_heatmap(heatmap_matrix, selected_samples$condition, case_group, file.path(figure_dir, "Heatmap_topDEG_rlog.png"), paste("Top differential", analysis_name, "genes"))
   }
 
   result_df$category <- ifelse(
@@ -293,10 +342,12 @@ for (analysis_name in names(analysis_classes)) {
   )
   write.table(status, file.path(table_dir, "comparison_status.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
   analysis_results[[analysis_name]] <- list(status = status, significant = significant)
+  status_index <- status_index + 1
+  all_statuses[[status_index]] <- status
 }
 
-summary_dir <- file.path(output_root, "tables", "summary")
-summary_figure_dir <- file.path(output_root, "figures", "summary")
+summary_dir <- file.path(output_root, "tables", "summary", comparison_id)
+summary_figure_dir <- file.path(output_root, "figures", "summary", comparison_id)
 dir.create(summary_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(summary_figure_dir, recursive = TRUE, showWarnings = FALSE)
 summary_table <- do.call(rbind, lapply(analysis_results, `[[`, "status"))
@@ -317,16 +368,21 @@ overlap_long <- rbind(
 grouped <- ggplot(overlap_long, aes(analysis, genes, fill = category)) + geom_col(position = "dodge") + scale_fill_manual(values = c(`Unique to gene class` = "#1e655d", `Common between gene classes` = "#a15d14")) + labs(title = "Differential gene-class summary", x = "Analysis", y = "Genes", fill = NULL) + theme_bw(base_size = 12) + theme(legend.position = "bottom")
 ggsave(file.path(summary_figure_dir, "GroupedPlot_Unique_vs_Common.pdf"), grouped, width = 8, height = 5)
 write.table(overlap_summary, file.path(summary_dir, "gene_class_overlap_status.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+}
+
+summary_root <- file.path(output_root, "tables", "summary")
+dir.create(summary_root, recursive = TRUE, showWarnings = FALSE)
+write.table(do.call(rbind, all_statuses), file.path(summary_root, "differential_expression_summary.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
 
 versions <- data.frame(
   component = c("R", "DESeq2", "tximport", "ggplot2"),
   version = c(R.version.string, as.character(packageVersion("DESeq2")), as.character(packageVersion("tximport")), as.character(packageVersion("ggplot2")))
 )
-write.table(versions, file.path(summary_dir, "software_versions.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(versions, file.path(summary_root, "software_versions.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
 write.table(
   data.frame(
     output = c("3D PCA", "2D PCA", "scree plot", "top-gene heatmap", "volcano plot", "MA plot", "p-value histogram", "adjusted p-value histogram", "fold-change density", "sample-distance heatmap", "DE count plots", "normalized matrices", "DE tables"),
     status = "generated"
   ),
-  file.path(summary_dir, "output_contract.tsv"), sep = "\t", quote = FALSE, row.names = FALSE
+  file.path(summary_root, "output_contract.tsv"), sep = "\t", quote = FALSE, row.names = FALSE
 )

@@ -62,9 +62,9 @@
       "additionalProperties": false,
       "required": ["cpus", "memory_gb", "max_parallel_tasks"],
       "properties": {
-        "cpus": { "type": "integer", "minimum": 1 },
-        "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
-        "max_parallel_tasks": { "type": "integer", "minimum": 1 }
+        "cpus": { "type": "integer", "minimum": 1, "description": "Total workflow CPU budget" },
+        "memory_gb": { "type": "number", "exclusiveMinimum": 0, "description": "Total workflow memory budget in GiB" },
+        "max_parallel_tasks": { "type": "integer", "minimum": 1, "description": "Maximum concurrent tasks across the whole workflow" }
       }
     },
     "execution_profile": { "enum": ["local", "docker", "apptainer"] },
@@ -85,10 +85,11 @@
       "required": ["sample_id", "r1_files", "r2_files", "condition", "biological_replicate", "batch", "covariates", "included"],
       "properties": {
         "sample_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-        "r1_files": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^/" } },
+        "r1_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
         "r2_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
-        "condition": { "type": "string", "minLength": 1 },
-        "biological_replicate": { "type": "string", "minLength": 1 },
+        "abundance_tsv": { "type": ["string", "null"], "pattern": "^/" },
+        "condition": { "type": "string" },
+        "biological_replicate": { "type": "string" },
         "batch": { "type": ["string", "null"] },
         "covariates": { "$ref": "#/$defs/scalarMap" },
         "included": { "type": "boolean" }
@@ -100,11 +101,11 @@
       "required": ["comparison_id", "numerator", "denominator"],
       "properties": {
         "comparison_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-        "numerator": { "type": "string", "minLength": 1 },
-        "denominator": { "type": "string", "minLength": 1 },
-        "label": { "type": ["string", "null"] }
+        "numerator": { "type": "string", "minLength": 1, "pattern": "^[^\\t\\r\\n]+$" },
+        "denominator": { "type": "string", "minLength": 1, "pattern": "^[^\\t\\r\\n]+$" },
+        "label": { "type": ["string", "null"] },
+        "intervention": { "type": ["string", "null"], "pattern": "^[^\\t\\r\\n]+$" }
       }
     }
   }
 }
-

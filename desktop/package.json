@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint . --max-warnings 0",
+    "test": "npm run test:coordinator && npm run test:api",
+    "test:api": "node test/api.test.mjs",
+    "test:coordinator": "node test/requestCoordinator.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "tauri": "tauri"
   },

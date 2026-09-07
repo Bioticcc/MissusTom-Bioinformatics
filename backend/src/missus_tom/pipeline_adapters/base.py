@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.preflight import PreflightCheck
-from missus_tom.models.run import PipelineStatusResult, PlannedStage, RunPlan
+from missus_tom.models.run import PipelineStatusResult, PlannedStage, RunPlan, RunStartStage
 
 
 class PipelineAdapter(ABC):
@@ -21,7 +21,12 @@ class PipelineAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def construct_command(self, manifest: ProjectManifest) -> list[str]:
+    def construct_command(
+        self,
+        manifest: ProjectManifest,
+        *,
+        start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+    ) -> list[str]:
         raise NotImplementedError
 
     @abstractmethod

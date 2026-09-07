@@ -22,5 +22,6 @@ cd "${project_root}/backend"
 
 cd "${project_root}/desktop"
 npm run lint
+npm test
 npm run typecheck
 npm run build

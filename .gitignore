@@ -40,3 +40,6 @@ results/
 .DS_Store
 .idea/
 .vscode/
+
+# Local agent checkpoints and validation logs
+.agent-work/

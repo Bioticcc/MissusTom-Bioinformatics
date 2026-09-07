@@ -44,7 +44,8 @@
       "comparison_id": "treatment_vs_control",
       "numerator": "treatment",
       "denominator": "control",
-      "label": "Treatment (test) vs control (reference)"
+      "label": "Treatment (test) vs control (reference)",
+      "intervention": null
     }
   ],
   "parameters": {
@@ -60,4 +61,3 @@
   "application_version": "0.1.0",
   "pipeline_status": "draft"
 }
-

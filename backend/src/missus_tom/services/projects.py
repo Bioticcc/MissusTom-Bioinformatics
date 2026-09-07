@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sqlite3
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from missus_tom.config import settings
 from missus_tom.models.manifest import ProjectManifest, ProjectSaveResult, ProjectValidationResult
 from missus_tom.models.preflight import CheckStatus
+from missus_tom.models.projects import ProjectSummary
 from missus_tom.services.preflight import project_preflight
 
 PROJECT_DIRECTORIES = (
@@ -25,6 +29,7 @@ PROJECT_DIRECTORIES = (
     "reports",
     "logs",
 )
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 def validate_project(manifest: ProjectManifest) -> ProjectValidationResult:
@@ -78,6 +83,89 @@ class ProjectHistoryStore:
                 (str(manifest.project_identifier), manifest.project_name, str(manifest_path)),
             )
 
+    def list_projects(self, *, limit: int = 50) -> list[ProjectSummary]:
+        if not self.database_path.is_file():
+            return []
+        with sqlite3.connect(f"{self.database_path.as_uri()}?mode=ro", uri=True) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).fetchone()
+            if not exists:
+                return []
+            rows = connection.execute(
+                "SELECT project_identifier, project_name, manifest_path, updated_at "
+                "FROM projects ORDER BY updated_at DESC, project_identifier LIMIT ?",
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        return [
+            ProjectSummary(
+                project_identifier=identifier,
+                project_name=name,
+                manifest_path=path,
+                updated_at=updated,
+                available=Path(path).is_file(),
+            )
+            for identifier, name, path, updated in rows
+        ]
+
+
+def read_project_manifest(path: Path) -> ProjectManifest:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("The project manifest must be a regular file")
+    with path.open("rb") as handle:
+        encoded = handle.read(MAX_MANIFEST_BYTES + 1)
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise ValueError("Project manifests must be smaller than 8 MiB")
+    return ProjectManifest.model_validate_json(encoded)
+
+
+def open_project(
+    manifest_path: Path,
+    *,
+    history_store: ProjectHistoryStore | None = None,
+) -> ProjectManifest:
+    """Load a saved manifest without rewriting it or requiring mounted inputs."""
+    path = manifest_path.expanduser().resolve(strict=True)
+    if not path.is_file() or path.suffix.lower() != ".json":
+        raise ValueError("Choose a saved project_manifest.json file")
+    manifest = read_project_manifest(path)
+    expected = Path(manifest.output_directory) / "input_manifest" / "project_manifest.json"
+    if path != expected.resolve(strict=False):
+        raise ValueError(
+            "This manifest is not in its saved project output directory. "
+            "Open the original input_manifest/project_manifest.json file."
+        )
+    (history_store or ProjectHistoryStore()).record(manifest, path)
+    return manifest
+
+
+def _validate_layout(project_root: Path) -> None:
+    for relative in PROJECT_DIRECTORIES:
+        candidate = project_root
+        for part in Path(relative).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise ValueError(f"Project directories must not be symbolic links: {candidate}")
+            if candidate.exists() and not candidate.is_dir():
+                raise ValueError(f"A project directory is occupied by a file: {candidate}")
+
+
+@contextmanager
+def _project_save_lock(project_root: Path) -> Iterator[None]:
+    logs = project_root / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(logs / ".active-run.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError(
+                "This project has an active workflow. Wait for it to stop before saving changes."
+            ) from exc
+        yield
+    finally:
+        os.close(descriptor)
+
 
 def save_project(
     manifest: ProjectManifest,
@@ -92,16 +180,25 @@ def save_project(
         raise ValueError("Project has blocking validation failures: " + "; ".join(blocking))
 
     project_directory = Path(manifest.output_directory)
+    _validate_layout(project_directory)
     project_directory.mkdir(parents=True, exist_ok=True)
-    created: list[str] = []
-    for relative in PROJECT_DIRECTORIES:
-        destination = project_directory / relative
-        destination.mkdir(parents=True, exist_ok=True)
-        created.append(str(destination))
+    with _project_save_lock(project_directory):
+        manifest_path = project_directory / "input_manifest" / "project_manifest.json"
+        if manifest_path.exists() or manifest_path.is_symlink():
+            existing = read_project_manifest(manifest_path)
+            if existing.project_identifier != manifest.project_identifier:
+                raise ValueError(
+                    "This output folder already belongs to another saved project. "
+                    "Open that project or choose a different output folder."
+                )
+        created: list[str] = []
+        for relative in PROJECT_DIRECTORIES:
+            destination = project_directory / relative
+            destination.mkdir(parents=True, exist_ok=True)
+            created.append(str(destination))
 
-    manifest_path = project_directory / "input_manifest" / "project_manifest.json"
-    written = _write_json_atomic(manifest_path, manifest.model_dump(mode="json"))
-    (history_store or ProjectHistoryStore()).record(manifest, manifest_path)
+        written = _write_json_atomic(manifest_path, manifest.model_dump(mode="json"))
+        (history_store or ProjectHistoryStore()).record(manifest, manifest_path)
     return ProjectSaveResult(
         project_directory=str(project_directory),
         manifest_path=str(manifest_path),

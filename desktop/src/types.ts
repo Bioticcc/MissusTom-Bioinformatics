@@ -33,12 +33,14 @@ export interface ProposedSample {
   sample_id: string;
   r1_files: string[];
   r2_files: string[];
+  abundance_tsv: string | null;
   lanes: string[];
-  pairing_status: "paired" | "single" | "unmatched" | "ambiguous";
+  pairing_status: "paired" | "single" | "unmatched" | "ambiguous" | "quantified";
   warnings: string[];
   condition: string;
   biological_replicate: string;
   batch: string | null;
+  covariates: Record<string, string | number | boolean | null>;
   included: boolean;
 }
 
@@ -52,11 +54,36 @@ export interface FastqDiscoveryResult {
   total_bytes: number;
 }
 
+export interface QuantificationDiscoveryResult {
+  directory: string;
+  samples: ProposedSample[];
+  files: Array<{ sample_id: string; path: string; size_bytes: number }>;
+  warnings: string[];
+  total_files: number;
+  total_bytes: number;
+}
+
+export interface MetadataCsvResult {
+  path: string;
+  rows: Array<{
+    sample_id: string;
+    condition: string;
+    batch: string | null;
+    biological_replicate: string | null;
+    intervention: string | null;
+    matched_sample_id: string | null;
+  }>;
+  warnings: string[];
+  unmatched_samples: string[];
+  unused_rows: string[];
+}
+
 export interface Comparison {
   comparison_id: string;
   numerator: string;
   denominator: string;
   label: string;
+  intervention: string | null;
 }
 
 export interface ProjectManifest {
@@ -79,6 +106,7 @@ export interface ProjectManifest {
     sample_id: string;
     r1_files: string[];
     r2_files: string[];
+    abundance_tsv: string | null;
     condition: string;
     biological_replicate: string;
     batch: string | null;
@@ -87,6 +115,7 @@ export interface ProjectManifest {
   }>;
   comparisons: Comparison[];
   parameters: Record<string, string | number | boolean | null>;
+  // Total workflow budgets; max_parallel_tasks applies across all stages.
   resource_profile: { cpus: number; memory_gb: number; max_parallel_tasks: number };
   execution_profile: "local" | "docker" | "apptainer";
   application_version: string;
@@ -122,7 +151,8 @@ export interface RunPlan {
   warnings: string[];
 }
 
-export type RunStatus = "queued" | "preparing" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "queued" | "preparing" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
+export type RunStartStage = "quantification" | "analysis";
 
 export interface RunRecord {
   job_identifier: string;
@@ -139,6 +169,30 @@ export interface RunRecord {
   exit_code: number | null;
   error_message: string | null;
   resume: boolean;
+  start_stage: RunStartStage;
+  nextflow_run_name: string | null;
+  resume_from_run_name: string | null;
+  process_id: number | null;
+  process_group_id: number | null;
+  process_start_ticks: number | null;
+  process_boot_id: string | null;
+  holds_admission: boolean;
+  container_cleanup_required: boolean;
+  container_cleanup_verified_at: string | null;
+}
+
+export interface ProjectSummary {
+  project_identifier: string;
+  project_name: string;
+  manifest_path: string;
+  updated_at: string;
+  available: boolean;
+}
+
+export interface OpenProjectResult {
+  manifest: ProjectManifest;
+  validation: ProjectValidation;
+  plan: RunPlan;
 }
 
 export interface RunLog {

@@ -22,7 +22,7 @@ configure_logging()
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
-    run_manager.cancel_all()
+    run_manager.shutdown()
 
 
 app = FastAPI(
@@ -62,15 +62,21 @@ async def http_exception_handler(_request: Request, exc: StarletteHTTPException)
 async def validation_exception_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    errors = [
-        ErrorDetail(
-            code="validation_error",
-            message=error["msg"],
-            field=".".join(str(part) for part in error["loc"]),
-            context={"type": error["type"]},
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for error in exc.errors():
+        grouped.setdefault(error["msg"], []).append(error)
+    errors: list[ErrorDetail] = []
+    for message, matching in grouped.items():
+        first = matching[0]
+        count = len(matching)
+        errors.append(
+            ErrorDetail(
+                code="validation_error",
+                message=f"{message} ({count} fields)" if count > 1 else message,
+                field=".".join(str(part) for part in first["loc"]),
+                context={"type": first["type"], "field_count": count},
+            )
         )
-        for error in exc.errors()
-    ]
     return _error_response(422, errors)
 
 

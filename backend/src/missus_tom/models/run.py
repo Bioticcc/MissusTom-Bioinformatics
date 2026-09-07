@@ -55,18 +55,26 @@ class RunPlanRequest(BaseModel):
     manifest: ProjectManifest
 
 
+class RunStartStage(StrEnum):
+    QUANTIFICATION = "quantification"
+    ANALYSIS = "analysis"
+
+
 class RunStartRequest(BaseModel):
     manifest: ProjectManifest
     resume: bool = True
+    start_stage: RunStartStage = RunStartStage.QUANTIFICATION
 
 
 class RunStatus(StrEnum):
     QUEUED = "queued"
     PREPARING = "preparing"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class RunRecord(BaseModel):
@@ -84,6 +92,16 @@ class RunRecord(BaseModel):
     exit_code: int | None = None
     error_message: str | None = None
     resume: bool = True
+    nextflow_run_name: str | None = None
+    resume_from_run_name: str | None = None
+    start_stage: RunStartStage = RunStartStage.QUANTIFICATION
+    process_id: int | None = None
+    process_group_id: int | None = None
+    process_start_ticks: int | None = None
+    process_boot_id: str | None = None
+    holds_admission: bool = False
+    container_cleanup_required: bool = False
+    container_cleanup_verified_at: datetime | None = None
 
 
 class RunLog(BaseModel):
