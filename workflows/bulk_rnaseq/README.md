@@ -25,12 +25,37 @@ BioContainer inputs are pinned by SHA-256 digest in `conf/resources.config`.
 The differential-expression image is built from the digest-pinned Bioconductor
 base with `scripts/build-analysis-image.sh`. Containers run without network
 access. Nextflow reports, trace data, and the work directory are retained for
-auditing and `-resume`. Local tasks have no fixed wall-time limit because input
-size and analysis duration vary; operators can cancel a stuck run explicitly.
-A task terminated by a native segmentation fault (exit 139) is retried once;
-Kallisto also retries a native abort (exit 134) once. Other failures terminate
-immediately so validation, resource, and operator errors are not hidden by
-automatic restarts.
+auditing and `-resume`. Most local tasks have no fixed wall-time limit because
+input size and analysis duration vary. Each per-sample Kallisto quantification
+has a two-hour watchdog. The watchdog sends `TERM`, escalates to `KILL` after 60
+seconds, and marks the attempt with exit 240. Kallisto retries that timeout once,
+then fails the run cleanly if the second attempt also reaches two hours. A task
+terminated by a native segmentation fault (exit 139) is retried once; FastQC and
+Kallisto also retry a native abort (exit 134) once. FastQC normally
+analyzes the staged reads for one sample together with up to two task threads.
+On its native-crash retry, it invokes FastQC separately for every staged read
+with one thread, isolating R1, R2, and any lanes in separate JVM processes while
+preserving every declared report. Each isolated read gets one additional attempt
+if its first one-thread invocation exits 134 or 139. The retry count is bounded;
+an isolated read that crashes twice, or any other failure, terminates the task so
+validation, resource, and operator errors are not hidden by automatic restarts.
+
+This fallback preserves a reliability lesson from the original BulkRnaSeq
+scripts. Those scripts reduced normal FastQC execution from 16 to eight threads
+and batches of 32 files, but historical runs still encountered intermittent JVM
+crashes. Retrying each file separately with one thread allowed all 464 human and
+142 mouse FASTQ report pairs to validate. The number eight was the normal batch
+thread setting; the proven recovery mechanism was one file in a one-thread JVM.
+This changes execution isolation only, not FastQC inputs, version, reports, or
+interpretation.
+
+The Kallisto watchdog uses an explicit task-local process monitor rather than
+Nextflow's `time` directive. Supported local-executor versions can report a
+timeout without a usable exit status, preventing the configured retry from
+running. Exit 240 is reserved for this watchdog. No userspace watchdog can reap
+a process blocked indefinitely in uninterruptible kernel I/O; Missus Tom's
+owned-container cleanup gate remains the final
+safety mechanism for that operating-system failure mode.
 
 ## Local resource containment
 

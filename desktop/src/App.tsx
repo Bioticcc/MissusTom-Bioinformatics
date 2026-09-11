@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Dashboard } from "./screens/Dashboard";
 import { Jobs } from "./screens/Jobs";
 import { NewProjectWizard } from "./screens/NewProjectWizard";
 import { Results } from "./screens/Results";
 import { RunPlanScreen } from "./screens/RunPlanScreen";
 import { Settings } from "./screens/Settings";
+import { apiRequest } from "./api";
+import { isDesktopShell, setRunOverlayActive } from "./native";
+import { selectActiveRun } from "./runOverlayState";
 import type { ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
 
 const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
@@ -21,6 +24,35 @@ export default function App() {
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
+  const [runPollError, setRunPollError] = useState("");
+
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    let live = true;
+    let controller: AbortController | undefined;
+    let timer: number | undefined;
+    const refresh = async () => {
+      controller = new AbortController();
+      try {
+        const runs = await apiRequest<RunRecord[]>("/api/v1/runs", { signal: controller.signal });
+        const active = selectActiveRun(runs);
+        if (!live || controller.signal.aborted) return;
+        setActiveRun(active);
+        setRunPollError("");
+        try {
+          await setRunOverlayActive(Boolean(active));
+        } catch (reason) {
+          if (live) setRunPollError(reason instanceof Error ? reason.message : "The minimized run window could not be updated.");
+        }
+      } catch (reason) {
+        if (live && !controller.signal.aborted) setRunPollError(reason instanceof Error ? reason.message : "Run status could not be refreshed.");
+      } finally {
+        if (live && !controller?.signal.aborted) timer = window.setTimeout(() => void refresh(), 2_000);
+      }
+    };
+    void refresh();
+    return () => { live = false; controller?.abort(); if (timer !== undefined) window.clearTimeout(timer); };
+  }, []);
 
   const projectReady = (nextManifest: ProjectManifest, nextPlan: RunPlan) => {
     setManifest(nextManifest);
@@ -70,6 +102,7 @@ export default function App() {
       </aside>
 
       <main className="main-content" id="main-content">
+        {runPollError && <div className="inline-error" role="alert">{runPollError}</div>}
         {activeView === "dashboard" && (
           <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
         )}

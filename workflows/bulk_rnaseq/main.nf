@@ -41,11 +41,40 @@ process FASTQC_RAW {
     path "*_fastqc.zip", emit: archives
 
     script:
-    def read_args = (asFileList(read1_files) + asFileList(read2_files))
-        .collect { shellQuote(it) }
-        .join(' ')
+    def reads = asFileList(read1_files) + asFileList(read2_files)
+    def read_args = reads.collect { shellQuote(it) }.join(' ')
+    def isolated_read_args = reads.collect { shellQuote(it) }.join(' ')
+    def fastqc_commands = task.attempt > 1
+        ? """
+          run_fastqc_with_native_retry() {
+              local read="\$1"
+              local max_attempts=2
+              local attempt=1
+              local fastqc_status=0
+
+              while (( attempt <= max_attempts )); do
+                  fastqc_status=0
+                  fastqc --threads 1 --outdir . "\$read" || fastqc_status=\$?
+                  if (( fastqc_status == 0 )); then
+                      return 0
+                  fi
+                  if (( fastqc_status != 134 && fastqc_status != 139 )); then
+                      return "\$fastqc_status"
+                  fi
+                  if (( attempt >= max_attempts )); then
+                      return "\$fastqc_status"
+                  fi
+                  attempt=\$((attempt + 1))
+              done
+          }
+
+          for read in ${isolated_read_args}; do
+              run_fastqc_with_native_retry "\$read"
+          done
+          """.stripIndent().trim()
+        : "fastqc --threads ${task.cpus} --outdir . ${read_args}"
     """
-    fastqc --threads ${task.cpus} --outdir . ${read_args}
+    ${fastqc_commands}
     """
 }
 
@@ -123,8 +152,39 @@ process FASTQC_CLEAN {
     path "*_fastqc.zip", emit: archives
 
     script:
+    def reads = [read1, read2]
+    def isolated_read_args = reads.collect { shellQuote(it) }.join(' ')
+    def fastqc_commands = task.attempt > 1
+        ? """
+          run_fastqc_with_native_retry() {
+              local read="\$1"
+              local max_attempts=2
+              local attempt=1
+              local fastqc_status=0
+
+              while (( attempt <= max_attempts )); do
+                  fastqc_status=0
+                  fastqc --threads 1 --outdir . "\$read" || fastqc_status=\$?
+                  if (( fastqc_status == 0 )); then
+                      return 0
+                  fi
+                  if (( fastqc_status != 134 && fastqc_status != 139 )); then
+                      return "\$fastqc_status"
+                  fi
+                  if (( attempt >= max_attempts )); then
+                      return "\$fastqc_status"
+                  fi
+                  attempt=\$((attempt + 1))
+              done
+          }
+
+          for read in ${isolated_read_args}; do
+              run_fastqc_with_native_retry "\$read"
+          done
+          """.stripIndent().trim()
+        : "fastqc --threads ${task.cpus} --outdir . ${read1} ${read2}"
     """
-    fastqc --threads ${task.cpus} --outdir . ${read1} ${read2}
+    ${fastqc_commands}
     """
 }
 
@@ -163,12 +223,37 @@ process KALLISTO_QUANT {
     def read1_arg = shellQuote(read1)
     def read2_arg = shellQuote(read2)
     """
+    set +e
+    timeout_marker=.kallisto_time_limit_exceeded
+    rm -f "\$timeout_marker"
+
     kallisto quant \
       --index ${index_arg} \
       ${strand_flag} \
       --threads ${task.cpus} \
       --output-dir ${sample_id} \
-      ${read1_arg} ${read2_arg}
+      ${read1_arg} ${read2_arg} &
+    kallisto_pid=\$!
+
+    (
+      sleep 7200
+      kill -0 "\$kallisto_pid" 2>/dev/null || exit 0
+      : > "\$timeout_marker"
+      kill -TERM "\$kallisto_pid" 2>/dev/null || true
+      sleep 60
+      kill -KILL "\$kallisto_pid" 2>/dev/null || true
+    ) &
+    watchdog_pid=\$!
+
+    wait "\$kallisto_pid"
+    kallisto_status=\$?
+    kill "\$watchdog_pid" 2>/dev/null || true
+    wait "\$watchdog_pid" 2>/dev/null || true
+
+    if [[ -f "\$timeout_marker" ]]; then
+      exit 240
+    fi
+    exit "\$kallisto_status"
     """
 }
 

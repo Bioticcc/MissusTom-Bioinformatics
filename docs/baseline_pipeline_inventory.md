@@ -126,6 +126,17 @@ compatibility require scientific confirmation.
 These are all current code behavior, not safe biological defaults for a generic
 GUI.
 
+Historical FastQC reliability evidence clarifies the eight-thread default. Older
+human runs passed all FASTQs to a single 16-thread FastQC JVM and repeatedly
+ended with native `SIGSEGV`/exit 134 failures. Later scripts used eight threads
+and batches of 32 files, but native crashes still occurred. Their recovery path
+retried each affected FASTQ separately with `fastqc -t 1`, allowing up to two
+one-thread attempts per file; dated human and mouse logs show that fallback
+completing and validating all expected reports. Thus
+eight was the reduced normal batch setting, while one file in a one-thread JVM
+was the effective crash fallback. This is execution-reliability evidence and
+does not change QC interpretation.
+
 ## Outputs observed
 
 QC/quantification writes raw and clean FastQC/MultiQC reports, trimmed FASTQs,
@@ -157,4 +168,3 @@ resumability contract. R stages are not safely stage-resumable. Existing scripts
 can initially be invoked behind tightly validated adapters in controlled tests,
 but paths, lane handling, references, resources, experimental designs, and
 outputs must be parameterized before general use.
-

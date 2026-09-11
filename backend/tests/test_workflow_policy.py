@@ -31,8 +31,109 @@ def test_workflow_retries_native_crashes_once() -> None:
 
     assert "task.exitStatus == 139 ? 'retry' : 'terminate'" in config
     assert re.search(r"^\s*maxRetries\s*=\s*1\s*$", config, re.MULTILINE)
-    assert "task.exitStatus in [134, 139] ? 'retry' : 'terminate'" in resources
-    assert resources.count("maxRetries = 1") == 1
+    native_retry_policy = "task.exitStatus in [134, 139] ? 'retry' : 'terminate'"
+    kallisto_retry_policy = "task.exitStatus in [134, 139, 240] ? 'retry' : 'terminate'"
+    fastqc_block = re.search(
+        r"withLabel:\s*fastqc\s*\{(?P<body>.*?)^\s*\}", resources, re.MULTILINE | re.DOTALL
+    )
+    kallisto_block = re.search(
+        r"withLabel:\s*kallisto\s*\{(?P<body>.*?)^\s*\}", resources, re.MULTILINE | re.DOTALL
+    )
+
+    assert fastqc_block is not None
+    assert native_retry_policy in fastqc_block.group("body")
+    assert "maxRetries = 1" in fastqc_block.group("body")
+    assert kallisto_block is not None
+    assert kallisto_retry_policy in kallisto_block.group("body")
+    assert "maxRetries = 1" in kallisto_block.group("body")
+
+
+def test_kallisto_watchdog_defines_bounded_two_hour_retry_signal() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow = (repository_root / "workflows" / "bulk_rnaseq" / "main.nf").read_text(
+        encoding="utf-8"
+    )
+    process_block = re.search(
+        r"process KALLISTO_QUANT \{(?P<body>.*?)^\}",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+
+    assert process_block is not None
+    body = process_block.group("body")
+    assert "sleep 7200" in body
+    assert re.search(r'kill -0 ["\']?\\?\$kallisto_pid', body)
+    assert re.search(r'kill -TERM ["\']?\\?\$kallisto_pid', body)
+    assert "sleep 60" in body
+    assert re.search(r'kill -KILL ["\']?\\?\$kallisto_pid', body)
+    assert re.search(r'wait ["\']?\\?\$kallisto_pid', body)
+    assert re.search(r"kallisto_status\s*=\s*\\?\$\?", body)
+    assert ".kallisto_time_limit_exceeded" in body
+    assert "exit 240" in body
+    assert re.search(r'exit ["\']?\\?\$kallisto_status', body)
+
+
+def test_fastqc_retry_isolates_each_staged_fastq_in_a_one_thread_jvm() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow = (repository_root / "workflows" / "bulk_rnaseq" / "main.nf").read_text(
+        encoding="utf-8"
+    )
+
+    for process_name in ("FASTQC_RAW", "FASTQC_CLEAN"):
+        process_block = re.search(
+            rf"process {process_name} \{{(?P<body>.*?)^\}}",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        assert process_block is not None
+        body = process_block.group("body")
+        assert re.search(r"task\.attempt\s*>\s*1", body)
+        assert "run_fastqc_with_native_retry" in body
+        assert "fastqc --threads ${task.cpus} --outdir ." in body
+
+
+def test_fastqc_isolated_fallback_retries_each_file_once_for_native_crashes_only() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow = (repository_root / "workflows" / "bulk_rnaseq" / "main.nf").read_text(
+        encoding="utf-8"
+    )
+
+    # A native JVM crash is recoverable once per staged file.  Any other FastQC
+    # failure must retain its original status so Nextflow's error strategy can
+    # terminate the task rather than masking a real input/tool failure.
+    for process_name in ("FASTQC_RAW", "FASTQC_CLEAN"):
+        process_block = re.search(
+            rf"process {process_name} \{{(?P<body>.*?)^\}}",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        assert process_block is not None
+        body = process_block.group("body")
+        fallback = re.search(
+            r"run_fastqc_with_native_retry\s*\(\)\s*\{(?P<body>.*?)^\s*\}",
+            body,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        assert fallback is not None
+        fallback_body = fallback.group("body")
+        assert re.search(r"local\s+max_attempts\s*=\s*2\b", fallback_body)
+        assert re.search(r"while\s+\(\(\s*attempt\s*<=\s*max_attempts\s*\)\)", fallback_body)
+        assert re.search(
+            r"fastqc\s+--threads\s+1\s+--outdir\s+\.\s+['\"]?\\?\$read['\"]?",
+            fallback_body,
+        )
+        assert re.search(r"fastqc_status\s*=\s*\\?\$\?", fallback_body)
+        assert re.search(
+            r"fastqc_status\s*(?:-eq|-ne|==|!=)\s*134.*?"
+            r"fastqc_status\s*(?:-eq|-ne|==|!=)\s*139",
+            fallback_body,
+            re.DOTALL,
+        )
+        assert re.search(r"attempt\s*(?:-ge|>=)\s*max_attempts", fallback_body)
+        assert re.search(r"return\s+['\"]?\\?\$fastqc_status", fallback_body)
 
 
 def test_workflow_resource_profile_is_a_total_local_executor_budget() -> None:

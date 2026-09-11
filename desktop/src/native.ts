@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-function isDesktopShell() {
+export function isDesktopShell() {
   return "__TAURI_INTERNALS__" in window;
 }
 
@@ -41,4 +42,19 @@ export async function openDirectory(path: string): Promise<void> {
     throw new Error("Opening folders is available in the desktop application.");
   }
   await invoke("open_directory", { path });
+}
+
+export async function setRunOverlayActive(active: boolean): Promise<void> {
+  if (!isDesktopShell()) return;
+  await invoke("set_run_overlay_active", { active });
+}
+
+export async function restoreMainWindow(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await invoke("restore_main_window");
+}
+
+export async function startOverlayDragging(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await getCurrentWindow().startDragging();
 }

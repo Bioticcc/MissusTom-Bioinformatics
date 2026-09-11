@@ -105,6 +105,12 @@ On the run-plan screen:
 5. Use **Jobs** for status and logs.
 6. Use **Results** for files written by the workflow.
 
+Minimizing the desktop app during an active run opens a small, always-on-top
+status overlay at the bottom left of the screen. It shows the project name,
+start time, reported pipeline stage, and latest log message. Drag its header to
+move it, or select **Open app** to restore the main window. The overlay hides
+when the main window is restored or the run is no longer active.
+
 Runs use the persistent Nextflow work directory under the project. Resume targets
 a recorded Nextflow session from the same project, preferring the same start
 stage. With no eligible session, the run starts without a resume target. Older

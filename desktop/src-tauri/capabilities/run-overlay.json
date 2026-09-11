@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "run-overlay",
+  "description": "Native permissions required by the temporary run-status overlay",
+  "windows": ["run-overlay"],
+  "permissions": ["core:window:allow-start-dragging"]
+}

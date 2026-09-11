@@ -35,6 +35,54 @@ body {
     var(--canvas);
 }
 
+body:has(.run-overlay) {
+  min-width: 0;
+}
+
+.run-overlay {
+  min-width: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 0.75rem;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.run-overlay-drag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -0.75rem -0.75rem 0.7rem;
+  padding: 0.48rem 0.68rem;
+  color: #d9f0e8;
+  background: var(--green-950);
+  cursor: grab;
+  font-family: Georgia, serif;
+  font-size: 0.82rem;
+}
+
+.run-overlay-restore {
+  border: 0;
+  border-radius: 5px;
+  padding: 0.18rem 0.42rem;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 0.7rem;
+}
+
+.run-overlay-heading { display: flex; align-items: start; justify-content: space-between; gap: 0.45rem; }
+.run-overlay-heading > div { min-width: 0; flex: 1; }
+.run-overlay-heading p { margin-bottom: 0.18rem; color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.run-overlay-heading h1 { max-width: 100%; margin: 0; overflow: hidden; font-size: 1.35rem; text-overflow: ellipsis; white-space: nowrap; }
+.run-overlay .job-state { flex: 0 0 auto; font-size: 0.66rem; }
+.run-overlay dl { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 0.28rem 0.45rem; margin: 0.75rem 0; font-size: 0.75rem; }
+.run-overlay dt { color: var(--muted); }
+.run-overlay dd { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-overlay-log, .run-overlay-error { display: -webkit-box; overflow: hidden; margin: 0; border-radius: 7px; padding: 0.5rem 0.6rem; font-size: 0.72rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.run-overlay-log { background: var(--soft); }
+.run-overlay-error { margin-top: 0.45rem; color: #7e2f2f; background: var(--red-soft); }
+.run-overlay-empty { margin: 2rem 0; color: var(--muted); text-align: center; }
+
 button,
 input,
 select,
