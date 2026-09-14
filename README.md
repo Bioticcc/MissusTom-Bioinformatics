@@ -105,6 +105,9 @@ On the run-plan screen:
 5. Use **Jobs** for status and logs.
 6. Use **Results** for files written by the workflow.
 
+Active run logs receive a timestamped heartbeat every 30 minutes. Successful
+runs end with an explicit UTC `Completed at` timestamp.
+
 Minimizing the desktop app during an active run opens a small, always-on-top
 status overlay at the bottom left of the screen. It shows the project name,
 start time, reported pipeline stage, and latest log message. Drag its header to

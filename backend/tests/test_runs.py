@@ -61,6 +61,16 @@ class SleepingAdapter(StubAdapter):
         ]
 
 
+class HeartbeatAdapter(StubAdapter):
+    def construct_command(
+        self,
+        _manifest: ProjectManifest,
+        *,
+        start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+    ) -> list[str]:
+        return [sys.executable, "-c", "import time; time.sleep(0.12)"]
+
+
 class DescendantAdapter(SleepingAdapter):
     def construct_command(
         self,
@@ -117,7 +127,33 @@ def test_run_manager_captures_status_and_log(
 
     assert record.status == RunStatus.COMPLETED
     assert record.exit_code == 0
-    assert "controlled-run-ok" in manager.read_log(started.job_identifier).text
+    assert record.finished_at is not None
+    log_text = manager.read_log(started.job_identifier).text
+    assert "controlled-run-ok" in log_text
+    completed_at = record.finished_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+    assert f"Completed at {completed_at}." in log_text
+
+
+def test_run_manager_writes_timestamped_heartbeats(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    monkeypatch.setattr(runs_module, "CHECK_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runs_module, "HEARTBEAT_INTERVAL_SECONDS", 0.03)
+    manager = RunManager(HeartbeatAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+
+    started = manager.start(manifest)
+    record = wait_for_terminal(manager, started.job_identifier)
+    log_text = manager.read_log(started.job_identifier).text
+
+    assert record.status == RunStatus.COMPLETED
+    assert "Heartbeat at " in log_text
+    assert ": workflow is still running." in log_text
+    assert "Completed at " in log_text
 
 
 def test_run_manager_can_start_without_resume(

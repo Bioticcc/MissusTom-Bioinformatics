@@ -14,6 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -33,6 +34,7 @@ ACTIVE_STATUSES = {
 TERM_GRACE_SECONDS = 10
 KILL_GRACE_SECONDS = 5
 DOCKER_COMMAND_TIMEOUT_SECONDS = 8
+HEARTBEAT_INTERVAL_SECONDS = 30 * 60
 
 
 @dataclass(frozen=True)
@@ -343,7 +345,7 @@ class RunManager:
                         record.status = RunStatus.RUNNING
                         record.current_stage = "Nextflow workflow"
                         self._persist(record)
-                exit_code = self._wait_for_process_with_monitor(job_identifier, process)
+                exit_code = self._wait_for_process_with_monitor(job_identifier, process, log_handle)
             self._finish_process(job_identifier, exit_code)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             with self._lock:
@@ -408,7 +410,8 @@ class RunManager:
             record = self._records[job_identifier]
             if not record.holds_admission:
                 return
-            record.finished_at = datetime.now(UTC)
+            finished_at = datetime.now(UTC)
+            record.finished_at = finished_at
             record.container_cleanup_verified_at = datetime.now(UTC)
             record.holds_admission = False
             if cancelling:
@@ -422,23 +425,65 @@ class RunManager:
                 record.current_stage = "Failed"
                 record.error_message = f"Nextflow exited with status {exit_code}"
             self._persist_safely(record)
+            if record.status == RunStatus.COMPLETED:
+                self._append_log_line_safely(
+                    Path(record.log_path),
+                    f"Completed at {self._format_log_timestamp(finished_at)}.\n",
+                )
             self._release_locks(job_identifier)
 
     def _wait_for_process_with_monitor(
-        self, job_identifier: str, process: subprocess.Popen[str]
+        self,
+        job_identifier: str,
+        process: subprocess.Popen[str],
+        log_handle: TextIO,
     ) -> int:
         with self._lock:
             record = self._records[job_identifier]
             monitor = ResourceMonitor(Path(record.results_directory).parent)
         cancellation_requested = False
+        next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
         while True:
             try:
                 return process.wait(timeout=CHECK_INTERVAL_SECONDS)
             except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    self._write_log_line_safely(
+                        log_handle,
+                        "Heartbeat at "
+                        f"{self._format_log_timestamp(datetime.now(UTC))}: "
+                        "workflow is still running.\n",
+                    )
+                    next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
                 reason = monitor.check()
                 if reason is not None and not cancellation_requested:
                     self.cancel(job_identifier, reason=reason)
                     cancellation_requested = True
+
+    @staticmethod
+    def _format_log_timestamp(value: datetime) -> str:
+        return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    @staticmethod
+    def _write_log_line_safely(handle: TextIO, line: str) -> None:
+        with suppress(OSError, ValueError):
+            handle.write(line)
+            handle.flush()
+
+    @staticmethod
+    def _append_log_line_safely(path: Path, line: str) -> None:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+        except (OSError, ValueError):
+            return
 
     def _finish_cancelled_before_launch(self, record: RunRecord) -> None:
         record.status = RunStatus.CANCELLED
