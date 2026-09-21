@@ -5,6 +5,11 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 backend_root="${repository_root}/backend"
 desktop_binaries="${repository_root}/desktop/src-tauri/binaries"
 target="${1:-x86_64-unknown-linux-gnu}"
+sidecar_python="${MISSUS_TOM_SIDECAR_PYTHON:-${backend_root}/.venv/bin/python}"
+
+if [[ "${sidecar_python}" != /* ]]; then
+  sidecar_python="$(pwd -P)/${sidecar_python}"
+fi
 
 case "${target}" in
   x86_64-unknown-linux-gnu)
@@ -14,6 +19,17 @@ case "${target}" in
     exit 2
     ;;
 esac
+
+if [[ ! -x "${sidecar_python}" ]]; then
+  echo "Sidecar build requires an executable backend Python interpreter at ${sidecar_python}." >&2
+  echo "Create backend/.venv and install backend[dev,packaging], or set MISSUS_TOM_SIDECAR_PYTHON." >&2
+  exit 1
+fi
+
+if ! "${sidecar_python}" -c "import PyInstaller"; then
+  echo "PyInstaller is not installed for ${sidecar_python}. Install backend[dev,packaging] there." >&2
+  exit 1
+fi
 
 resource_stage="${backend_root}/build/sidecar-resources"
 rm -rf "${resource_stage}"
@@ -25,7 +41,7 @@ export MISSUS_TOM_SIDECAR_TARGET="${target}"
 export MISSUS_TOM_SIDECAR_RESOURCE_STAGE="${resource_stage}"
 
 cd "${backend_root}"
-python -m PyInstaller \
+"${sidecar_python}" -m PyInstaller \
   --noconfirm \
   --clean \
   --distpath "${backend_root}/dist/sidecars" \
