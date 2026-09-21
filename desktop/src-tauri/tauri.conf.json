@@ -27,7 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["appimage", "deb"],
-    "category": "Science",
+    "category": "Medical",
     "shortDescription": "Local multi-pipeline bioinformatics workbench",
     "longDescription": "Configure and validate local human bulk RNA-seq and mouse ONT modified-base projects, with controlled execution.",
     "icon": [
