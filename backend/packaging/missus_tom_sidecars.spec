@@ -13,8 +13,11 @@ resource_stage = Path(os.environ["MISSUS_TOM_SIDECAR_RESOURCE_STAGE"])
 if not resource_stage.is_dir():
     raise SystemExit(f"Resource staging directory is missing: {resource_stage}")
 
+backend_root = Path(SPECPATH).resolve().parent
+source_root = backend_root / "src"
+
 common = {
-    "pathex": ["src"],
+    "pathex": [str(source_root)],
     "binaries": [],
     "datas": [(str(resource_stage), "resources")],
     "hiddenimports": [],
@@ -25,7 +28,7 @@ common = {
     "noarchive": False,
 }
 
-api_analysis = Analysis(["src/missus_tom/main.py"], **common)
+api_analysis = Analysis([str(source_root / "missus_tom" / "main.py")], **common)
 api_pyz = PYZ(api_analysis.pure)
 EXE(
     api_pyz,
@@ -37,7 +40,7 @@ EXE(
     console=True,
 )
 
-runner_analysis = Analysis(["src/missus_tom/ont_runner.py"], **common)
+runner_analysis = Analysis([str(source_root / "missus_tom" / "ont_runner.py")], **common)
 runner_pyz = PYZ(runner_analysis.pure)
 EXE(
     runner_pyz,
