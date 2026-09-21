@@ -79,10 +79,27 @@ jobs:
           esac
 
           bundle_root="desktop/src-tauri/target/${TAURI_TARGET}/release/bundle"
-          appimage_source="${bundle_root}/appimage/Missus Tom_${package_version}_amd64.AppImage"
-          deb_source="${bundle_root}/deb/missus-tom_${package_version}_amd64.deb"
-          test -f "${appimage_source}"
-          test -f "${deb_source}"
+          shopt -s nullglob
+          appimage_candidates=("${bundle_root}/appimage/"*.AppImage)
+          deb_candidates=("${bundle_root}/deb/"*.deb)
+
+          if (( ${#appimage_candidates[@]} != 1 )); then
+            echo "Expected exactly one AppImage under ${bundle_root}/appimage; found ${#appimage_candidates[@]}." >&2
+            for candidate in "${appimage_candidates[@]}"; do
+              printf '  %s\n' "${candidate}" >&2
+            done
+            exit 1
+          fi
+          if (( ${#deb_candidates[@]} != 1 )); then
+            echo "Expected exactly one Debian package under ${bundle_root}/deb; found ${#deb_candidates[@]}." >&2
+            for candidate in "${deb_candidates[@]}"; do
+              printf '  %s\n' "${candidate}" >&2
+            done
+            exit 1
+          fi
+
+          appimage_source="${appimage_candidates[0]}"
+          deb_source="${deb_candidates[0]}"
 
           package_contents=$(mktemp)
           trap 'rm -f "${package_contents}"' EXIT
