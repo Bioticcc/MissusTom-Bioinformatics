@@ -25,6 +25,7 @@ dev = [
 ]
 packaging = [
   "pyinstaller==6.11.1",
+  "backports.tarfile>=1.2,<2; python_version < '3.12'",
 ]
 
 [project.scripts]

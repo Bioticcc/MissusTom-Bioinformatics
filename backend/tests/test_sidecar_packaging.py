@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 
@@ -41,6 +42,17 @@ def _run_script(
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def test_packaging_extra_includes_python_311_tarfile_backport() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+
+    assert (
+        "backports.tarfile>=1.2,<2; python_version < '3.12'"
+        in project["optional-dependencies"]["packaging"]
     )
 
 
