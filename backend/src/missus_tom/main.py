@@ -82,7 +82,7 @@ async def validation_exception_handler(
 
 
 def run() -> None:
-    uvicorn.run("missus_tom.main:app", host=settings.api_host, port=settings.api_port, reload=False)
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port, reload=False)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import missus_tom.config as config_module
+import missus_tom.main as main_module
 from missus_tom.config import settings
 
 
@@ -61,3 +62,26 @@ def test_api_port_rejects_invalid_values(monkeypatch: pytest.MonkeyPatch, port: 
 
     with pytest.raises(ValueError, match="MISSUS_TOM_API_PORT"):
         _ = settings.api_port
+
+
+def test_run_starts_uvicorn_with_existing_app_and_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(application: object, **kwargs: object) -> None:
+        captured["application"] = application
+        captured.update(kwargs)
+
+    monkeypatch.setattr(main_module.uvicorn, "run", fake_run)
+    monkeypatch.setenv("MISSUS_TOM_API_HOST", "localhost")
+    monkeypatch.setenv("MISSUS_TOM_API_PORT", "8765")
+
+    main_module.run()
+
+    assert captured == {
+        "application": main_module.app,
+        "host": "localhost",
+        "port": 8765,
+        "reload": False,
+    }
