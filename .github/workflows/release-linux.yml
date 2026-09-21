@@ -68,13 +68,19 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          version="${RELEASE_TAG#v}"
+          release_version="${RELEASE_TAG#v}"
           package_version=$(node -p "require('./desktop/package.json').version")
-          test "${version}" = "${package_version}"
+          case "${release_version}" in
+            "${package_version}"|"${package_version}"-*) ;;
+            *)
+              echo "Tag ${RELEASE_TAG} does not match package version ${package_version}." >&2
+              exit 1
+              ;;
+          esac
 
           bundle_root="desktop/src-tauri/target/${TAURI_TARGET}/release/bundle"
-          appimage_source="${bundle_root}/appimage/Missus Tom_${version}_amd64.AppImage"
-          deb_source="${bundle_root}/deb/missus-tom_${version}_amd64.deb"
+          appimage_source="${bundle_root}/appimage/Missus Tom_${package_version}_amd64.AppImage"
+          deb_source="${bundle_root}/deb/missus-tom_${package_version}_amd64.deb"
           test -f "${appimage_source}"
           test -f "${deb_source}"
 
@@ -105,13 +111,13 @@ jobs:
 
           artifact_directory="release-artifacts"
           mkdir -p "${artifact_directory}"
-          install -m 0755 "${appimage_source}" "${artifact_directory}/missus-tom_${version}_linux-x86_64.AppImage"
-          install -m 0644 "${deb_source}" "${artifact_directory}/missus-tom_${version}_linux-x86_64.deb"
+          install -m 0755 "${appimage_source}" "${artifact_directory}/missus-tom_${release_version}_linux-x86_64.AppImage"
+          install -m 0644 "${deb_source}" "${artifact_directory}/missus-tom_${release_version}_linux-x86_64.deb"
           (
             cd "${artifact_directory}"
             sha256sum \
-              "missus-tom_${version}_linux-x86_64.AppImage" \
-              "missus-tom_${version}_linux-x86_64.deb" >SHA256SUMS
+              "missus-tom_${release_version}_linux-x86_64.AppImage" \
+              "missus-tom_${release_version}_linux-x86_64.deb" >SHA256SUMS
           )
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
@@ -135,10 +141,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          version="${RELEASE_TAG#v}"
+          release_version="${RELEASE_TAG#v}"
+          release_flags=()
+          if [[ "${release_version}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "${RELEASE_TAG}" \
-            "release-artifacts/missus-tom_${version}_linux-x86_64.AppImage" \
-            "release-artifacts/missus-tom_${version}_linux-x86_64.deb" \
+            "release-artifacts/missus-tom_${release_version}_linux-x86_64.AppImage" \
+            "release-artifacts/missus-tom_${release_version}_linux-x86_64.deb" \
             release-artifacts/SHA256SUMS \
             --title "Missus Tom ${RELEASE_TAG}" \
-            --generate-notes
+            --generate-notes \
+            "${release_flags[@]}"
