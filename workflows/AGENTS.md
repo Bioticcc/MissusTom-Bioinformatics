@@ -11,6 +11,9 @@ These instructions apply under `workflows/` in addition to the root guide.
   images. `bulk_rnaseq/docker/Dockerfile.analysis` owns the local R image.
 - `bulk_rnaseq/bin/full_human_analysis.R` implements the fixed mRNA/lncRNA
   statistical analysis for the restricted eight-sample demo.
+- `ont_analysis/run_pipeline.py` owns manifest-to-config validation and
+  sequential native-tool invocation. `ont_analysis/stages/` owns stage reuse
+  and output gates; its `lib/` contains the migrated scientific helpers/R.
 - The verified scientific baseline is external and read-only. Use
   `docs/baseline_pipeline_inventory.md` and `docs/pipeline_migration_map.md` as
   evidence; do not copy new behavior from the baseline without reviewing it.
@@ -25,6 +28,10 @@ These instructions apply under `workflows/` in addition to the root guide.
 - Keep container inputs digest-pinned. Record deliberate tool, R, Bioconductor,
   or package changes in the appropriate workflow documentation.
 - Containers remain network-disabled during workflow execution.
+- ONT initially supports one mouse GRCm38p6 sample from existing pass modBAMs.
+  Do not repeat basecalling, drop MM/ML/MN tags, combine 5mC with 5hmC, or add
+  differential statistics to this descriptive workflow. Preserve weighted call
+  denominators separately from sequencing coverage.
 - Preserve declared outputs, audit reports, trace data, retained work directory,
   and `-resume` behavior unless the task explicitly changes those contracts.
 - Do not read restricted FASTQ/reference/result contents to validate a source

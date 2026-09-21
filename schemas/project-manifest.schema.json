@@ -35,7 +35,7 @@
     "created_at": { "type": "string", "format": "date-time" },
     "input_directory": { "type": "string", "pattern": "^/" },
     "output_directory": { "type": "string", "pattern": "^/" },
-    "pipeline_identifier": { "const": "bulk-rnaseq" },
+    "pipeline_identifier": { "enum": ["bulk-rnaseq", "ont-analysis"] },
     "pipeline_version": { "type": "string", "minLength": 1 },
     "organism": { "type": "string", "minLength": 1 },
     "reference_genome": { "type": "string", "minLength": 1 },
@@ -82,11 +82,12 @@
     "sample": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sample_id", "r1_files", "r2_files", "condition", "biological_replicate", "batch", "covariates", "included"],
+        "required": ["sample_id", "r1_files", "r2_files", "condition", "biological_replicate", "batch", "covariates", "included"],
       "properties": {
         "sample_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
         "r1_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
         "r2_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
+        "ont_bam_files": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
         "abundance_tsv": { "type": ["string", "null"], "pattern": "^/" },
         "condition": { "type": "string" },
         "biological_replicate": { "type": "string" },

@@ -81,6 +81,7 @@ class RunRecord(BaseModel):
     job_identifier: str
     project_identifier: str
     project_name: str
+    pipeline_identifier: str = "bulk-rnaseq"
     status: RunStatus
     current_stage: str | None = None
     command: list[str]

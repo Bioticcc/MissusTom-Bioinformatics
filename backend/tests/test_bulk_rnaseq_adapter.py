@@ -87,9 +87,9 @@ def test_supported_user_project_is_executable(
         history_store=ProjectHistoryStore(tmp_path / "state.sqlite3"),
     )
     monkeypatch.setattr(
-        bulk_module.shutil,
-        "which",
-        lambda executable: f"/usr/bin/{executable}",
+        bulk_module,
+        "runtime_tool",
+        lambda executable, _pipeline: f"/usr/bin/{executable}",
     )
     monkeypatch.setattr(
         bulk_module.subprocess,
@@ -121,7 +121,7 @@ def test_supported_user_project_allows_empty_replicate_ids(
         without_replicates,
         history_store=ProjectHistoryStore(tmp_path / "optional-replicates-state.sqlite3"),
     )
-    monkeypatch.setattr(bulk_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+    monkeypatch.setattr(bulk_module, "runtime_tool", lambda executable, _: f"/usr/bin/{executable}")
     monkeypatch.setattr(
         bulk_module.subprocess,
         "run",
@@ -162,7 +162,7 @@ def test_adapter_accepts_intervention_filtered_comparison(
         filtered,
         history_store=ProjectHistoryStore(tmp_path / "filtered-state.sqlite3"),
     )
-    monkeypatch.setattr(bulk_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+    monkeypatch.setattr(bulk_module, "runtime_tool", lambda executable, _: f"/usr/bin/{executable}")
     monkeypatch.setattr(
         bulk_module.subprocess,
         "run",
@@ -199,7 +199,7 @@ def test_analysis_only_accepts_external_kallisto_tables(
         manifest,
         history_store=ProjectHistoryStore(tmp_path / "analysis-state.sqlite3"),
     )
-    monkeypatch.setattr(bulk_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+    monkeypatch.setattr(bulk_module, "runtime_tool", lambda executable, _: f"/usr/bin/{executable}")
     monkeypatch.setattr(
         bulk_module.subprocess,
         "run",

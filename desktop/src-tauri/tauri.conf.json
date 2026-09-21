@@ -21,14 +21,19 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 http://127.0.0.1:8765; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage", "deb"],
     "category": "Science",
-    "shortDescription": "Local bulk RNA-seq project workbench",
-    "longDescription": "Configure and validate Yan Lab bulk RNA-seq projects locally, with controlled execution for the internal human demo."
+    "shortDescription": "Local multi-pipeline bioinformatics workbench",
+    "longDescription": "Configure and validate local human bulk RNA-seq and mouse ONT modified-base projects, with controlled execution.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ]
   }
 }

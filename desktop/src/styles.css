@@ -1423,6 +1423,156 @@ legend {
   overflow-wrap: anywhere;
 }
 
+.pipeline-dependencies {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.pipeline-dependencies .section-heading,
+.pipeline-dependencies > .button {
+  margin: 0;
+}
+
+.setup-pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.35rem;
+}
+
+.setup-pipeline-card {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+}
+
+.setup-pipeline-card.selected {
+  border-color: rgba(63, 143, 129, 0.55);
+}
+
+.setup-pipeline-toggle,
+.setup-action-toggle {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  color: var(--ink);
+}
+
+.setup-pipeline-toggle input,
+.setup-action-toggle input {
+  width: auto;
+  margin-top: 0.25rem;
+}
+
+.setup-pipeline-toggle strong,
+.setup-pipeline-toggle small {
+  display: block;
+}
+
+.setup-pipeline-toggle small {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.setup-actions {
+  display: grid;
+  gap: 0.8rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.setup-demo-assets {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbf9;
+}
+
+.setup-demo-assets h3,
+.setup-demo-assets p,
+.setup-job {
+  margin: 0;
+}
+
+.setup-demo-assets h3 { font-size: 1rem; }
+.setup-demo-assets p { color: var(--muted); font-size: 0.82rem; }
+.setup-job { padding: 0.55rem; border-radius: 6px; font-size: 0.8rem; }
+.setup-job.running { color: var(--blue); background: #e6f0f5; }
+.setup-job.succeeded { color: #175a3d; background: #e0f1e8; }
+.setup-job.failed { color: var(--red); background: var(--red-soft); }
+
+.dependency-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dependency-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: start;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.dependency-list strong,
+.dependency-list p,
+.dependency-list small,
+.manual-requirements strong,
+.dependency-job strong,
+.dependency-job p {
+  margin: 0;
+}
+
+.dependency-list p,
+.dependency-list small,
+.manual-requirements,
+.dependency-job p {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.dependency-state {
+  min-width: 4.7rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 99px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.dependency-state.installed { color: #175a3d; background: #e0f1e8; }
+.dependency-state.missing { color: #704716; background: var(--amber-soft); }
+
+.manual-requirements,
+.dependency-job {
+  padding: 0.7rem;
+  border-radius: 8px;
+  background: #f6f8f7;
+}
+
+.manual-requirements ul { margin: 0.35rem 0 0; padding-left: 1.2rem; }
+
+.dependency-job { display: grid; gap: 0.4rem; }
+.dependency-job.failed { border: 1px solid #e7b4ae; }
+.dependency-job pre {
+  max-height: 11rem;
+  margin: 0;
+  padding: 0.55rem;
+  overflow: auto;
+  border-radius: 6px;
+  background: #17201d;
+  color: #eef5f1;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+}
+
 .file-preview {
   margin-top: 1rem;
 }
@@ -1900,6 +2050,7 @@ legend {
 
   .dashboard-grid,
   .two-column,
+  .setup-pipeline-grid,
   .folder-preview-grid,
   .run-mode-panel,
   .review-grid,

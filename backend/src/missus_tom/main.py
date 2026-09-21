@@ -37,6 +37,7 @@ app.add_middleware(
         "http://localhost:1420",
         "http://127.0.0.1:1420",
         "tauri://localhost",
+        "http://tauri.localhost",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -81,7 +82,7 @@ async def validation_exception_handler(
 
 
 def run() -> None:
-    uvicorn.run("missus_tom.main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("missus_tom.main:app", host=settings.api_host, port=settings.api_port, reload=False)
 
 
 if __name__ == "__main__":

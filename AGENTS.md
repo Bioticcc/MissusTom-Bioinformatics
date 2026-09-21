@@ -2,8 +2,8 @@
 
 ## Project map
 
-- Missus Tom is a local-only bulk RNA-seq desktop workbench for project setup,
-  validation, and controlled execution of the restricted human demo.
+- Missus Tom is a local-only desktop workbench for human bulk RNA-seq and mouse
+  ONT modified-base project setup, validation, and controlled execution.
 - `backend/src/missus_tom/`: FastAPI application, typed models, services, and
   pipeline adapters. Entry point: `missus_tom.main:app`.
 - `backend/tests/`: Python API, service, manifest, and schema tests.
@@ -12,6 +12,8 @@
 - `schemas/project-manifest.schema.json`: versioned JSON manifest contract.
 - `workflows/bulk_rnaseq/`: Nextflow DSL2 workflow, resource policy, container
   definition, and R analysis. Its nested `AGENTS.md` adds scientific rules.
+- `workflows/ont_analysis/`: manifest-driven native-tool runner, restartable ONT
+  stages, weighted summary helpers, and mouse methylation exploration.
 - `scripts/`: setup, development, demo-preparation, and agent utilities.
 - `docs/`: architecture, baseline evidence, migration decisions, and open
   scientific questions.
@@ -56,6 +58,8 @@
 - Keep changes focused; do not mix opportunistic refactors with the task.
 - The external `../BulkRnaSeq` scientific baseline is read-only. Never modify or
   run it as part of ordinary Missus Tom development.
+- The external `../ONTAnalysis` baseline is also read-only. Keep ONT's mouse
+  references and modified-base semantics separate from human bulk RNA-seq.
 - Do not add biological inference from filenames. User-confirmed manifest data
   is authoritative for conditions, comparisons, and other biology.
 - Preserve the local-only security boundary: fixed argument arrays,

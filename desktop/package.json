@@ -7,12 +7,16 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint . --max-warnings 0",
-    "test": "npm run test:coordinator && npm run test:api && npm run test:overlay",
+    "test": "npm run test:coordinator && npm run test:setup-state && npm run test:api && npm run test:overlay && npm run test:run-lifecycle && npm run test:demo-assets",
     "test:api": "node test/api.test.mjs",
     "test:coordinator": "node test/requestCoordinator.test.mjs",
+    "test:setup-state": "node test/setupState.contract.test.mjs",
+    "test:demo-assets": "node test/pipelineDemoAssets.contract.test.mjs",
     "test:overlay": "node test/runOverlayState.test.mjs",
+    "test:run-lifecycle": "node test/runLifecycle.contract.test.mjs",
     "typecheck": "tsc -b --pretty false",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:release": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-unknown-linux-gnu"
   },
   "dependencies": {
     "@tauri-apps/api": "2.2.0",

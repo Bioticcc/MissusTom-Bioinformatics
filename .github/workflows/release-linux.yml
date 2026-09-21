@@ -1,0 +1,144 @@
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux x86_64 release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      TAURI_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Select stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install Linux Tauri prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            patchelf \
+            wget
+      - name: Create backend build environment
+        run: |
+          python3 -m venv backend/.venv
+          backend/.venv/bin/python -m pip install --upgrade pip
+          backend/.venv/bin/python -m pip install -e './backend[dev,packaging]'
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Run application checks
+        run: ./scripts/check.sh
+      - name: Build Linux sidecars
+        run: bash scripts/build-linux-sidecars.sh "${TAURI_TARGET}"
+      - name: Smoke packaged backend
+        run: |
+          bash scripts/smoke-packaged-backend.sh \
+            "backend/dist/sidecars/missus-tom-backend-${TAURI_TARGET}" \
+            "backend/build/sidecar-resources"
+      - name: Build Tauri release bundles
+        working-directory: desktop
+        run: npm run tauri:release
+      - name: Verify package contents and collect artifacts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          package_version=$(node -p "require('./desktop/package.json').version")
+          test "${version}" = "${package_version}"
+
+          bundle_root="desktop/src-tauri/target/${TAURI_TARGET}/release/bundle"
+          appimage_source="${bundle_root}/appimage/Missus Tom_${version}_amd64.AppImage"
+          deb_source="${bundle_root}/deb/missus-tom_${version}_amd64.deb"
+          test -f "${appimage_source}"
+          test -f "${deb_source}"
+
+          package_contents=$(mktemp)
+          trap 'rm -f "${package_contents}"' EXIT
+          dpkg-deb --fsys-tarfile "${deb_source}" | tar --list --file=- >"${package_contents}"
+          python3 - "${package_contents}" <<'PY'
+          import sys
+          from pathlib import PurePosixPath
+
+          members = [PurePosixPath(line.strip()) for line in open(sys.argv[1], encoding="utf-8")]
+          expected_suffixes = (
+              ("missus-tom-backend",),
+              ("ont-analysis-runner",),
+              ("workflows", "bulk_rnaseq", "main.nf"),
+              ("workflows", "ont_analysis", "run_pipeline.py"),
+              ("scripts", "build-analysis-image.sh"),
+          )
+          member_parts = [member.parts for member in members]
+          missing = [
+              "/".join(suffix)
+              for suffix in expected_suffixes
+              if not any(parts[-len(suffix) :] == suffix for parts in member_parts)
+          ]
+          if missing:
+              raise SystemExit(f"Release Debian package is missing: {', '.join(missing)}")
+          PY
+
+          artifact_directory="release-artifacts"
+          mkdir -p "${artifact_directory}"
+          install -m 0755 "${appimage_source}" "${artifact_directory}/missus-tom_${version}_linux-x86_64.AppImage"
+          install -m 0644 "${deb_source}" "${artifact_directory}/missus-tom_${version}_linux-x86_64.deb"
+          (
+            cd "${artifact_directory}"
+            sha256sum \
+              "missus-tom_${version}_linux-x86_64.AppImage" \
+              "missus-tom_${version}_linux-x86_64.deb" >SHA256SUMS
+          )
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: missus-tom-linux-x86_64-${{ github.ref_name }}
+          path: release-artifacts
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: missus-tom-linux-x86_64-${{ github.ref_name }}
+          path: release-artifacts
+      - name: Publish tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          gh release create "${RELEASE_TAG}" \
+            "release-artifacts/missus-tom_${version}_linux-x86_64.AppImage" \
+            "release-artifacts/missus-tom_${version}_linux-x86_64.deb" \
+            release-artifacts/SHA256SUMS \
+            --title "Missus Tom ${RELEASE_TAG}" \
+            --generate-notes

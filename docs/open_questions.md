@@ -53,3 +53,24 @@
 22. Where should shared references, indexes, application state, Nextflow work,
     and final projects live on Yan Lab workstations?
 
+## ONT modified-base analysis
+
+23. Should the initial 74-pass-BAM count remain a required project parameter,
+    or should future ONT projects accept any explicitly confirmed chunk set?
+24. Who approves upgrades to the managed dependency catalogs, and which complete
+    platform-specific Samtools/R/Bioconductor package locks should eventually ship?
+    The current installer pins ONT core tool targets but resolves other packages
+    through conda-forge/Bioconda; offline bundles and full environment locks remain
+    release-packaging work.
+25. Can a future Stage 05 derive its run-summary panels without the MinKNOW HTML
+    report? The faithful initial migration keeps it as a required provenance input.
+26. Which versioned bundle owns GRCm38p6 FASTA/FAI/minimap2 index, GENCODE vM25, mm10 CpG
+    islands, mouse cCREs, and intergenic intervals, and what checksums identify
+    the reviewed bundle?
+27. Must future ONT runs support multiple samples before differential methylation
+    is added, or should multi-sample ingestion and DMR/DhMR inference arrive as
+    one separately validated feature?
+28. For future human ONT support, which chromosome naming/reference constraints
+    and annotation-derived figures should replace the initial mouse-only rules?
+29. What tiny public or synthetic modBAM fixture may be committed or generated
+    for end-to-end regression testing of `MM`, `ML`, and `MN` preservation?

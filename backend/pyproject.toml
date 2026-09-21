@@ -23,9 +23,13 @@ dev = [
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
 ]
+packaging = [
+  "pyinstaller==6.11.1",
+]
 
 [project.scripts]
 missus-tom-api = "missus_tom.main:run"
+missus-tom-ont-runner = "missus_tom.ont_runner:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

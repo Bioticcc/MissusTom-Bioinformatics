@@ -1,5 +1,15 @@
 # MVP architecture
 
+## Pipeline dependency environments
+
+The dependency service owns per-pipeline package catalogs, readiness probes,
+explicit background installation jobs, and runtime environment resolution.
+Reusable desktop cards expose missing packages and install/retry controls before
+and after project setup. Package installation is independent of project biology
+and manifests; new pipelines can add a catalog entry without another installer
+UI. Managed tools live in application state, not source or the backend virtual
+environment. Pipeline execution retains existing validation/admission gates.
+
 ## Implemented architecture
 
 1. Preserve and inventory the existing pipeline as an external, read-only
@@ -8,8 +18,8 @@
    proposals and future execution.
 3. Put filesystem inspection, validation, persistence, and run planning in a
    loopback-only Python API.
-4. Put every pipeline behind an adapter and validate supported bulk RNA-seq
-   projects before execution.
+4. Put every pipeline behind a registry-selected adapter and apply its own input,
+   organism, reference, and execution validation before execution.
 5. Build an accessible Tauri/React workbench around discovery, design, preflight,
    save, and plan workflows.
 6. Run FastQC, MultiQC, Cutadapt, kallisto, tximport, and manifest-defined
@@ -31,11 +41,13 @@ stack.
   biology.
 - **Adapters (`pipeline_adapters/`)** — a generic interface for availability,
   validation, stage/output descriptions, plans, and argument-array commands.
-- **Workflow (`workflows/`)** — Nextflow DSL2 configuration and profiles. The
-  human paired-end workflow contains raw QC, paired trimming, clean QC,
+- **Workflow (`workflows/`)** — independently packageable workflow modules. The
+  human paired-end Nextflow workflow contains raw QC, paired trimming, clean QC,
   transcript quantification, manifest-defined mRNA/lncRNA DESeq2 comparisons,
   and reporting. Container bases are pinned
   by registry digest and analysis package versions are recorded with outputs.
+  The mouse ONT module consumes explicit pass modBAM inputs and preserves its
+  five restartable alignment, coverage, methylation, and exploration stages.
 - **History** — SQLite records saved project identity and manifest location for
   dashboard reopening. Atomic JSON job records live in the application state
   directory and project logs. Recovery reads both the registry and legacy logs
@@ -45,6 +57,7 @@ stack.
 
 ```text
 React wizard
+  -> select pipeline            -> human bulk RNA-seq or mouse ONT analysis
   -> POST /fastq/discover       -> metadata-only scanner
   -> POST /metadata/csv         -> local experimental-metadata parser and matcher
   -> POST /quantifications/discover -> existing kallisto abundance tables
@@ -54,7 +67,7 @@ React wizard
   -> POST /projects/save        -> atomic JSON + empty project layout
   -> GET  /demos/human          -> restricted pseudonymous demo manifest
   -> POST /runs/plan            -> adapter stages + argument-array preview
-  -> POST /runs/start           -> controlled Nextflow process
+  -> POST /runs/start           -> controlled adapter-selected process
   -> GET  /runs/{id}            -> status, logs, and existing result files
 ```
 
@@ -89,6 +102,7 @@ validation errors use the same shape with typed `code`, `message`, optional
 - `POST /api/v1/runs/{job_identifier}/cancel`
 - `GET /api/v1/pipelines`
 - `GET /api/v1/pipelines/bulk-rnaseq/status`
+- `GET /api/v1/pipelines/ont-analysis/status`
 
 ## Resumability and logging model
 
@@ -103,6 +117,11 @@ legacy session names can be recovered from bounded local logs. Nextflow reports
 and scientific outputs remain shared project outputs; work directories are never
 automatically deleted. Saving uses the project lock too, preventing manifest
 changes during an active run or replacement by a different project identity.
+
+ONT uses a fixed Python runner and sequential native-tool stages rather than
+Nextflow/Docker. The same process-group cancellation and project admission locks
+apply; Docker cleanup is skipped for native runs. ONT stage validation markers
+control reuse, and the UI does not expose forced rebuilding.
 
 Blocking filesystem and runtime operations execute through FastAPI's worker pool.
 Jobs fetches logs when expanded and performs a final refresh on completion.
@@ -131,6 +150,8 @@ packaging change.
 ## Extensibility
 
 The GUI speaks in manifests, stages, output categories, and job states rather
-than Bash/R script names. A future single-cell or methylation adapter can provide
-its own schema extension and stages without replacing dashboard, preflight,
-jobs, results, or settings infrastructure.
+than accepting arbitrary commands. Registry-selected bulk RNA-seq and ONT
+adapters provide their own input and scientific validation while sharing project
+history, controlled execution, jobs, results, and settings infrastructure. The
+module boundary is also the intended seam for future human-only and mouse-only
+application distributions.

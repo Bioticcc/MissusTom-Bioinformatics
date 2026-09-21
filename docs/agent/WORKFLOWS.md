@@ -96,10 +96,51 @@ or pull Docker images. Nextflow may bootstrap its engine cache on the first run.
 
 ## Broad check
 
+For the ONT module, run its synthetic contract tests and parse the scientific R
+source without reading restricted BAMs or references:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s workflows/ont_analysis/tests
+bash -n workflows/ont_analysis/lib/pipeline_common.sh
+Rscript -e "invisible(parse(file='workflows/ont_analysis/lib/methylation_exploration.R'))"
+```
+
+Run `bash -n` separately for each changed ONT stage script. `--check-only` on the
+runner verifies a supplied project's paths and local tools, not biological
+equivalence or completion of downstream stages.
+
 ```bash
 ./scripts/check.sh
 ```
 
 This runs Ruff lint/format, strict mypy, all backend tests, ESLint, frontend tests, TypeScript
-checking, and the Vite build. It intentionally excludes Rust, container builds,
+checking, the Vite build, ONT synthetic contract tests, and ONT Bash syntax checks.
+It intentionally excludes Rust, R execution, container builds,
 and real Nextflow execution.
+
+## Linux release packaging
+
+Release packaging is Linux x86_64 only. The base `desktop/src-tauri/tauri.conf.json`
+must remain development-safe and must not add `externalBin`; release-only sidecars
+and workflow resources belong in `desktop/src-tauri/tauri.release.conf.json`.
+
+After creating `backend/.venv` with the `dev` and `packaging` extras and running
+`npm ci` in `desktop/`, the CI-equivalent sequence is:
+
+```bash
+./scripts/check.sh
+bash scripts/build-linux-sidecars.sh x86_64-unknown-linux-gnu
+bash scripts/smoke-packaged-backend.sh \
+  backend/dist/sidecars/missus-tom-backend-x86_64-unknown-linux-gnu \
+  backend/build/sidecar-resources
+cd desktop
+npm run tauri:release
+```
+
+The smoke helper creates and removes its own temporary state directory, binds a
+dedicated loopback port rather than port 8000, and stops only the backend it
+started. It does not execute a workflow or demo. Do not run sidecar builds,
+release bundling, package installation, or real/demo workflows on a machine
+with an active ONT run unless the operator has explicitly confirmed that the
+active run and its data are isolated. Never point smoke-test state, resource
+roots, projects, or manifests at active ONT paths.

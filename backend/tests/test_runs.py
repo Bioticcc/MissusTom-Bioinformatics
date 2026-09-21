@@ -87,6 +87,28 @@ class DescendantAdapter(SleepingAdapter):
         return [sys.executable, "-c", parent]
 
 
+class ResumeRequiredAdapter(StubAdapter):
+    @property
+    def requires_resume(self) -> bool:
+        return True
+
+
+class StageReportingAdapter(StubAdapter):
+    def construct_command(
+        self,
+        _manifest: ProjectManifest,
+        *,
+        start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+    ) -> list[str]:
+        del start_stage
+        return [
+            sys.executable,
+            "-c",
+            "import time; print('RUN: bash /runner/stages/01_align_modbam.sh', flush=True); "
+            "time.sleep(0.2)",
+        ]
+
+
 def wait_for_terminal(manager: RunManager, job_identifier: str) -> RunRecord:
     for _ in range(300):
         record = manager.get(job_identifier)
@@ -175,6 +197,39 @@ def test_run_manager_can_start_without_resume(
         }:
             break
         time.sleep(0.01)
+
+
+def test_run_manager_rejects_non_resumable_ont_style_execution(
+    tmp_path: Path, manifest_payload: dict[str, Any]
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    manager = RunManager(ResumeRequiredAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="requires resume-enabled"):
+        manager.start(manifest, resume=False)
+
+    assert manager.list_runs() == []
+
+
+def test_run_manager_reports_runner_stage_from_controlled_log(
+    tmp_path: Path, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    monkeypatch.setattr(runs_module, "CHECK_INTERVAL_SECONDS", 0.01)
+    manager = RunManager(StageReportingAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+
+    started = manager.start(manifest)
+    record = wait_for_status(manager, started.job_identifier, RunStatus.RUNNING)
+    for _ in range(30):
+        record = manager.get(started.job_identifier)
+        if record.current_stage == "Runner stage: 01_align_modbam":
+            break
+        time.sleep(0.01)
+
+    assert record.current_stage == "Runner stage: 01_align_modbam"
 
 
 def test_run_manager_records_analysis_only_start_stage(

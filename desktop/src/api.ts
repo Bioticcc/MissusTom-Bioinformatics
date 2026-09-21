@@ -1,7 +1,49 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { ApiEnvelope } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const BROWSER_API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 15_000;
+
+export type BackendStatus = {
+  base_url: string;
+  ready: boolean;
+  packaged: boolean;
+};
+
+let backendBasePromise: Promise<string> | undefined;
+
+function isDesktopShell() {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+export function selectApiBaseUrl(
+  browserBase: string,
+  backend: Pick<BackendStatus, "base_url"> | undefined,
+): string {
+  return backend?.base_url || browserBase;
+}
+
+export async function resolveApiBaseUrl(): Promise<string> {
+  if (import.meta.env.VITE_API_BASE_URL) return BROWSER_API_BASE;
+  if (!isDesktopShell()) return BROWSER_API_BASE;
+  backendBasePromise ??= invoke<BackendStatus>("backend_status")
+    .then((status) => {
+      if (status.packaged && !status.ready) {
+        throw new Error("The packaged backend is not ready.");
+      }
+      return selectApiBaseUrl(BROWSER_API_BASE, status);
+    });
+  return backendBasePromise;
+}
+
+export async function getBackendStatus(): Promise<BackendStatus | undefined> {
+  if (!isDesktopShell()) return undefined;
+  try {
+    return await invoke<BackendStatus>("backend_status");
+  } catch {
+    return undefined;
+  }
+}
 
 export class ApiError extends Error {
   constructor(
@@ -28,7 +70,8 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   try {
     let response: Response;
     try {
-      response = await fetch(`${API_BASE}${path}`, { ...init, headers, signal: controller.signal });
+      const apiBase = await resolveApiBaseUrl();
+      response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal });
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
       if (controller.signal.aborted) throw new ApiError("The local backend did not respond within 15 seconds. Try again.");

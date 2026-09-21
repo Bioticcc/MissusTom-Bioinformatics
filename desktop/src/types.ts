@@ -1,4 +1,4 @@
-export type ViewId = "dashboard" | "wizard" | "run-plan" | "jobs" | "results" | "settings";
+export type ViewId = "dashboard" | "setup" | "wizard" | "run-plan" | "jobs" | "results" | "settings";
 
 export interface ErrorDetail {
   code: string;
@@ -33,6 +33,7 @@ export interface ProposedSample {
   sample_id: string;
   r1_files: string[];
   r2_files: string[];
+  ont_bam_files: string[];
   abundance_tsv: string | null;
   lanes: string[];
   pairing_status: "paired" | "single" | "unmatched" | "ambiguous" | "quantified";
@@ -93,7 +94,7 @@ export interface ProjectManifest {
   created_at: string;
   input_directory: string;
   output_directory: string;
-  pipeline_identifier: "bulk-rnaseq";
+  pipeline_identifier: "bulk-rnaseq" | "ont-analysis";
   pipeline_version: string;
   organism: string;
   reference_genome: string;
@@ -106,6 +107,7 @@ export interface ProjectManifest {
     sample_id: string;
     r1_files: string[];
     r2_files: string[];
+    ont_bam_files: string[];
     abundance_tsv: string | null;
     condition: string;
     biological_replicate: string;
@@ -151,6 +153,48 @@ export interface RunPlan {
   warnings: string[];
 }
 
+export interface PipelineDependencyRequirement {
+  name: string;
+  installed: boolean;
+  managed: boolean;
+  detail: string;
+}
+
+export interface PipelineDependencyJob {
+  job_identifier: string;
+  pipeline_identifier: string;
+  status: "running" | "succeeded" | "failed";
+  message: string;
+  log_tail: string[];
+}
+
+export interface PipelineDependencies {
+  pipeline_identifier: string;
+  requirements: PipelineDependencyRequirement[];
+  missing: string[];
+  installable: boolean;
+  manual_requirements: string[];
+  job: PipelineDependencyJob | null;
+}
+
+export interface DemoIntegrity {
+  manifest_path: string;
+  sha256: string;
+  file_count: number;
+}
+
+export interface DemoStatus {
+  pipeline_identifier: string;
+  title: string;
+  available: boolean;
+  bundle_directory: string;
+  manifest_path: string | null;
+  integrity: DemoIntegrity | null;
+  prepared_at: string | null;
+  message: string;
+  execution_note: string;
+}
+
 export type RunStatus = "queued" | "preparing" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 export type RunStartStage = "quantification" | "analysis";
 
@@ -158,6 +202,7 @@ export interface RunRecord {
   job_identifier: string;
   project_identifier: string;
   project_name: string;
+  pipeline_identifier?: "bulk-rnaseq" | "ont-analysis";
   status: RunStatus;
   current_stage: string | null;
   command: string[];

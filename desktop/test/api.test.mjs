@@ -6,10 +6,12 @@ import ts from "typescript";
 const source = await readFile(new URL("../src/api.ts", import.meta.url), "utf8");
 
 async function loadApi() {
-  const testSource = source.replace("import.meta.env.VITE_API_BASE_URL", "undefined");
+  const testSource = source.replaceAll("import.meta.env.VITE_API_BASE_URL", "undefined");
   const compiled = ts.transpileModule(testSource, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-  }).outputText.replace('from "./types";', 'from "data:text/javascript,export{}";');
+  }).outputText
+    .replace('from "./types";', 'from "data:text/javascript,export{}";')
+    .replace('from "@tauri-apps/api/core";', 'from "data:text/javascript,export const invoke = async () => ({ base_url: \\"http://127.0.0.1:8765\\", ready: true });";');
   return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}#${Math.random()}`);
 }
 
@@ -100,4 +102,13 @@ test("apiRequest distinguishes unavailable, malformed, and HTTP failure response
     globalThis.fetch = previousFetch;
     timers.restore();
   }
+});
+
+test("selectApiBaseUrl uses a packaged sidecar base and retains browser fallback", async () => {
+  const { selectApiBaseUrl } = await loadApi();
+  assert.equal(
+    selectApiBaseUrl("http://127.0.0.1:8000", { base_url: "http://127.0.0.1:8765" }),
+    "http://127.0.0.1:8765",
+  );
+  assert.equal(selectApiBaseUrl("http://127.0.0.1:8000", undefined), "http://127.0.0.1:8000");
 });

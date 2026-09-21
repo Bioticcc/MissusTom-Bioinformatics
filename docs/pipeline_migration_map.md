@@ -1,5 +1,12 @@
 # Pipeline migration map
 
+This document tracks two independent scientific baselines: the human short-read
+bulk RNA-seq workflow and the mouse ONT modified-base workflow. They share the
+application manifest/adapter boundary, but not input semantics, references, or
+statistical assumptions.
+
+## Human bulk RNA-seq
+
 “Verified” describes baseline source behavior. The current boundary column
 states whether behavior is implemented in the current human paired-end workflow
 or remains planned.
@@ -28,3 +35,23 @@ The workflow implements manifest-to-channel conversion, multi-lane raw
 FastQC/MultiQC, paired Cutadapt, clean FastQC/MultiQC, kallisto quantification,
 tximport, and separate mRNA/lncRNA DESeq2 analyses for each requested
 comparison. The restricted demo remains an optional validated example.
+
+## Mouse ONT modified-base analysis
+
+The external `../ONTAnalysis` project remains read-only migration evidence. Its
+machine-specific paths and installed binaries are not application defaults.
+
+| Baseline stage | Preserved behavior | Application boundary |
+|---|---|---|
+| Pass modBAM input | Consume existing pass BAMs; never repeat basecalling; preserve `MM`, `ML`, and `MN`. | Explicit `ont_bam_files` in the confirmed manifest. Inputs must be regular, non-symlink files below the selected input directory. |
+| Alignment | Align one BAM at a time, fully validate partial output and modification tags, atomically promote, and resume valid chunks. | `01_align_modbam`, using explicit reference FASTA, FAI, and minimap2 index resources. |
+| Final alignment | Validate the complete expected chunk set, concatenate, coordinate-sort once, index, and reconcile record counts. | `02_finalize_alignment`, producing the canonical sorted modBAM and BAI. |
+| ONT QC and coverage | Report alignment metrics, depth and breadth, chromosome/window coverage, and indexed coverage/gap tracks. | `03_ont_qc_coverage`; sequencing coverage remains distinct from modification-call coverage. |
+| Methylation | Require joint 5mC/5hmC tags, combine CpG strands, retain 5mC and 5hmC separately, and calculate weighted summaries. | `04_methylation`, with explicit depth/filter parameters and auditable count denominators. |
+| Exploration | Single-sample mouse QC, genome-wide/regional/feature plots, plot-data tables, report, dashboard, and session information. | `05_methylation_exploration` generates plots from analysis outputs; feature exploration uses an optional complete mouse annotation set. Existing figures are never inputs, and instrument-report HTML is optional provenance. Differential/DMR/enrichment outputs remain unavailable for one sample. |
+
+The initial adapter is deliberately restricted to one `Mus musculus` sample on
+`GRCm38p6`. It accepts no differential-expression comparisons. Expected source
+BAM count, annotation assets, and runtime settings are manifest values rather
+than global application assumptions. This separation also permits future human
+and mouse distributions to package only their relevant adapters and workflows.

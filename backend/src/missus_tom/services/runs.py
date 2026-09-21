@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -22,7 +22,8 @@ from pydantic import ValidationError
 from missus_tom.config import settings
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.run import ResultArtifact, RunLog, RunRecord, RunStartStage, RunStatus
-from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
+from missus_tom.pipeline_adapters.base import PipelineAdapter
+from missus_tom.services.dependencies import runtime_environment
 from missus_tom.services.resource_monitor import CHECK_INTERVAL_SECONDS, ResourceMonitor
 
 ACTIVE_STATUSES = {
@@ -62,9 +63,7 @@ class RunLocks:
 class RunManager:
     """Launch, monitor, recover, and stop only controlled adapter commands."""
 
-    def __init__(
-        self, adapter: BulkRnaSeqAdapter, *, registry_directory: Path | None = None
-    ) -> None:
+    def __init__(self, adapter: object, *, registry_directory: Path | None = None) -> None:
         self.adapter = adapter
         self._using_default_registry = registry_directory is None
         self.registry_directory = registry_directory or settings.state_directory / "runs"
@@ -78,6 +77,17 @@ class RunManager:
         self._lock = threading.RLock()
         self._recover_records()
 
+    def _adapter_for(self, manifest: ProjectManifest) -> PipelineAdapter:
+        resolver = getattr(self.adapter, "for_manifest", None)
+        return cast(PipelineAdapter, resolver(manifest) if callable(resolver) else self.adapter)
+
+    def _adapter_for_record(self, record: RunRecord) -> PipelineAdapter:
+        getter = getattr(self.adapter, "get", None)
+        return cast(
+            PipelineAdapter,
+            getter(record.pipeline_identifier) if callable(getter) else self.adapter,
+        )
+
     def start(
         self,
         manifest: ProjectManifest,
@@ -85,27 +95,44 @@ class RunManager:
         resume: bool = True,
         start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
     ) -> RunRecord:
-        self.adapter.validate_execution(manifest, start_stage=start_stage)
+        adapter = self._adapter_for(manifest)
+        if getattr(adapter, "requires_resume", False) and not resume:
+            raise ValueError("this pipeline requires resume-enabled execution")
+        adapter.validate_execution(manifest, start_stage=start_stage)
         job_identifier = str(uuid4())
         root = Path(manifest.output_directory)
-        command = self.adapter.construct_command(manifest, start_stage=start_stage)
+        command = adapter.construct_command(manifest, start_stage=start_stage)
         self._make_engine_log_unique(command, root, job_identifier)
-        command.extend(["--run_id", job_identifier])
+        if not resume:
+            command = [argument for argument in command if argument != "-resume"]
+        append_identifier = getattr(adapter, "append_run_identifier", None)
+        command = (
+            append_identifier(command, job_identifier)
+            if callable(append_identifier)
+            else [*command, "--run_id", job_identifier]
+        )
 
         with self._lock:
             if self._has_active_admission():
                 raise ValueError("another workflow job is active or requires recovery")
-            nextflow_run_name = f"mt_{job_identifier.replace('-', '')}"
+            uses_nextflow_sessions = manifest.pipeline_identifier == "bulk-rnaseq"
+            is_nextflow_command = bool(command and command[0] == "nextflow")
+            nextflow_run_name = (
+                f"mt_{job_identifier.replace('-', '')}" if uses_nextflow_sessions else None
+            )
             resume_from_run_name = (
-                self._resume_source_for(manifest, start_stage) if resume else None
+                self._resume_source_for(manifest, start_stage)
+                if resume and uses_nextflow_sessions
+                else None
             )
-            self._configure_nextflow_session(
-                command,
-                nextflow_run_name=nextflow_run_name,
-                resume_from_run_name=resume_from_run_name,
-            )
+            if uses_nextflow_sessions and nextflow_run_name:
+                self._configure_nextflow_session(
+                    command,
+                    nextflow_run_name=nextflow_run_name,
+                    resume_from_run_name=resume_from_run_name,
+                )
             locks = self._acquire_locks(root, job_identifier)
-            validator = getattr(self.adapter, "validate_saved_manifest", None)
+            validator = getattr(adapter, "validate_saved_manifest", None)
             try:
                 if callable(validator):
                     validator(manifest)
@@ -116,6 +143,7 @@ class RunManager:
                 job_identifier=job_identifier,
                 project_identifier=str(manifest.project_identifier),
                 project_name=manifest.project_name,
+                pipeline_identifier=manifest.pipeline_identifier,
                 status=RunStatus.QUEUED,
                 current_stage="Waiting for local runner",
                 command=command,
@@ -127,7 +155,7 @@ class RunManager:
                 resume_from_run_name=resume_from_run_name,
                 start_stage=start_stage,
                 holds_admission=True,
-                container_cleanup_required=bool(command and command[0] == "nextflow"),
+                container_cleanup_required=is_nextflow_command,
             )
             self._records[job_identifier] = record
             self._locks[job_identifier] = locks
@@ -187,7 +215,7 @@ class RunManager:
                 return record.model_copy(deep=True)
             was_interrupted = record.status == RunStatus.INTERRUPTED
             record.status = RunStatus.CANCELLING
-            record.current_stage = "Stopping Nextflow and owned containers"
+            record.current_stage = "Stopping controlled workflow process"
             record.error_message = reason
             self._persist_safely(record)
             process = self._processes.get(job_identifier)
@@ -253,17 +281,22 @@ class RunManager:
     def artifacts(self, job_identifier: str) -> list[ResultArtifact]:
         record = self.get(job_identifier)
         project_root = Path(record.results_directory).parent.resolve(strict=True)
-        roots = {
-            "qc": project_root / "results" / "qc",
-            "trimmed_reads": project_root / "results" / "trimmed",
-            "counts": project_root / "results" / "counts",
-            "differential_expression": project_root / "results" / "differential_expression",
-            "figures": project_root / "results" / "figures",
-            "tables": project_root / "results" / "tables",
-            "workflow_reports": project_root / "reports",
-            "logs": project_root / "logs",
-            "run_manifest": project_root / "input_manifest",
-        }
+        artifact_roots = getattr(self._adapter_for_record(record), "artifact_roots", None)
+        roots = (
+            artifact_roots(project_root)
+            if callable(artifact_roots)
+            else {
+                "qc": project_root / "results" / "qc",
+                "trimmed_reads": project_root / "results" / "trimmed",
+                "counts": project_root / "results" / "counts",
+                "differential_expression": project_root / "results" / "differential_expression",
+                "figures": project_root / "results" / "figures",
+                "tables": project_root / "results" / "tables",
+                "workflow_reports": project_root / "reports",
+                "logs": project_root / "logs",
+                "run_manifest": project_root / "input_manifest",
+            }
+        )
         artifacts: list[ResultArtifact] = []
         for category, root in roots.items():
             if not root.is_dir():
@@ -295,7 +328,8 @@ class RunManager:
                     self._finish_cancelled_before_launch(record)
                     return
                 record.status = RunStatus.PREPARING
-                record.current_stage = "Starting Nextflow"
+                adapter = self._adapter_for_record(record)
+                record.current_stage = "Starting workflow runner"
                 record.started_at = datetime.now(UTC)
                 self._persist(record)
                 command = list(record.command)
@@ -303,21 +337,28 @@ class RunManager:
 
             log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(log_path.parent, 0o700)
-            environment = os.environ.copy()
-            environment["NXF_ANSI_LOG"] = "false"
-            environment["NXF_OPTS"] = self._nxf_options(command)
+            environment = runtime_environment(record.pipeline_identifier)
+            if command and command[0] == "nextflow":
+                environment["NXF_ANSI_LOG"] = "false"
+                environment["NXF_OPTS"] = self._nxf_options(command)
             descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as log_handle:
-                log_handle.write("Missus Tom bulk RNA-seq workflow\n")
+                log_handle.write(f"Missus Tom {record.pipeline_identifier} workflow\n")
                 log_handle.write("Command argument array: " + json.dumps(command) + "\n")
                 log_handle.flush()
                 with self._lock:
                     lock_descriptors = self._locks[job_identifier].descriptors()
                     for lock_descriptor in lock_descriptors:
                         os.set_inheritable(lock_descriptor, True)
+                workflow_directory = getattr(adapter, "workflow_directory", None)
+                if workflow_directory is None:
+                    repository_root = getattr(adapter, "repository_root", None)
+                    if repository_root is None:
+                        raise ValueError("pipeline adapter has no workflow directory")
+                    workflow_directory = repository_root / "workflows" / "bulk_rnaseq"
                 process = subprocess.Popen(
                     command,
-                    cwd=self.adapter.repository_root / "workflows" / "bulk_rnaseq",
+                    cwd=workflow_directory,
                     env=environment,
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
@@ -343,7 +384,7 @@ class RunManager:
                         self._start_cancellation_watchdog(job_identifier, process)
                     else:
                         record.status = RunStatus.RUNNING
-                        record.current_stage = "Nextflow workflow"
+                        record.current_stage = "Workflow runner"
                         self._persist(record)
                 exit_code = self._wait_for_process_with_monitor(job_identifier, process, log_handle)
             self._finish_process(job_identifier, exit_code)
@@ -423,7 +464,7 @@ class RunManager:
             else:
                 record.status = RunStatus.FAILED
                 record.current_stage = "Failed"
-                record.error_message = f"Nextflow exited with status {exit_code}"
+                record.error_message = f"Workflow runner exited with status {exit_code}"
             self._persist_safely(record)
             if record.status == RunStatus.COMPLETED:
                 self._append_log_line_safely(
@@ -441,12 +482,14 @@ class RunManager:
         with self._lock:
             record = self._records[job_identifier]
             monitor = ResourceMonitor(Path(record.results_directory).parent)
+            log_path = Path(record.log_path)
         cancellation_requested = False
         next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
         while True:
             try:
                 return process.wait(timeout=CHECK_INTERVAL_SECONDS)
             except subprocess.TimeoutExpired:
+                self._update_runner_stage_from_log(job_identifier, log_path)
                 now = time.monotonic()
                 if now >= next_heartbeat:
                     self._write_log_line_safely(
@@ -460,6 +503,27 @@ class RunManager:
                 if reason is not None and not cancellation_requested:
                     self.cancel(job_identifier, reason=reason)
                     cancellation_requested = True
+
+    def _update_runner_stage_from_log(self, job_identifier: str, path: Path) -> None:
+        """Surface a runner-emitted stage path without assigning scientific meaning to it."""
+        try:
+            with path.open("rb") as handle:
+                handle.seek(max(0, path.stat().st_size - 32_000))
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return
+        matches = list(re.finditer(r"(?m)^RUN:\s+bash\s+.*?/stages/([^/\s]+)", text))
+        if not matches:
+            return
+        stage = Path(matches[-1].group(1)).stem
+        with self._lock:
+            record = self._records.get(job_identifier)
+            if record is None or record.status != RunStatus.RUNNING:
+                return
+            current_stage = f"Runner stage: {stage}"
+            if record.current_stage != current_stage:
+                record.current_stage = current_stage
+                self._persist_safely(record)
 
     @staticmethod
     def _format_log_timestamp(value: datetime) -> str:
@@ -707,6 +771,7 @@ class RunManager:
             record
             for record in self._records.values()
             if record.project_identifier == str(manifest.project_identifier)
+            and record.pipeline_identifier == manifest.pipeline_identifier
             and record.status
             in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.INTERRUPTED}
         ]

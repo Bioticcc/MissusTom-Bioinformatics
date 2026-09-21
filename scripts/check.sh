@@ -25,3 +25,9 @@ npm run lint
 npm test
 npm run typecheck
 npm run build
+
+cd "${project_root}"
+PYTHONDONTWRITEBYTECODE=1 "${venv_bin}/python" -m unittest discover -s workflows/ont_analysis/tests
+for stage in workflows/ont_analysis/stages/*.sh workflows/ont_analysis/lib/pipeline_common.sh; do
+  bash -n "$stage"
+done

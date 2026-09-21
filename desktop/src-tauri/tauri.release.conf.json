@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/missus-tom-backend",
+      "binaries/ont-analysis-runner"
+    ],
+    "resources": {
+      "../../workflows": "workflows",
+      "../../scripts/build-analysis-image.sh": "scripts/build-analysis-image.sh"
+    }
+  }
+}

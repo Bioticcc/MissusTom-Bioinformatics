@@ -89,3 +89,27 @@ def test_analysis_estimate_uses_abundance_tables_not_fastqs(
 def test_nonfinite_memory_is_rejected(value: float) -> None:
     with pytest.raises(ValidationError):
         ResourceProfile(memory_gb=value)
+
+
+def test_estimated_input_bytes_uses_ont_bams_only(
+    tmp_path: Path, manifest_payload: dict[str, Any]
+) -> None:
+    input_directory = Path(manifest_payload["input_directory"])
+    bam = input_directory / "mouse.bam"
+    bam.write_bytes(b"bam-data")
+    payload = dict(manifest_payload)
+    payload.update(
+        pipeline_identifier="ont-analysis",
+        pipeline_version="0.1.0",
+        organism="Mus musculus",
+        reference_genome="GRCm38p6",
+    )
+    samples = list(payload["samples"])
+    sample = dict(samples[0])
+    sample["ont_bam_files"] = [str(bam)]
+    samples[0] = sample
+    payload["samples"] = samples
+
+    manifest = ProjectManifest.model_validate(payload)
+
+    assert resources.estimated_input_bytes(manifest) == len(b"bam-data")

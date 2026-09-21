@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiRequest } from "../api";
 import { FolderPreview } from "../components/FolderPreview";
+import { PipelineDependencies } from "../components/PipelineDependencies";
 import { openDirectory } from "../native";
 import type { DirectoryPreview, ProjectManifest, RunPlan, RunRecord, RunStartStage } from "../types";
 
@@ -21,10 +22,14 @@ const analysisOnlySkippedStages = new Set([
 export function RunPlanScreen({
   manifest,
   plan,
+  onStarting,
+  onStartFailed,
   onStarted,
 }: {
   manifest: ProjectManifest | null;
   plan: RunPlan | null;
+  onStarting: () => void | Promise<void>;
+  onStartFailed: () => void;
   onStarted: (record: RunRecord) => void;
 }) {
   const [starting, setStarting] = useState(false);
@@ -36,8 +41,11 @@ export function RunPlanScreen({
   const [error, setError] = useState("");
   const [inputPreview, setInputPreview] = useState<DirectoryPreview | null>(null);
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
+  const [refreshedPlan, setRefreshedPlan] = useState<RunPlan | null>(null);
+  const isOntPipeline = manifest?.pipeline_identifier === "ont-analysis";
   const canQuantify = Boolean(
-    manifest?.reference_resources.kallisto_index
+    !isOntPipeline
+    && manifest?.reference_resources.kallisto_index
     && manifest?.samples.filter((sample) => sample.included).every(
       (sample) => sample.r1_files.length > 0 && sample.r1_files.length === sample.r2_files.length,
     ),
@@ -45,6 +53,7 @@ export function RunPlanScreen({
 
   useEffect(() => {
     setStartStage(configuredStartStage);
+    setRefreshedPlan(null);
   }, [configuredStartStage, manifest?.project_identifier]);
 
   useEffect(() => {
@@ -73,6 +82,16 @@ export function RunPlanScreen({
     void load();
     return () => { active = false; };
   }, [manifest]);
+
+  const refreshRunPlan = useCallback(async () => {
+    if (!manifest) return;
+    const updated = await apiRequest<RunPlan>("/api/v1/runs/plan", {
+      method: "POST",
+      body: JSON.stringify({ manifest }),
+    });
+    setRefreshedPlan(updated);
+  }, [manifest]);
+
   if (!manifest || !plan) {
     return (
       <div className="page-stack">
@@ -85,17 +104,23 @@ export function RunPlanScreen({
       </div>
     );
   }
+  const currentPlan = refreshedPlan ?? plan;
 
   const startRun = async () => {
     setStarting(true);
     setError("");
     try {
+      await onStarting();
       const record = await apiRequest<RunRecord>("/api/v1/runs/start", {
         method: "POST",
-        body: JSON.stringify({ manifest, resume, start_stage: startStage }),
+        body: JSON.stringify({ manifest, resume: isOntPipeline ? true : resume, start_stage: isOntPipeline ? "quantification" : startStage }),
       });
       onStarted(record);
     } catch (reason) {
+      onStartFailed();
+      // Do not clear the native busy state here: the backend may have accepted
+      // the run even if its response was lost. App-level polling clears it only
+      // after the authoritative run list confirms no active work.
       setError(reason instanceof Error ? reason.message : "The run could not be started.");
     } finally {
       setStarting(false);
@@ -116,23 +141,24 @@ export function RunPlanScreen({
         <div>
           <p className="eyebrow">Project</p>
           <h1>{manifest.project_name}</h1>
-          <p className="lede">Local Docker execution with resumable Nextflow work.</p>
+          <p className="lede">{isOntPipeline ? "Local mouse modBAM analysis with validated, restartable stages." : "Local Docker execution with resumable Nextflow work."}</p>
         </div>
         <div className="header-actions">
           <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>
-          <button className="button primary" type="button" disabled={!plan.execution_enabled || starting} onClick={startRun}>{starting ? "Starting…" : "Run pipeline"}</button>
+          <button className="button primary" type="button" disabled={!currentPlan.execution_enabled || starting} onClick={startRun}>{starting ? "Starting…" : "Run pipeline"}</button>
         </div>
       </header>
 
-      {!plan.execution_enabled && (
+      {!currentPlan.execution_enabled && (
         <section className="development-banner warning" role="status">
           <span className="notice-icon" aria-hidden="true">!</span>
           <div><strong>Execution unavailable</strong><p>Resolve the validation notes or enable local execution.</p></div>
         </section>
       )}
       {error && <div className="inline-error" role="alert">{error}</div>}
+      <PipelineDependencies pipelineIdentifier={manifest.pipeline_identifier} onInstalled={refreshRunPlan} />
 
-      <fieldset className="run-mode-panel" disabled={starting}>
+      {isOntPipeline ? <section className="panel"><h2>Restartable ONT execution</h2><p>Run all five stages, reusing only validated current outputs. Existing results and logs are retained. A forced rebuild is not exposed in this screen.</p></section> : <fieldset className="run-mode-panel" disabled={starting}>
         <legend>Run mode</legend>
         <label className={`run-mode-option${resume ? " selected" : ""}`}>
           <input
@@ -161,9 +187,9 @@ export function RunPlanScreen({
         <p className="run-mode-note">
           Starting from the beginning keeps existing work, results, and logs; Nextflow runs without <code>-resume</code>.
         </p>
-      </fieldset>
+      </fieldset>}
 
-      <fieldset className="run-mode-panel" disabled={starting}>
+      {!isOntPipeline && <fieldset className="run-mode-panel" disabled={starting}>
         <legend>Pipeline scope</legend>
         <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}${canQuantify ? "" : " disabled"}`}>
           <input
@@ -193,13 +219,13 @@ export function RunPlanScreen({
         <p className="run-mode-note">
           Analysis only requires <code>results/counts/kallisto/&lt;sample_id&gt;/abundance.tsv</code> for every included sample.
         </p>
-      </fieldset>
+      </fieldset>}
 
       <div className="summary-grid">
         <article className="metric-card"><span>Samples</span><strong>{manifest.samples.filter((sample) => sample.included).length}</strong></article>
-        <article className="metric-card"><span>Comparisons</span><strong>{manifest.comparisons.length}</strong></article>
-        <article className="metric-card"><span>Input size</span><strong>{formatBytes(plan.estimated_input_bytes)}</strong></article>
-        <article className="metric-card"><span>Profile</span><strong>{plan.execution_profile}</strong></article>
+        <article className="metric-card"><span>{isOntPipeline ? "BAM files" : "Comparisons"}</span><strong>{isOntPipeline ? manifest.samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0) : manifest.comparisons.length}</strong></article>
+        <article className="metric-card"><span>Input size</span><strong>{formatBytes(currentPlan.estimated_input_bytes)}</strong></article>
+        <article className="metric-card"><span>Profile</span><strong>{currentPlan.execution_profile}</strong></article>
       </div>
 
       {(inputPreview || outputPreview) && <div className="folder-preview-grid">
@@ -208,13 +234,13 @@ export function RunPlanScreen({
       </div>}
 
       <section className="panel">
-        <div className="section-heading"><div><p className="eyebrow">Stages</p><h2>Pipeline map</h2></div><span className="count-pill">{plan.stages.length}</span></div>
+        <div className="section-heading"><div><p className="eyebrow">Stages</p><h2>Pipeline map</h2></div><span className="count-pill">{currentPlan.stages.length}</span></div>
         <div className="stage-list">
-          {plan.stages.map((stage, index) => (
+          {currentPlan.stages.map((stage, index) => (
             <article className="stage-row" key={stage.stage_id}>
               <span className="stage-number">{String(index + 1).padStart(2, "0")}</span>
               <div><h3>{stage.name}</h3><p>{stage.description}</p><small>{stage.source_mapping}</small></div>
-              {startStage === "analysis" && analysisOnlySkippedStages.has(stage.stage_id) ? (
+              {!isOntPipeline && startStage === "analysis" && analysisOnlySkippedStages.has(stage.stage_id) ? (
                 <span className="stage-state skipped">Skipped</span>
               ) : (
                 <span className="stage-state">Planned</span>
@@ -230,8 +256,8 @@ export function RunPlanScreen({
           <h2>Generated command</h2>
           <pre className="command-preview" aria-label="Generated command argument array">
             {JSON.stringify(
-              plan.command_preview.map((argument, index, command) => (
-                command[index - 1] === "--start_stage" ? startStage : argument
+              currentPlan.command_preview.map((argument, index, command) => (
+                !isOntPipeline && command[index - 1] === "--start_stage" ? startStage : argument
               )),
               null,
               2,
@@ -241,9 +267,9 @@ export function RunPlanScreen({
         <section className="panel destination-list">
           <p className="eyebrow">Output paths</p>
           <h2>Logs and results</h2>
-          <dl><dt>Results</dt><dd>{plan.results_directory}</dd><dt>Logs</dt><dd>{plan.log_directory}</dd></dl>
+          <dl><dt>Results</dt><dd>{currentPlan.results_directory}</dd><dt>Logs</dt><dd>{currentPlan.log_directory}</dd></dl>
           <h3>Validation notes</h3>
-          <ul>{plan.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+          <ul>{currentPlan.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
         </section>
       </div>
     </div>

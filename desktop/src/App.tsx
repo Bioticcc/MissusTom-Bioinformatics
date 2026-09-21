@@ -1,17 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dashboard } from "./screens/Dashboard";
 import { Jobs } from "./screens/Jobs";
 import { NewProjectWizard } from "./screens/NewProjectWizard";
 import { Results } from "./screens/Results";
 import { RunPlanScreen } from "./screens/RunPlanScreen";
 import { Settings } from "./screens/Settings";
-import { apiRequest } from "./api";
-import { isDesktopShell, setRunOverlayActive } from "./native";
+import { Setup } from "./screens/Setup";
+import { apiRequest, getBackendStatus } from "./api";
+import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
+import { loadSetupState } from "./setupState";
 import type { ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
 
 const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
   { id: "dashboard", label: "Dashboard", glyph: "⌂" },
+  { id: "setup", label: "Setup", glyph: "⌘" },
   { id: "wizard", label: "New project", glyph: "+" },
   { id: "run-plan", label: "Run plan", glyph: "≡" },
   { id: "jobs", label: "Jobs", glyph: "◷" },
@@ -25,6 +28,16 @@ export default function App() {
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
   const [runPollError, setRunPollError] = useState("");
+  const runLifecycleGeneration = useRef(0);
+  const runStartPending = useRef(false);
+
+  useEffect(() => {
+    let live = true;
+    void getBackendStatus().then((status) => {
+      if (live && status?.packaged && !loadSetupState(window.localStorage).completed) setActiveView("setup");
+    });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     if (!isDesktopShell()) return;
@@ -32,15 +45,23 @@ export default function App() {
     let controller: AbortController | undefined;
     let timer: number | undefined;
     const refresh = async () => {
+      const generation = runLifecycleGeneration.current;
       controller = new AbortController();
       try {
         const runs = await apiRequest<RunRecord[]>("/api/v1/runs", { signal: controller.signal });
         const active = selectActiveRun(runs);
-        if (!live || controller.signal.aborted) return;
+        if (
+          !live
+          || controller.signal.aborted
+          || generation !== runLifecycleGeneration.current
+        ) return;
         setActiveRun(active);
         setRunPollError("");
+        if (active) runStartPending.current = false;
         try {
-          await setRunOverlayActive(Boolean(active));
+          if (active || !runStartPending.current) {
+            await setRunOverlayActive(Boolean(active));
+          }
         } catch (reason) {
           if (live) setRunPollError(reason instanceof Error ? reason.message : "The minimized run window could not be updated.");
         }
@@ -54,6 +75,30 @@ export default function App() {
     return () => { live = false; controller?.abort(); if (timer !== undefined) window.clearTimeout(timer); };
   }, []);
 
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    let live = true;
+    let controller: AbortController | undefined;
+    let timer: number | undefined;
+    const refresh = async () => {
+      controller = new AbortController();
+      try {
+        const statuses = await Promise.all(
+          ["bulk-rnaseq", "ont-analysis"].map((pipeline) => apiRequest<{ job: { status: string } | null }>(
+            `/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller?.signal },
+          )),
+        );
+        if (live && !controller.signal.aborted) await setDependencyInstallActive(statuses.some((status) => status.job?.status === "running"));
+      } catch {
+        // Preserve the last native busy state when status cannot be confirmed.
+      } finally {
+        if (live && !controller?.signal.aborted) timer = window.setTimeout(() => void refresh(), 5_000);
+      }
+    };
+    void refresh();
+    return () => { live = false; controller?.abort(); if (timer !== undefined) window.clearTimeout(timer); };
+  }, []);
+
   const projectReady = (nextManifest: ProjectManifest, nextPlan: RunPlan) => {
     setManifest(nextManifest);
     setRunPlan(nextPlan);
@@ -61,8 +106,29 @@ export default function App() {
   };
 
   const runStarted = (record: RunRecord) => {
+    // Invalidate polls that began while the start request was pending.
+    runLifecycleGeneration.current += 1;
+    runStartPending.current = false;
     setActiveRun(record);
     setActiveView("jobs");
+  };
+
+  const runStarting = async () => {
+    // Invalidate any run-list response that began before this start request.
+    runLifecycleGeneration.current += 1;
+    runStartPending.current = true;
+    try {
+      await setRunOverlayActive(true);
+    } catch (reason) {
+      setRunPollError(reason instanceof Error ? reason.message : "Run lifecycle protection could not be enabled.");
+    }
+  };
+
+  const runStartFailed = () => {
+    // The response may have been lost after backend admission. Keep native busy
+    // until a poll started after this settlement confirms the authoritative state.
+    runLifecycleGeneration.current += 1;
+    runStartPending.current = false;
   };
 
   return (
@@ -97,7 +163,7 @@ export default function App() {
 
         <div className="sidebar-foot">
           <span className="version-chip">v0.3.0</span>
-          <p>Bulk RNA-seq workbench</p>
+          <p>Local bioinformatics workbench</p>
         </div>
       </aside>
 
@@ -106,9 +172,16 @@ export default function App() {
         {activeView === "dashboard" && (
           <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
         )}
+        {activeView === "setup" && <Setup activeRun={activeRun} isRunActive={Boolean(activeRun)} onContinue={() => setActiveView("dashboard")} />}
         {activeView === "wizard" && <NewProjectWizard onProjectReady={projectReady} />}
         {activeView === "run-plan" && (
-          <RunPlanScreen manifest={manifest} plan={runPlan} onStarted={runStarted} />
+          <RunPlanScreen
+            manifest={manifest}
+            plan={runPlan}
+            onStarting={runStarting}
+            onStartFailed={runStartFailed}
+            onStarted={runStarted}
+          />
         )}
         {activeView === "jobs" && <Jobs activeRun={activeRun} />}
         {activeView === "results" && <Results activeRun={activeRun} />}

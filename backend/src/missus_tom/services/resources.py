@@ -75,7 +75,9 @@ def estimated_input_bytes(manifest: ProjectManifest, *, analysis_only: bool = Fa
     for sample in manifest.samples:
         if not sample.included:
             continue
-        if analysis_only:
+        if manifest.pipeline_identifier == "ont-analysis":
+            paths.update(Path(name) for name in sample.ont_bam_files)
+        elif analysis_only:
             paths.add(
                 Path(sample.abundance_tsv)
                 if sample.abundance_tsv

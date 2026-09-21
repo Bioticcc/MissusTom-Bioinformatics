@@ -88,8 +88,8 @@ export function Dashboard({
       <header className="page-header hero-header">
         <div>
           <p className="eyebrow">Yan Lab · local bioinformatics</p>
-          <h1>Bulk RNA-seq project configuration</h1>
-          <p className="lede">Configure inputs, experimental design, and workflow parameters.</p>
+          <h1>Bioinformatics project configuration</h1>
+          <p className="lede">Configure pipeline-specific inputs, resources, and workflow parameters.</p>
         </div>
         <div className="header-actions">
           <button type="button" className="button primary large" onClick={loadDemo} disabled={loadingDemo}>
@@ -111,8 +111,8 @@ export function Dashboard({
           i
         </span>
         <div>
-          <strong>Local bulk RNA-seq execution</strong>
-          <p>Runs paired-end human QC, trimming, kallisto quantification, and manifest-defined differential expression.</p>
+          <strong>Local pipeline workbench</strong>
+          <p>Create human bulk RNA-seq or mouse ONT analysis projects. The bundled human demo remains available for supported execution checks.</p>
         </div>
       </section>
 

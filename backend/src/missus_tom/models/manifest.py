@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -61,6 +61,7 @@ class SampleRecord(BaseModel):
     sample_id: str
     r1_files: list[str] = Field(default_factory=list)
     r2_files: list[str] = Field(default_factory=list)
+    ont_bam_files: list[str] = Field(default_factory=list)
     abundance_tsv: str | None = None
     condition: str
     biological_replicate: str
@@ -106,7 +107,7 @@ class SampleRecord(BaseModel):
             normalized["intervention"] = intervention or None
         return normalized
 
-    @field_validator("r1_files", "r2_files")
+    @field_validator("r1_files", "r2_files", "ont_bam_files")
     @classmethod
     def normalize_fastq_paths(cls, values: list[str]) -> list[str]:
         return [normalize_user_path(value) for value in values]
@@ -180,7 +181,7 @@ class ProjectManifest(BaseModel):
     created_at: datetime
     input_directory: str
     output_directory: str
-    pipeline_identifier: str = "bulk-rnaseq"
+    pipeline_identifier: Literal["bulk-rnaseq", "ont-analysis"] = "bulk-rnaseq"
     pipeline_version: str = "0.1.0-preview"
     organism: str
     reference_genome: str

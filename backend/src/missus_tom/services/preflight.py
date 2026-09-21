@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import platform
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from missus_tom.config import settings
 from missus_tom.models.manifest import ExecutionProfile, ProjectManifest, ReadLayout
 from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
+from missus_tom.services.dependencies import runtime_environment, runtime_tool
 from missus_tom.services.quantifications import has_kallisto_header
 from missus_tom.services.resources import execution_resource_checks
 
@@ -22,8 +24,9 @@ def _version_check(
     arguments: list[str],
     *,
     optional: bool,
+    pipeline_identifier: str = "bulk-rnaseq",
 ) -> PreflightCheck:
-    path = shutil.which(executable)
+    path = runtime_tool(executable, pipeline_identifier)
     if path is None:
         return PreflightCheck(
             check_id=check_id,
@@ -38,6 +41,7 @@ def _version_check(
             text=True,
             timeout=4,
             check=False,
+            env=runtime_environment(pipeline_identifier),
         )
         output = (result.stdout or result.stderr).strip().splitlines()
         version = output[0][:300] if output else "version output unavailable"
@@ -556,7 +560,7 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         ExecutionProfile.DOCKER: "docker",
         ExecutionProfile.APPTAINER: "apptainer",
     }[manifest.execution_profile]
-    runtime_found = shutil.which(required_runtime) is not None
+    runtime_found = runtime_tool(required_runtime, manifest.pipeline_identifier) is not None
     checks.append(
         PreflightCheck(
             check_id="execution_profile",
@@ -579,6 +583,290 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
                 if settings.execution_enabled
                 else "Execution is disabled for this backend process"
             ),
+        )
+    )
+    return checks
+
+
+def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
+    """Validate the intentionally narrow local ONT BAM-analysis contract."""
+    checks: list[PreflightCheck] = []
+    input_path = Path(manifest.input_directory)
+    output_path = Path(manifest.output_directory)
+    input_ok = input_path.is_dir() and os.access(input_path, os.R_OK | os.X_OK)
+    checks.append(
+        PreflightCheck(
+            check_id="input_directory",
+            label="Input directory",
+            status=CheckStatus.PASSED if input_ok else CheckStatus.BLOCKING,
+            message="Input directory exists and is readable"
+            if input_ok
+            else "Input directory must exist and be readable",
+            details={"path": str(input_path)},
+        )
+    )
+    output_parent = _output_parent(output_path)
+    output_ok = output_path.is_dir() and os.access(output_path, os.W_OK | os.X_OK)
+    creatable = output_parent.is_dir() and os.access(output_parent, os.W_OK | os.X_OK)
+    checks.append(
+        PreflightCheck(
+            check_id="output_directory",
+            label="Output directory",
+            status=CheckStatus.PASSED if output_ok or creatable else CheckStatus.BLOCKING,
+            message=(
+                "Output directory is writable"
+                if output_ok
+                else f"Output directory can be created under {output_parent}"
+                if creatable
+                else "Output directory is not writable and cannot be created"
+            ),
+            details={"path": str(output_path), "existing_parent": str(output_parent)},
+        )
+    )
+    unsafe_output = (
+        input_path == output_path
+        or output_path in input_path.parents
+        or input_path in output_path.parents
+        or output_path in {Path("/"), Path.home()}
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="path_separation",
+            label="Input/output separation",
+            status=CheckStatus.BLOCKING if unsafe_output else CheckStatus.PASSED,
+            message="Output must be separate from the input tree"
+            if unsafe_output
+            else "Input and output directories are separated",
+        )
+    )
+
+    included = [sample for sample in manifest.samples if sample.included]
+    sample_scope_ok = len(included) == 1
+    checks.append(
+        PreflightCheck(
+            check_id="sample_identifiers",
+            label="Sample identifiers",
+            status=CheckStatus.PASSED if sample_scope_ok else CheckStatus.BLOCKING,
+            message="One included ONT sample"
+            if sample_scope_ok
+            else "ONT analysis currently requires exactly one included sample",
+        )
+    )
+    bam_errors: list[str] = []
+    assigned: list[str] = []
+    input_root = input_path.resolve(strict=False)
+    for sample in included:
+        if not sample.ont_bam_files:
+            bam_errors.append(f"{sample.sample_id}: no BAM files")
+            continue
+        for value in sample.ont_bam_files:
+            assigned.append(value)
+            requested = Path(value)
+            try:
+                resolved = requested.resolve(strict=True)
+            except OSError:
+                bam_errors.append(f"{sample.sample_id}: missing BAM")
+                continue
+            if (
+                requested.is_symlink()
+                or not resolved.is_file()
+                or resolved.suffix.lower() != ".bam"
+                or not resolved.is_relative_to(input_root)
+            ):
+                bam_errors.append(f"{sample.sample_id}: invalid BAM")
+    duplicates = sorted(value for value, count in Counter(assigned).items() if count > 1)
+    if duplicates:
+        bam_errors.append("duplicate BAM assignment")
+    basename_collisions = sorted(
+        basename
+        for basename, count in Counter(Path(value).name for value in assigned).items()
+        if count > 1
+    )
+    if basename_collisions:
+        bam_errors.append("BAM basename collision: " + ", ".join(basename_collisions))
+    expected_count = manifest.parameters.get("expected_pass_bam_count")
+    expected_ok = expected_count is None or (
+        isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count > 0
+        and expected_count == len(set(assigned))
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="expected_pass_bam_count",
+            label="Expected passing BAM count",
+            status=CheckStatus.PASSED if expected_ok else CheckStatus.BLOCKING,
+            message=(
+                "Not explicitly configured; using assigned BAM count"
+                if expected_count is None
+                else f"Expected {expected_count} BAM(s), matching assigned files"
+                if expected_ok
+                else (
+                    "expected_pass_bam_count must be a positive integer matching "
+                    "unique assigned BAM files"
+                )
+            ),
+        )
+    )
+    parameter_errors: list[str] = []
+    for key in (
+        "coverage_window_size",
+        "methylation_window_size",
+        "modkit_max_depth",
+        "exploration_min_valid_coverage",
+        "exploration_min_feature_cpgs",
+    ):
+        parameter_value = manifest.parameters.get(key)
+        if parameter_value is None:
+            continue
+        maximum = 60_000 if key == "modkit_max_depth" else None
+        if (
+            not isinstance(parameter_value, int)
+            or isinstance(parameter_value, bool)
+            or parameter_value <= 0
+            or (maximum is not None and parameter_value > maximum)
+        ):
+            limit = " between 1 and 60000" if maximum is not None else " a positive integer"
+            parameter_errors.append(f"{key} must be{limit}")
+    coverage_window_size = manifest.parameters.get("coverage_window_size", 100_000)
+    methylation_window_size = manifest.parameters.get("methylation_window_size", 100_000)
+    if coverage_window_size != methylation_window_size:
+        parameter_errors.append(
+            "coverage_window_size and methylation_window_size must be equal "
+            "for coordinate-aligned Stage05 joins"
+        )
+    percentile = manifest.parameters.get("modkit_filter_percentile")
+    if percentile is not None and (
+        not isinstance(percentile, (int, float))
+        or isinstance(percentile, bool)
+        or not math.isfinite(percentile)
+        or not 0 <= percentile < 1
+    ):
+        parameter_errors.append("modkit_filter_percentile must be a finite value from 0 to <1")
+    checks.append(
+        PreflightCheck(
+            check_id="pipeline_parameters",
+            label="ONT pipeline parameters",
+            status=CheckStatus.BLOCKING if parameter_errors else CheckStatus.PASSED,
+            message="; ".join(parameter_errors)
+            if parameter_errors
+            else "ONT pipeline parameters are valid",
+        )
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="ont_bam_files",
+            label="ONT BAM files",
+            status=CheckStatus.BLOCKING if bam_errors else CheckStatus.PASSED,
+            message=(
+                "; ".join(bam_errors)
+                if bam_errors
+                else f"{len(assigned)} regular BAM file(s) under the input directory"
+            ),
+            details={
+                "duplicate_assignment_count": len(duplicates),
+                "basename_collision_count": len(basename_collisions),
+            },
+        )
+    )
+    genome_ok = manifest.organism == "Mus musculus" and manifest.reference_genome == "GRCm38p6"
+    checks.append(
+        PreflightCheck(
+            check_id="ont_reference_build",
+            label="ONT reference build",
+            status=CheckStatus.PASSED if genome_ok else CheckStatus.BLOCKING,
+            message="Mus musculus GRCm38p6 is selected"
+            if genome_ok
+            else "ONT analysis requires Mus musculus with GRCm38p6",
+        )
+    )
+    required = {
+        "reference_fasta",
+        "reference_fai",
+        "minimap2_index",
+    }
+    annotation_resources = {
+        "gencode_gff3",
+        "cpg_islands",
+        "ccre_table",
+        "intergenic_bed",
+    }
+    supplied_annotations = annotation_resources & manifest.reference_resources.keys()
+    missing = sorted(required - manifest.reference_resources.keys())
+    if supplied_annotations and supplied_annotations != annotation_resources:
+        missing.extend(sorted(annotation_resources - supplied_annotations))
+    invalid: list[str] = []
+    configured_resources = manifest.reference_resources.keys()
+    for key in sorted(
+        (required | supplied_annotations | {"ont_instrument_report"}) & configured_resources
+    ):
+        path = Path(manifest.reference_resources[key])
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            invalid.append(key)
+            continue
+        if path.is_symlink() or not resolved.is_file() or not os.access(resolved, os.R_OK):
+            invalid.append(key)
+    checks.append(
+        PreflightCheck(
+            check_id="references",
+            label="ONT reference resources",
+            status=CheckStatus.BLOCKING if missing or invalid else CheckStatus.PASSED,
+            message=(
+                "Missing reference resources: " + ", ".join([*missing, *invalid])
+                if missing or invalid
+                else (
+                    "Core ONT references are regular readable files; "
+                    "annotation exploration is enabled"
+                    if supplied_annotations
+                    else "Core ONT references are regular readable files; "
+                    "annotation exploration is not configured"
+                )
+            ),
+        )
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="comparisons",
+            label="Requested comparisons",
+            status=CheckStatus.PASSED if not manifest.comparisons else CheckStatus.BLOCKING,
+            message="No comparisons are configured"
+            if not manifest.comparisons
+            else "ONT analysis does not accept comparisons",
+        )
+    )
+    checks.extend(execution_resource_checks(manifest))
+    checks.append(
+        PreflightCheck(
+            check_id="execution_profile",
+            label="Execution profile",
+            status=(
+                CheckStatus.PASSED
+                if manifest.execution_profile.value == "local"
+                else CheckStatus.BLOCKING
+            ),
+            message=(
+                "Local Python runner is available"
+                if manifest.execution_profile.value == "local"
+                else "ONT analysis requires the local execution profile"
+            ),
+        )
+    )
+    missing_tools = [
+        tool
+        for tool in ("dorado", "samtools", "mosdepth", "modkit", "bgzip", "tabix", "Rscript")
+        if runtime_tool(tool, "ont-analysis") is None
+    ]
+    checks.append(
+        PreflightCheck(
+            check_id="ont_runtime_tools",
+            label="ONT runtime tools",
+            status=CheckStatus.PASSED if not missing_tools else CheckStatus.NOT_CONFIGURED,
+            message="Required ONT tools are available"
+            if not missing_tools
+            else "Missing from PATH: " + ", ".join(missing_tools),
+            details={"missing": missing_tools},
         )
     )
     return checks

@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from missus_tom.api import routes
 from missus_tom.main import app
+from missus_tom.services.demos import DemoService
 
 pytestmark = pytest.mark.anyio
 
@@ -20,6 +22,13 @@ async def client() -> AsyncClient:
         yield test_client
 
 
+@pytest.fixture
+def isolated_demo_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DemoService:
+    service = DemoService(state_directory=tmp_path / "state")
+    monkeypatch.setattr(routes, "demo_service", service)
+    return service
+
+
 async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
     response = await client.get("/health")
 
@@ -30,18 +39,19 @@ async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
     assert body["data"]["execution_enabled"] is True
 
 
-async def test_tauri_origin_preflight_is_allowed(client: AsyncClient) -> None:
+@pytest.mark.parametrize("origin", ("tauri://localhost", "http://tauri.localhost"))
+async def test_tauri_origin_preflight_is_allowed(client: AsyncClient, origin: str) -> None:
     response = await client.options(
         "/api/v1/fastq/discover",
         headers={
-            "Origin": "tauri://localhost",
+            "Origin": origin,
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "content-type",
         },
     )
 
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "tauri://localhost"
+    assert response.headers["access-control-allow-origin"] == origin
 
 
 async def test_discovery_endpoint(tmp_path: Path, client: AsyncClient) -> None:
@@ -69,6 +79,49 @@ async def test_quantification_discovery_endpoint(tmp_path: Path, client: AsyncCl
 
     assert response.status_code == 200
     assert response.json()["data"]["samples"][0]["abundance_tsv"] == str(abundance)
+
+
+async def test_demo_status_endpoint_uses_isolated_service(
+    client: AsyncClient, isolated_demo_service: DemoService
+) -> None:
+    response = await client.get("/api/v1/demos/bulk-rnaseq/status")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["available"] is False
+    assert response.json()["data"]["bundle_directory"].startswith(
+        str(isolated_demo_service.state_directory)
+    )
+
+
+async def test_demo_prepare_endpoint_accepts_explicit_consent(
+    client: AsyncClient, isolated_demo_service: DemoService
+) -> None:
+    response = await client.post("/api/v1/demos/bulk-rnaseq/prepare", json={"consent": True})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["available"] is True
+    assert response.json()["data"]["bundle_directory"].startswith(
+        str(isolated_demo_service.state_directory)
+    )
+
+
+@pytest.mark.parametrize("payload", ({}, {"consent": False}))
+async def test_demo_prepare_endpoint_requires_true_consent(
+    client: AsyncClient, isolated_demo_service: DemoService, payload: dict[str, bool]
+) -> None:
+    response = await client.post("/api/v1/demos/bulk-rnaseq/prepare", json=payload)
+
+    assert response.status_code == 422
+    assert not (isolated_demo_service.root / "bulk-rnaseq").exists()
+
+
+async def test_demo_endpoint_rejects_unknown_pipeline(
+    client: AsyncClient, isolated_demo_service: DemoService
+) -> None:
+    response = await client.get("/api/v1/demos/unknown/status")
+
+    assert response.status_code == 404
+    assert not (isolated_demo_service.root / "unknown").exists()
 
 
 async def test_directory_preview_endpoint(tmp_path: Path, client: AsyncClient) -> None:
@@ -188,6 +241,63 @@ async def test_pipeline_listing_contains_bulk_adapter(client: AsyncClient) -> No
 
     assert response.status_code == 200
     assert response.json()["data"][0]["pipeline_identifier"] == "bulk-rnaseq"
+
+
+async def test_ont_pipeline_validation_and_plan_dispatch(
+    tmp_path: Path, manifest_payload: dict[str, Any], client: AsyncClient
+) -> None:
+    payload = deepcopy(manifest_payload)
+    inputs = Path(payload["input_directory"])
+    bam = inputs / "mouse_pass.bam"
+    bam.touch()
+    references = Path(payload["reference_resources"]["biomart"]).parent
+    ont_resources = {}
+    for key in (
+        "reference_fasta",
+        "reference_fai",
+        "minimap2_index",
+        "gencode_gff3",
+        "cpg_islands",
+        "ccre_table",
+        "intergenic_bed",
+        "ont_instrument_report",
+    ):
+        path = references / key
+        path.touch()
+        ont_resources[key] = str(path)
+    payload.update(
+        pipeline_identifier="ont-analysis",
+        pipeline_version="0.1.0",
+        organism="Mus musculus",
+        reference_genome="GRCm38p6",
+        reference_resources=ont_resources,
+        read_layout="single-end",
+        strandedness="unknown",
+        comparisons=[],
+        parameters={"expected_pass_bam_count": 1},
+    )
+    payload["samples"] = [
+        {
+            "sample_id": "mouse_01",
+            "r1_files": [],
+            "r2_files": [],
+            "ont_bam_files": [str(bam)],
+            "condition": "single_sample",
+            "biological_replicate": "1",
+            "batch": None,
+            "covariates": {},
+            "included": True,
+        }
+    ]
+
+    validation = await client.post("/api/v1/projects/validate", json=payload)
+    plan = await client.post("/api/v1/runs/plan", json={"manifest": payload})
+
+    assert validation.status_code == 200
+    assert validation.json()["data"]["valid"] is True
+    assert plan.status_code == 200
+    assert plan.json()["data"]["pipeline_identifier"] == "ont-analysis"
+    assert plan.json()["data"]["stages"][0]["stage_id"] == "align_modbam"
 
 
 async def test_system_preflight_keeps_framework_available(

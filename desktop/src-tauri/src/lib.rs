@@ -1,21 +1,66 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
-use tauri::{Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use serde::Serialize;
+use tauri::{
+    AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const RUN_OVERLAY_LABEL: &str = "run-overlay";
 const RUN_OVERLAY_WIDTH: f64 = 360.0;
 const RUN_OVERLAY_HEIGHT: f64 = 300.0;
 const RUN_OVERLAY_MARGIN: f64 = 16.0;
+const PACKAGED_API_HOST: &str = "127.0.0.1";
+const PACKAGED_API_PORT: u16 = 8765;
+const HEALTH_ATTEMPTS: u8 = 30;
+const HEALTH_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 struct RunOverlayState {
     active: Arc<AtomicBool>,
+}
+
+struct DependencyInstallState {
+    active: AtomicBool,
+}
+
+struct BackendState {
+    child: Mutex<Option<Child>>,
+    ready: AtomicBool,
+}
+
+impl Default for BackendState {
+    fn default() -> Self {
+        Self {
+            child: Mutex::new(None),
+            ready: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BackendStatus {
+    base_url: String,
+    ready: bool,
+    packaged: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDecision {
+    ExitAndStopBackend,
+    KeepRunningForActiveWork,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupDecision {
+    AlreadyStarted,
+    StartOwnedBackend,
+    RejectOccupiedPort,
 }
 
 impl Default for RunOverlayState {
@@ -24,6 +69,175 @@ impl Default for RunOverlayState {
             active: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+impl Default for DependencyInstallState {
+    fn default() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+        }
+    }
+}
+
+fn packaged_api_base() -> String {
+    format!("http://{PACKAGED_API_HOST}:{PACKAGED_API_PORT}")
+}
+
+fn sidecar_paths(executable_dir: &Path) -> (PathBuf, PathBuf) {
+    (
+        executable_dir.join("missus-tom-backend"),
+        executable_dir.join("ont-analysis-runner"),
+    )
+}
+
+fn parse_health_response(response: &str) -> bool {
+    let Some((status_line, body)) = response.split_once("\r\n") else {
+        return false;
+    };
+    if !status_line.starts_with("HTTP/1.")
+        || !status_line.split_whitespace().any(|part| part == "200")
+    {
+        return false;
+    }
+    let Some((_, body)) = body.split_once("\r\n\r\n") else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/data/status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("ok")
+}
+
+fn health_is_ready() -> bool {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let address: SocketAddr = format!("{PACKAGED_API_HOST}:{PACKAGED_API_PORT}")
+        .parse()
+        .expect("packaged API address is valid");
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(150)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok() && parse_health_response(&response)
+}
+
+fn packaged_port_is_available() -> bool {
+    std::net::TcpListener::bind((PACKAGED_API_HOST, PACKAGED_API_PORT)).is_ok()
+}
+
+fn startup_decision(port_is_available: bool, child_exists: bool) -> StartupDecision {
+    if child_exists {
+        StartupDecision::AlreadyStarted
+    } else if port_is_available {
+        StartupDecision::StartOwnedBackend
+    } else {
+        StartupDecision::RejectOccupiedPort
+    }
+}
+
+fn close_decision(run_is_active: bool, install_is_active: bool) -> CloseDecision {
+    if run_is_active || install_is_active {
+        CloseDecision::KeepRunningForActiveWork
+    } else {
+        CloseDecision::ExitAndStopBackend
+    }
+}
+
+fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not locate packaged resources: {error}"))?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate application data: {error}"))?;
+    let executable_dir = std::env::current_exe()
+        .map_err(|error| format!("Could not locate the packaged executable: {error}"))?
+        .parent()
+        .ok_or_else(|| "The packaged executable has no parent directory.".to_string())?
+        .to_path_buf();
+    std::fs::create_dir_all(&app_data_dir)
+        .map_err(|error| format!("Could not create application data directory: {error}"))?;
+
+    let (backend, ont_runner) = sidecar_paths(&executable_dir);
+    if !backend.is_file() || !ont_runner.is_file() {
+        return Err(
+            "Packaged backend sidecars are missing. Rebuild the Linux sidecars before bundling."
+                .to_string(),
+        );
+    }
+
+    let state = app.state::<BackendState>();
+    let child = state
+        .child
+        .lock()
+        .map_err(|_| "Backend lifecycle state is unavailable.".to_string())?;
+    match startup_decision(packaged_port_is_available(), child.is_some()) {
+        StartupDecision::AlreadyStarted => return Ok(()),
+        StartupDecision::RejectOccupiedPort => {
+            return Err(
+                "The packaged backend port is already in use; refusing to adopt or stop that process."
+                    .to_string(),
+            );
+        }
+        StartupDecision::StartOwnedBackend => {}
+    }
+    drop(child);
+    let mut child = state
+        .child
+        .lock()
+        .map_err(|_| "Backend lifecycle state is unavailable.".to_string())?;
+    let started = Command::new(&backend)
+        .args([] as [&str; 0])
+        .env("MISSUS_TOM_API_HOST", PACKAGED_API_HOST)
+        .env("MISSUS_TOM_API_PORT", PACKAGED_API_PORT.to_string())
+        .env("MISSUS_TOM_RESOURCE_ROOT", &resource_dir)
+        .env("MISSUS_TOM_STATE_DIR", &app_data_dir)
+        .env("MISSUS_TOM_ONT_RUNNER", &ont_runner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start the packaged backend: {error}"))?;
+    *child = Some(started);
+    drop(child);
+
+    for _ in 0..HEALTH_ATTEMPTS {
+        if health_is_ready() {
+            state.ready.store(true, Ordering::Release);
+            return Ok(());
+        }
+        std::thread::sleep(HEALTH_RETRY_DELAY);
+    }
+    stop_owned_backend(&state);
+    Err("The packaged backend did not become ready on its dedicated local port.".to_string())
+}
+
+fn stop_owned_backend(state: &BackendState) {
+    let Ok(mut child) = state.child.lock() else {
+        return;
+    };
+    if let Some(mut child) = child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    state.ready.store(false, Ordering::Release);
 }
 
 fn should_show_overlay(active: bool, main_is_minimized: bool) -> bool {
@@ -99,6 +313,32 @@ fn set_run_overlay_active(
     state.active.store(active, Ordering::Release);
     sync_run_overlay(&window.app_handle(), active);
     Ok(())
+}
+
+#[tauri::command]
+fn set_dependency_install_active(
+    window: WebviewWindow,
+    state: State<'_, DependencyInstallState>,
+    active: bool,
+) -> Result<(), String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    state.active.store(active, Ordering::Release);
+    Ok(())
+}
+
+#[tauri::command]
+fn backend_status(state: State<'_, BackendState>) -> BackendStatus {
+    let packaged_ready =
+        !cfg!(debug_assertions) && state.ready.load(Ordering::Acquire) && health_is_ready();
+    BackendStatus {
+        base_url: if cfg!(debug_assertions) {
+            "http://127.0.0.1:8000".to_string()
+        } else {
+            packaged_api_base()
+        },
+        ready: !cfg!(debug_assertions) && packaged_ready,
+        packaged: !cfg!(debug_assertions),
+    }
 }
 
 #[tauri::command]
@@ -286,6 +526,11 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(RunOverlayState::default());
+            app.manage(DependencyInstallState::default());
+            app.manage(BackendState::default());
+            if !cfg!(debug_assertions) {
+                start_packaged_backend(&app.handle())?;
+            }
 
             let main = app
                 .get_webview_window(MAIN_WINDOW_LABEL)
@@ -324,12 +569,35 @@ pub fn run() {
             if window.label() == MAIN_WINDOW_LABEL
                 && matches!(event, WindowEvent::CloseRequested { .. })
             {
-                if let Some(overlay) = window.app_handle().get_webview_window(RUN_OVERLAY_LABEL) {
-                    let _ = overlay.close();
+                let active = window
+                    .app_handle()
+                    .state::<RunOverlayState>()
+                    .active
+                    .load(Ordering::Acquire);
+                let install_active = window
+                    .app_handle()
+                    .state::<DependencyInstallState>()
+                    .active
+                    .load(Ordering::Acquire);
+                match close_decision(active, install_active) {
+                    CloseDecision::KeepRunningForActiveWork => {
+                        if let WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                        }
+                        let _ = window.hide();
+                    }
+                    CloseDecision::ExitAndStopBackend => {
+                        if let Some(overlay) =
+                            window.app_handle().get_webview_window(RUN_OVERLAY_LABEL)
+                        {
+                            let _ = overlay.close();
+                        }
+                        stop_owned_backend(&window.app_handle().state::<BackendState>());
+                        // The overlay is a second native window, so explicitly exit when the main
+                        // window closes instead of allowing it to keep the application alive.
+                        window.app_handle().exit(0);
+                    }
                 }
-                // The overlay is a second native window, so explicitly exit when the main
-                // window closes instead of allowing it to keep the application alive.
-                window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -339,7 +607,9 @@ pub fn run() {
             read_text_file,
             open_directory,
             set_run_overlay_active,
-            restore_main_window
+            set_dependency_install_active,
+            restore_main_window,
+            backend_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running Missus Tom");
@@ -347,7 +617,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bottom_left_overlay_position, should_show_overlay};
+    use std::path::Path;
+
+    use super::{
+        bottom_left_overlay_position, close_decision, parse_health_response, should_show_overlay,
+        sidecar_paths, startup_decision, CloseDecision, StartupDecision,
+    };
 
     #[test]
     fn overlay_is_only_shown_for_an_active_minimized_run() {
@@ -366,6 +641,62 @@ mod tests {
         assert_eq!(
             bottom_left_overlay_position((0, 0), (2880, 1620), 1.5),
             (24, 1146)
+        );
+    }
+
+    #[test]
+    fn packaged_sidecars_use_tauri_runtime_names_next_to_the_app() {
+        let (backend, runner) = sidecar_paths(Path::new("/app/bin"));
+        assert_eq!(backend, Path::new("/app/bin/missus-tom-backend"));
+        assert_eq!(runner, Path::new("/app/bin/ont-analysis-runner"));
+    }
+
+    #[test]
+    fn health_response_requires_the_expected_api_envelope() {
+        assert!(parse_health_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"status\":\"ok\"}}"
+        ));
+        assert!(!parse_health_response(
+            "HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"status\":\"starting\"}}"
+        ));
+        assert!(!parse_health_response(
+            "HTTP/1.1 503 Service Unavailable\r\n\r\n{\"data\":{\"status\":\"ok\"}}"
+        ));
+    }
+
+    #[test]
+    fn active_runs_keep_the_owned_backend_alive_on_close() {
+        assert_eq!(
+            close_decision(true, false),
+            CloseDecision::KeepRunningForActiveWork
+        );
+        assert_eq!(
+            close_decision(false, true),
+            CloseDecision::KeepRunningForActiveWork
+        );
+        assert_eq!(
+            close_decision(true, true),
+            CloseDecision::KeepRunningForActiveWork
+        );
+        assert_eq!(
+            close_decision(false, false),
+            CloseDecision::ExitAndStopBackend
+        );
+    }
+
+    #[test]
+    fn backend_never_adopts_an_occupied_packaged_port() {
+        assert_eq!(
+            startup_decision(false, false),
+            StartupDecision::RejectOccupiedPort
+        );
+        assert_eq!(
+            startup_decision(false, true),
+            StartupDecision::AlreadyStarted
+        );
+        assert_eq!(
+            startup_decision(true, false),
+            StartupDecision::StartOwnedBackend
         );
     }
 }

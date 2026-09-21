@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0.0",
+  "project_name": "Mouse ONT example", "project_identifier": "00000000-0000-4000-8000-000000000001", "created_at": "2026-01-01T00:00:00Z",
+  "input_directory": "/data/ont", "output_directory": "/data/output", "pipeline_identifier": "ont-analysis", "pipeline_version": "0.1.0", "organism": "Mus musculus", "reference_genome": "GRCm38p6", "annotation_source": "manifest", "library_type": "unknown", "read_layout": "single-end", "strandedness": "unknown",
+  "reference_resources": {
+    "reference_fasta": "/refs/GRCm38p6.fa", "reference_fai": "/refs/GRCm38p6.fa.fai", "minimap2_index": "/refs/GRCm38p6.lr-hq.mmi",
+    "gencode_gff3": "/refs/GRCm38p6.gencode.gff3.gz", "cpg_islands": "/refs/GRCm38p6.cpg_islands.json", "ont_instrument_report": "/data/ont/report.html",
+    "ccre_table": "/refs/GRCm38p6.ccre.csv", "intergenic_bed": "/refs/GRCm38p6.intergenic.bed"
+  },
+  "samples": [{"sample_id": "mouse_ont_001", "r1_files": [], "r2_files": [], "ont_bam_files": ["/data/ont/pass_01.bam"], "abundance_tsv": null, "condition": "unknown", "biological_replicate": "1", "batch": null, "covariates": {}, "included": true}],
+  "comparisons": [], "parameters": {}, "resource_profile": {"cpus": 4, "memory_gb": 16, "max_parallel_tasks": 1}, "execution_profile": "local", "application_version": "0.1.0", "pipeline_status": "validated"
+}

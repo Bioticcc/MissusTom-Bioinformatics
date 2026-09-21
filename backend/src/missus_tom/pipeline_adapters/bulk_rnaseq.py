@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from missus_tom.models.run import (
     RunStartStage,
 )
 from missus_tom.pipeline_adapters.base import PipelineAdapter
+from missus_tom.services.dependencies import runtime_environment, runtime_tool
 from missus_tom.services.preflight import project_preflight
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resources import execution_resource_checks, validate_execution_resources
@@ -31,7 +31,11 @@ class BulkRnaSeqAdapter(PipelineAdapter):
 
     @property
     def repository_root(self) -> Path:
-        return Path(__file__).resolve().parents[4]
+        return settings.resource_root
+
+    @property
+    def workflow_directory(self) -> Path:
+        return self.repository_root / "workflows" / "bulk_rnaseq"
 
     def expected_stages(self) -> list[PlannedStage]:
         return [
@@ -347,7 +351,10 @@ class BulkRnaSeqAdapter(PipelineAdapter):
 
         validate_execution_resources(manifest, analysis_only=start_stage == RunStartStage.ANALYSIS)
 
-        if shutil.which("nextflow") is None or shutil.which("docker") is None:
+        if (
+            runtime_tool("nextflow", self.pipeline_identifier) is None
+            or runtime_tool("docker", self.pipeline_identifier) is None
+        ):
             raise ValueError("Nextflow and Docker must be available in PATH")
         try:
             docker_check = subprocess.run(
@@ -356,6 +363,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
                 text=True,
                 timeout=8,
                 check=False,
+                env=runtime_environment(self.pipeline_identifier),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ValueError("Docker status could not be checked") from exc

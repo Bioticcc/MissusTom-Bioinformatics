@@ -49,6 +49,11 @@ export async function setRunOverlayActive(active: boolean): Promise<void> {
   await invoke("set_run_overlay_active", { active });
 }
 
+export async function setDependencyInstallActive(active: boolean): Promise<void> {
+  if (!isDesktopShell()) return;
+  await invoke("set_dependency_install_active", { active });
+}
+
 export async function restoreMainWindow(): Promise<void> {
   if (!isDesktopShell()) return;
   await invoke("restore_main_window");

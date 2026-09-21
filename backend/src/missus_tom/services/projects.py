@@ -29,11 +29,28 @@ PROJECT_DIRECTORIES = (
     "reports",
     "logs",
 )
+ONT_PROJECT_DIRECTORIES = (
+    "input_manifest",
+    "configuration",
+    "work",
+    "results/00_manifests",
+    "results/config",
+    "results/01_alignment",
+    "results/02_alignment_qc",
+    "results/03_ont_qc_coverage",
+    "results/04_methylation",
+    "results/05_methylation_exploration",
+    "reports",
+    "logs",
+)
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
-def validate_project(manifest: ProjectManifest) -> ProjectValidationResult:
-    checks = project_preflight(manifest)
+def validate_project(
+    manifest: ProjectManifest, *, adapter: object | None = None
+) -> ProjectValidationResult:
+    validate = getattr(adapter, "validate_project", None)
+    checks = validate(manifest) if callable(validate) else project_preflight(manifest)
     valid = not any(check.status == CheckStatus.BLOCKING for check in checks)
     return ProjectValidationResult(valid=valid, manifest=manifest, checks=checks)
 
@@ -139,8 +156,16 @@ def open_project(
     return manifest
 
 
-def _validate_layout(project_root: Path) -> None:
-    for relative in PROJECT_DIRECTORIES:
+def project_directories(manifest: ProjectManifest) -> tuple[str, ...]:
+    return (
+        ONT_PROJECT_DIRECTORIES
+        if manifest.pipeline_identifier == "ont-analysis"
+        else PROJECT_DIRECTORIES
+    )
+
+
+def _validate_layout(project_root: Path, directories: tuple[str, ...]) -> None:
+    for relative in directories:
         candidate = project_root
         for part in Path(relative).parts:
             candidate = candidate / part
@@ -171,8 +196,9 @@ def save_project(
     manifest: ProjectManifest,
     *,
     history_store: ProjectHistoryStore | None = None,
+    adapter: object | None = None,
 ) -> ProjectSaveResult:
-    validation = validate_project(manifest)
+    validation = validate_project(manifest, adapter=adapter)
     if not validation.valid:
         blocking = [
             check.message for check in validation.checks if check.status == CheckStatus.BLOCKING
@@ -180,7 +206,8 @@ def save_project(
         raise ValueError("Project has blocking validation failures: " + "; ".join(blocking))
 
     project_directory = Path(manifest.output_directory)
-    _validate_layout(project_directory)
+    directories = project_directories(manifest)
+    _validate_layout(project_directory, directories)
     project_directory.mkdir(parents=True, exist_ok=True)
     with _project_save_lock(project_directory):
         manifest_path = project_directory / "input_manifest" / "project_manifest.json"
@@ -192,7 +219,7 @@ def save_project(
                     "Open that project or choose a different output folder."
                 )
         created: list[str] = []
-        for relative in PROJECT_DIRECTORIES:
+        for relative in directories:
             destination = project_directory / relative
             destination.mkdir(parents=True, exist_ok=True)
             created.append(str(destination))

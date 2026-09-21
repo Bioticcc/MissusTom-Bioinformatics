@@ -11,6 +11,12 @@ from pydantic import ValidationError
 
 from missus_tom.config import settings
 from missus_tom.models.common import ApiResponse
+from missus_tom.models.demos import DemoPrepareRequest, DemoStatus
+from missus_tom.models.dependencies import (
+    DependencyInstallJob,
+    DependencyInstallRequest,
+    DependencyStatus,
+)
 from missus_tom.models.directories import DirectoryPreview, DirectoryPreviewRequest
 from missus_tom.models.discovery import (
     FastqDiscoveryRequest,
@@ -36,7 +42,10 @@ from missus_tom.models.run import (
     RunRecord,
     RunStartRequest,
 )
-from missus_tom.pipeline_adapters import BulkRnaSeqAdapter
+from missus_tom.pipeline_adapters import default_pipeline_registry
+from missus_tom.pipeline_adapters.base import PipelineAdapter
+from missus_tom.services.demos import demo_service
+from missus_tom.services.dependencies import dependency_installer
 from missus_tom.services.directories import preview_directory
 from missus_tom.services.fastq import discover_fastqs
 from missus_tom.services.metadata import read_metadata_csv
@@ -51,8 +60,15 @@ from missus_tom.services.quantifications import discover_quantifications
 from missus_tom.services.runs import RunManager
 
 router = APIRouter()
-adapter = BulkRnaSeqAdapter()
-run_manager = RunManager(adapter)
+pipeline_registry = default_pipeline_registry()
+run_manager = RunManager(pipeline_registry)
+
+
+def _adapter_for(manifest: ProjectManifest) -> PipelineAdapter:
+    try:
+        return pipeline_registry.for_manifest(manifest)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/health", response_model=ApiResponse[dict[str, Any]])
@@ -143,7 +159,7 @@ def post_directory_preview(
 def post_project_validate(
     manifest: ProjectManifest,
 ) -> ApiResponse[ProjectValidationResult]:
-    return ApiResponse(data=validate_project(manifest))
+    return ApiResponse(data=validate_project(manifest, adapter=_adapter_for(manifest)))
 
 
 @router.get(f"{settings.api_prefix}/projects", response_model=ApiResponse[list[ProjectSummary]])
@@ -158,7 +174,8 @@ def get_projects() -> ApiResponse[list[ProjectSummary]]:
 def post_project_open(request: ProjectOpenRequest) -> ApiResponse[ProjectOpenResult]:
     try:
         manifest = open_project(Path(request.manifest_path))
-        validation = validate_project(manifest)
+        adapter = _adapter_for(manifest)
+        validation = validate_project(manifest, adapter=adapter)
         plan = adapter.construct_run_plan(manifest)
         if not validation.valid:
             plan.execution_enabled = False
@@ -182,7 +199,7 @@ def post_project_open(request: ProjectOpenRequest) -> ApiResponse[ProjectOpenRes
 )
 def post_project_save(manifest: ProjectManifest) -> ApiResponse[ProjectSaveResult]:
     try:
-        result = save_project(manifest)
+        result = save_project(manifest, adapter=_adapter_for(manifest))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ApiResponse(data=result)
@@ -190,6 +207,7 @@ def post_project_save(manifest: ProjectManifest) -> ApiResponse[ProjectSaveResul
 
 @router.post(f"{settings.api_prefix}/runs/plan", response_model=ApiResponse[RunPlan])
 def post_run_plan(request: RunPlanRequest) -> ApiResponse[RunPlan]:
+    adapter = _adapter_for(request.manifest)
     checks = adapter.validate_project(request.manifest)
     blocking = [check.message for check in checks if check.status.value == "blocking_failure"]
     if blocking:
@@ -217,15 +235,53 @@ def get_human_demo() -> ApiResponse[HumanDemoProject]:
             status_code=409, detail="The prepared demo manifest is invalid"
         ) from exc
     return ApiResponse(
-        data=HumanDemoProject(manifest=manifest, plan=adapter.construct_run_plan(manifest))
+        data=HumanDemoProject(
+            manifest=manifest, plan=_adapter_for(manifest).construct_run_plan(manifest)
+        )
     )
+
+
+@router.get(f"{settings.api_prefix}/demos", response_model=ApiResponse[list[DemoStatus]])
+def get_demos() -> ApiResponse[list[DemoStatus]]:
+    return ApiResponse(data=demo_service.list())
+
+
+@router.get(
+    f"{settings.api_prefix}/demos/{{pipeline_identifier}}/status",
+    response_model=ApiResponse[DemoStatus],
+)
+def get_demo_status(pipeline_identifier: str) -> ApiResponse[DemoStatus]:
+    try:
+        return ApiResponse(data=demo_service.status(pipeline_identifier))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    f"{settings.api_prefix}/demos/{{pipeline_identifier}}/prepare",
+    response_model=ApiResponse[DemoStatus],
+)
+def post_demo_prepare(
+    pipeline_identifier: str, request: DemoPrepareRequest
+) -> ApiResponse[DemoStatus]:
+    # Typed consent prevents a bodyless cross-site-simple POST from creating files.
+    del request
+    try:
+        return ApiResponse(data=demo_service.prepare(pipeline_identifier))
+    except ValueError as exc:
+        status_code = 404 if str(exc).startswith("unsupported demo") else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.post(f"{settings.api_prefix}/runs/start", response_model=ApiResponse[RunRecord])
 def post_run_start(request: RunStartRequest) -> ApiResponse[RunRecord]:
+    adapter = _adapter_for(request.manifest)
     checks = adapter.validate_project(request.manifest)
     analysis_only_ignored_checks = (
-        {"fastq_pairing", "references"} if request.start_stage.value == "analysis" else set()
+        {"fastq_pairing", "references"}
+        if request.manifest.pipeline_identifier == "bulk-rnaseq"
+        and request.start_stage.value == "analysis"
+        else set()
     )
     blocking = [
         check.message
@@ -309,12 +365,47 @@ def post_run_cancel(job_identifier: str) -> ApiResponse[RunRecord]:
     response_model=ApiResponse[list[PipelineStatusResult]],
 )
 def get_pipelines() -> ApiResponse[list[PipelineStatusResult]]:
-    return ApiResponse(data=[adapter.inspect_availability()])
+    return ApiResponse(data=[adapter.inspect_availability() for adapter in pipeline_registry.all()])
 
 
 @router.get(
-    f"{settings.api_prefix}/pipelines/bulk-rnaseq/status",
+    f"{settings.api_prefix}/pipelines/{{pipeline_identifier}}/status",
     response_model=ApiResponse[PipelineStatusResult],
 )
-def get_bulk_pipeline_status() -> ApiResponse[PipelineStatusResult]:
-    return ApiResponse(data=adapter.inspect_availability())
+def get_pipeline_status(pipeline_identifier: str) -> ApiResponse[PipelineStatusResult]:
+    try:
+        return ApiResponse(data=pipeline_registry.get(pipeline_identifier).inspect_availability())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/pipelines/{{pipeline_identifier}}/dependencies",
+    response_model=ApiResponse[DependencyStatus],
+)
+def get_pipeline_dependencies(pipeline_identifier: str) -> ApiResponse[DependencyStatus]:
+    try:
+        # The registry remains the public authority for supported identifiers.
+        pipeline_registry.get(pipeline_identifier)
+        return ApiResponse(data=dependency_installer.status(pipeline_identifier))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    f"{settings.api_prefix}/pipelines/{{pipeline_identifier}}/dependencies/install",
+    response_model=ApiResponse[DependencyInstallJob],
+)
+def post_pipeline_dependencies_install(
+    pipeline_identifier: str, request: DependencyInstallRequest
+) -> ApiResponse[DependencyInstallJob]:
+    # Typed consent is intentionally required: bodyless POST is cross-site-simple.
+    del request
+    try:
+        pipeline_registry.get(pipeline_identifier)
+        return ApiResponse(data=dependency_installer.install(pipeline_identifier))
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("unsupported pipeline identifier"):
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=409, detail=message) from exc

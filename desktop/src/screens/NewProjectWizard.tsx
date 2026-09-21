@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { apiRequest } from "../api";
 import { CheckList } from "../components/CheckList";
 import { FolderPreview } from "../components/FolderPreview";
+import { PipelineDependencies } from "../components/PipelineDependencies";
 import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
 import { loadProjectDefaults } from "../preferences";
 import type {
@@ -17,7 +18,7 @@ import type {
   RunStartStage,
 } from "../types";
 
-const defaultSteps = [
+const bulkSteps = [
   "Project & directories",
   "FASTQ discovery",
   "Sample review",
@@ -27,6 +28,18 @@ const defaultSteps = [
   "Preflight validation",
   "Review & save",
 ];
+
+const ontSteps = [
+  "Project & directories",
+  "BAM selection",
+  "Sample review",
+  "ONT pipeline options",
+  "Stage 05 annotation resources",
+  "Preflight validation",
+  "Review & save",
+];
+
+type PipelineIdentifier = "bulk-rnaseq" | "ont-analysis";
 
 type InputDiscoveryResult = FastqDiscoveryResult | QuantificationDiscoveryResult;
 
@@ -44,6 +57,14 @@ interface OptionsState {
   annotationGtf: string;
   kallistoIndex: string;
   biomart: string;
+  referenceFasta: string;
+  referenceFai: string;
+  minimap2Index: string;
+  gencodeGff3: string;
+  cpgIslands: string;
+  ccreTable: string;
+  intergenicBed: string;
+  ontInstrumentReport: string;
   libraryType: string;
   readLayout: "paired-end" | "single-end";
   strandedness: "unstranded" | "forward" | "reverse" | "unknown";
@@ -57,6 +78,11 @@ interface OptionsState {
   minimumGroupSize: number;
   adjustedPValue: number;
   absoluteLog2FoldChange: number;
+  coverageWindowSize: number;
+  modkitFilterPercentile: number;
+  modkitMaxDepth: number;
+  explorationMinValidCoverage: number;
+  explorationMinFeatureCpgs: number;
 }
 
 interface MetadataImportStatus {
@@ -98,6 +124,7 @@ function normalizeDiscoveredSample(sample: ProposedSample): ProposedSample {
     ...sample,
     r1_files: Array.isArray(sample.r1_files) ? sample.r1_files : [],
     r2_files: Array.isArray(sample.r2_files) ? sample.r2_files : [],
+    ont_bam_files: Array.isArray(sample.ont_bam_files) ? sample.ont_bam_files : [],
     abundance_tsv: typeof sample.abundance_tsv === "string" ? sample.abundance_tsv : null,
     lanes: Array.isArray(sample.lanes) ? sample.lanes : [],
     warnings: Array.isArray(sample.warnings) ? sample.warnings : [],
@@ -117,6 +144,7 @@ export function NewProjectWizard({
 }) {
   const [projectDefaults] = useState(loadProjectDefaults);
   const [step, setStep] = useState(0);
+  const [pipelineIdentifier, setPipelineIdentifier] = useState<PipelineIdentifier>("bulk-rnaseq");
   const [startStage, setStartStage] = useState<RunStartStage>("quantification");
   const [details, setDetails] = useState<DetailsState>({
     projectName: "",
@@ -131,6 +159,14 @@ export function NewProjectWizard({
     annotationGtf: "",
     kallistoIndex: "",
     biomart: "",
+    referenceFasta: "",
+    referenceFai: "",
+    minimap2Index: "",
+    gencodeGff3: "",
+    cpgIslands: "",
+    ccreTable: "",
+    intergenicBed: "",
+    ontInstrumentReport: "",
     libraryType: "total RNA",
     readLayout: "paired-end",
     strandedness: "reverse",
@@ -144,6 +180,11 @@ export function NewProjectWizard({
     minimumGroupSize: 2,
     adjustedPValue: 0.05,
     absoluteLog2FoldChange: 0.3,
+    coverageWindowSize: 100000,
+    modkitFilterPercentile: 0.1,
+    modkitMaxDepth: 60000,
+    explorationMinValidCoverage: 10,
+    explorationMinFeatureCpgs: 5,
   });
   const [discovery, setDiscovery] = useState<InputDiscoveryResult | null>(null);
   const [samples, setSamples] = useState<ProposedSample[]>([]);
@@ -169,11 +210,12 @@ export function NewProjectWizard({
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
+  const isOntPipeline = pipelineIdentifier === "ont-analysis";
   const steps = useMemo(
-    () => defaultSteps.map((label, index) => (
-      index === 1 ? (startStage === "analysis" ? "Kallisto discovery" : "FASTQ discovery") : label
+    () => (isOntPipeline ? ontSteps : bulkSteps).map((label, index) => (
+      !isOntPipeline && index === 1 ? (startStage === "analysis" ? "Kallisto discovery" : "FASTQ discovery") : label
     )),
-    [startStage],
+    [isOntPipeline, startStage],
   );
 
   const groups = useMemo(
@@ -216,6 +258,41 @@ export function NewProjectWizard({
     invalidateValidation();
   };
 
+  const updatePipeline = (value: PipelineIdentifier) => {
+    if (value === pipelineIdentifier) return;
+    setPipelineIdentifier(value);
+    setStep(0);
+    setStartStage("quantification");
+    setDetails((current) => ({ ...current, inputDirectory: "" }));
+    setInputPreview(null);
+    setDiscovery(null);
+    setSamples([]);
+    setComparisons([]);
+    setMetadataImport(null);
+    setOptions((current) => value === "ont-analysis"
+      ? {
+          ...current,
+          organism: "Mus musculus",
+          referenceGenome: "GRCm38p6",
+          annotationSource: "GENCODE",
+          libraryType: "ONT long-read",
+          readLayout: "single-end",
+          strandedness: "unknown",
+          executionProfile: "local",
+        }
+      : {
+          ...current,
+          organism: "Homo sapiens",
+          referenceGenome: "GRCh38",
+          annotationSource: "GENCODE",
+          libraryType: "total RNA",
+          readLayout: "paired-end",
+          strandedness: "reverse",
+          executionProfile: "docker",
+        });
+    invalidateValidation();
+  };
+
   const updateDetails = (key: keyof DetailsState, value: string) => {
     setDetails((current) => {
       if (key === "projectName" && projectDefaults.projectParentDirectory) {
@@ -254,7 +331,7 @@ export function NewProjectWizard({
     try {
       const directory = await selectDirectory(
         kind === "input"
-          ? (startStage === "analysis" ? "Select Kallisto results folder" : "Select input FASTQ folder")
+          ? (isOntPipeline ? "Select ONT BAM source folder" : startStage === "analysis" ? "Select Kallisto results folder" : "Select input FASTQ folder")
           : "Select project output folder",
       );
       if (!directory) return;
@@ -289,7 +366,7 @@ export function NewProjectWizard({
   };
 
   const chooseReferenceFile = async (
-    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf",
+    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
     title: string,
   ) => {
     const busyKey = `reference-${key}`;
@@ -307,7 +384,7 @@ export function NewProjectWizard({
 
   const chooseSampleInput = async (
     index: number,
-    key: "r1_files" | "r2_files" | "abundance_tsv",
+    key: "r1_files" | "r2_files" | "abundance_tsv" | "ont_bam_files",
   ) => {
     const multiple = key !== "abundance_tsv";
     const busyKey = `sample-${index}-${key}`;
@@ -315,7 +392,11 @@ export function NewProjectWizard({
     setError("");
     try {
       const selected = await selectFiles(
-        key === "abundance_tsv" ? "Select Kallisto abundance.tsv" : `Select ${key === "r1_files" ? "R1" : "R2"} FASTQ file(s)`,
+        key === "abundance_tsv"
+          ? "Select Kallisto abundance.tsv"
+          : key === "ont_bam_files"
+            ? "Select ONT BAM file(s)"
+            : `Select ${key === "r1_files" ? "R1" : "R2"} FASTQ file(s)`,
         multiple,
       );
       if (!selected) return;
@@ -323,6 +404,39 @@ export function NewProjectWizard({
       else updateSample(index, key, selected);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The file could not be selected.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const addOntBamSamples = async () => {
+    setBusy("ont-bam-select");
+    setError("");
+    try {
+      const selected = await selectFiles("Select ONT BAM file(s)", true);
+      if (!selected?.length) return;
+      setSamples((current) => {
+        const existing = current[0];
+        if (existing) return [{ ...existing, ont_bam_files: [...new Set([...existing.ont_bam_files, ...selected])] }];
+        return [{
+          sample_id: "ont_sample",
+          r1_files: [],
+          r2_files: [],
+          ont_bam_files: selected,
+          abundance_tsv: null,
+          lanes: [],
+          pairing_status: "single" as const,
+          warnings: [],
+          condition: "",
+          biological_replicate: "",
+          batch: null,
+          covariates: {},
+          included: true,
+        }];
+      });
+      invalidateValidation();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "ONT BAM files could not be selected.");
     } finally {
       setBusy("");
     }
@@ -386,7 +500,7 @@ export function NewProjectWizard({
 
   const referenceFileField = (
     label: string,
-    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf",
+    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
     placeholder: string,
     required = false,
   ) => (
@@ -447,12 +561,22 @@ export function NewProjectWizard({
 
   const buildManifest = (): ProjectManifest => {
     const referenceResources: Record<string, string> = {};
-    if (startStage === "quantification") {
+    if (!isOntPipeline && startStage === "quantification") {
       if (options.transcriptomeFasta.trim()) referenceResources.transcriptome_fasta = options.transcriptomeFasta;
       if (options.annotationGtf.trim()) referenceResources.annotation_gtf = options.annotationGtf;
       if (options.kallistoIndex.trim()) referenceResources.kallisto_index = options.kallistoIndex;
     }
-    if (options.biomart.trim()) referenceResources.biomart = options.biomart;
+    if (!isOntPipeline && options.biomart.trim()) referenceResources.biomart = options.biomart;
+    if (isOntPipeline) {
+      if (options.referenceFasta.trim()) referenceResources.reference_fasta = options.referenceFasta;
+      if (options.referenceFai.trim()) referenceResources.reference_fai = options.referenceFai;
+      if (options.minimap2Index.trim()) referenceResources.minimap2_index = options.minimap2Index;
+      if (options.gencodeGff3.trim()) referenceResources.gencode_gff3 = options.gencodeGff3;
+      if (options.cpgIslands.trim()) referenceResources.cpg_islands = options.cpgIslands;
+      if (options.ccreTable.trim()) referenceResources.ccre_table = options.ccreTable;
+      if (options.intergenicBed.trim()) referenceResources.intergenic_bed = options.intergenicBed;
+      if (options.ontInstrumentReport.trim()) referenceResources.ont_instrument_report = options.ontInstrumentReport;
+    }
 
     return {
       schema_version: "1.0.0",
@@ -461,39 +585,53 @@ export function NewProjectWizard({
       created_at: createdAt,
       input_directory: details.inputDirectory,
       output_directory: details.outputDirectory,
-      pipeline_identifier: "bulk-rnaseq",
-      pipeline_version: "0.4.0",
+      pipeline_identifier: pipelineIdentifier,
+      pipeline_version: isOntPipeline ? "0.1.0" : "0.4.0",
       organism: options.organism,
       reference_genome: options.referenceGenome,
       annotation_source: options.annotationSource,
       reference_resources: referenceResources,
       library_type: options.libraryType,
-      read_layout: options.readLayout,
-      strandedness: options.strandedness,
+      read_layout: isOntPipeline ? "single-end" : options.readLayout,
+      strandedness: isOntPipeline ? "unknown" : options.strandedness,
       samples: samples.map((sample) => ({
         sample_id: sample.sample_id,
         r1_files: sample.r1_files,
-        r2_files: options.readLayout === "single-end" ? [] : sample.r2_files,
-        abundance_tsv: sample.abundance_tsv,
+        r2_files: isOntPipeline || options.readLayout === "single-end" ? [] : sample.r2_files,
+        ont_bam_files: sample.ont_bam_files,
+        abundance_tsv: isOntPipeline ? null : sample.abundance_tsv,
         condition: sample.condition,
         biological_replicate: sample.biological_replicate,
         batch: sample.batch,
         covariates: sample.covariates,
         included: sample.included,
       })),
-      comparisons,
+      comparisons: isOntPipeline ? [] : comparisons,
       parameters: {
-        start_stage: startStage,
-        ...(startStage === "quantification" ? {
+        ...(isOntPipeline ? {} : { start_stage: startStage }),
+        ...(isOntPipeline ? {
+          coverage_window_size: options.coverageWindowSize,
+          methylation_window_size: options.coverageWindowSize,
+          modkit_filter_percentile: options.modkitFilterPercentile,
+          modkit_max_depth: options.modkitMaxDepth,
+          exploration_min_valid_coverage: options.explorationMinValidCoverage,
+          exploration_min_feature_cpgs: options.explorationMinFeatureCpgs,
+          expected_pass_bam_count: samples
+            .filter((sample) => sample.included)
+            .reduce((total, sample) => total + sample.ont_bam_files.length, 0),
+        } : {}),
+        ...(!isOntPipeline && startStage === "quantification" ? {
           adapter_r1: options.adapterR1,
           adapter_r2: options.adapterR2,
           trim_quality: options.trimQuality,
           trim_minimum_length: options.minimumReadLength,
         } : {}),
-        differential_expression: true,
-        minimum_group_size: options.minimumGroupSize,
-        adjusted_p_value: options.adjustedPValue,
-        absolute_log2_fold_change: options.absoluteLog2FoldChange,
+        ...(!isOntPipeline ? {
+          differential_expression: true,
+          minimum_group_size: options.minimumGroupSize,
+          adjusted_p_value: options.adjustedPValue,
+          absolute_log2_fold_change: options.absoluteLog2FoldChange,
+        } : {}),
       },
       resource_profile: { cpus: options.cpus, memory_gb: options.memoryGb, max_parallel_tasks: 1 },
       execution_profile: options.executionProfile,
@@ -515,6 +653,7 @@ export function NewProjectWizard({
         wizard: {
           current_step: step + 1,
           current_step_label: steps[step],
+          pipeline_identifier: pipelineIdentifier,
           start_stage: startStage,
           details,
           options,
@@ -564,12 +703,16 @@ export function NewProjectWizard({
         throw new Error("The settings export does not contain wizard state.");
       }
       const imported = parsed.wizard;
+      const importedPipeline: PipelineIdentifier = imported.pipeline_identifier === "ont-analysis"
+        || (isRecord(parsed.manifest_draft) && parsed.manifest_draft.pipeline_identifier === "ont-analysis")
+        ? "ont-analysis"
+        : "bulk-rnaseq";
       if (
         !isRecord(imported.details)
         || !isRecord(imported.options)
         || !Array.isArray(imported.samples)
         || !Array.isArray(imported.comparisons)
-        || (imported.start_stage !== "quantification" && imported.start_stage !== "analysis")
+        || (importedPipeline === "bulk-rnaseq" && imported.start_stage !== "quantification" && imported.start_stage !== "analysis")
       ) {
         throw new Error("The settings export is incomplete or malformed.");
       }
@@ -592,6 +735,11 @@ export function NewProjectWizard({
 
       const importedSamples = (imported.samples as ProposedSample[]).map((sample) => ({
         ...sample,
+        ont_bam_files: Array.isArray(sample.ont_bam_files) ? sample.ont_bam_files : [],
+        abundance_tsv: typeof sample.abundance_tsv === "string" ? sample.abundance_tsv : null,
+        lanes: Array.isArray(sample.lanes) ? sample.lanes : [],
+        warnings: Array.isArray(sample.warnings) ? sample.warnings : [],
+        pairing_status: sample.pairing_status ?? "single",
         covariates: isRecord(sample.covariates) ? sample.covariates : {},
       }));
       const importedComparisons = (imported.comparisons as Comparison[]).map((comparison) => ({
@@ -606,9 +754,10 @@ export function NewProjectWizard({
         : {};
       const manifestDraft = isRecord(parsed.manifest_draft) ? parsed.manifest_draft : {};
 
-      setStartStage(imported.start_stage);
+      setPipelineIdentifier(importedPipeline);
+      setStartStage(imported.start_stage === "analysis" ? "analysis" : "quantification");
       setDetails(imported.details as unknown as DetailsState);
-      setOptions((current) => ({ ...current, ...(imported.options as Partial<OptionsState>) }));
+      setOptions((current) => ({ ...current, ...(imported.options as Partial<OptionsState>), executionProfile: importedPipeline === "ont-analysis" ? "local" : "docker" }));
       setSamples(importedSamples);
       setComparisons(importedComparisons);
       setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
@@ -629,7 +778,8 @@ export function NewProjectWizard({
       }
       if (typeof manifestDraft.created_at === "string") setCreatedAt(manifestDraft.created_at);
       if (typeof imported.current_step === "number") {
-        setStep(Math.max(0, Math.min(steps.length - 1, imported.current_step - 1)));
+        const importedSteps = importedPipeline === "ont-analysis" ? ontSteps : bulkSteps;
+        setStep(Math.max(0, Math.min(importedSteps.length - 1, imported.current_step - 1)));
       }
       setValidation(null);
       setValidatedManifest(null);
@@ -794,15 +944,21 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 1</p><h2>Project details</h2></div></div>
             <p className="helper-copy">Choose where this project starts before selecting its input folder.</p>
             <fieldset className="run-mode-panel setup-mode-panel">
+              <legend>Pipeline</legend>
+              <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (human)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
+              <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse)</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
+            </fieldset>
+            <PipelineDependencies pipelineIdentifier={pipelineIdentifier} />
+            {!isOntPipeline && <fieldset className="run-mode-panel setup-mode-panel">
               <legend>Starting point</legend>
               <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "quantification"} onChange={() => updateStartStage("quantification")} /><span><strong>Start with FASTQ files</strong><small>Run raw QC, trimming, Kallisto quantification, and analysis. Select a folder containing paired R1/R2 FASTQs.</small></span></label>
               <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "analysis"} onChange={() => updateStartStage("analysis")} /><span><strong>Skip quantification</strong><small>Run analysis from existing Kallisto results. Select a folder containing one abundance.tsv file per sample.</small></span></label>
               {startStage === "analysis" && <p className="run-mode-note input-warning"><strong>Different inputs required:</strong> a Kallisto <code>abundance.tsv</code> for every sample, normally arranged as <code>&lt;input&gt;/&lt;sample_id&gt;/abundance.tsv</code>, plus a matching human BioMart table. The tables must come from a compatible human transcript index whose target identifiers retain Ensembl gene metadata. FASTQs and the index file itself are not required.</p>}
-            </fieldset>
+            </fieldset>}
             <label>Project name <span aria-hidden="true">*</span><input value={details.projectName} onChange={(event) => updateDetails("projectName", event.target.value)} placeholder="e.g. Human intervention study" /></label>
             <div className="directory-field">
-              <label>{startStage === "analysis" ? "Kallisto results directory" : "Input FASTQ directory"} <span aria-hidden="true">*</span><input value={details.inputDirectory} onChange={(event) => updateDetails("inputDirectory", event.target.value)} placeholder={startStage === "analysis" ? "/data/kallisto-results" : "/data/sequencing/run-01"} /></label>
-              <div className="directory-actions"><button className="button secondary" type="button" onClick={() => void chooseFolder("input")} disabled={busy.startsWith("input-")}>Select {startStage === "analysis" ? "Kallisto results" : "FASTQ"} folder</button><button className="text-button" type="button" onClick={() => void loadFolderPreview("input", details.inputDirectory)} disabled={!details.inputDirectory || busy === "input-preview"}>Preview typed path</button></div>
+              <label>{isOntPipeline ? "ONT BAM source directory" : startStage === "analysis" ? "Kallisto results directory" : "Input FASTQ directory"} <span aria-hidden="true">*</span><input value={details.inputDirectory} onChange={(event) => updateDetails("inputDirectory", event.target.value)} placeholder={isOntPipeline ? "/data/ont-alignment" : startStage === "analysis" ? "/data/kallisto-results" : "/data/sequencing/run-01"} /></label>
+              <div className="directory-actions"><button className="button secondary" type="button" onClick={() => void chooseFolder("input")} disabled={busy.startsWith("input-")}>Select {isOntPipeline ? "ONT BAM" : startStage === "analysis" ? "Kallisto results" : "FASTQ"} folder</button><button className="text-button" type="button" onClick={() => void loadFolderPreview("input", details.inputDirectory)} disabled={!details.inputDirectory || busy === "input-preview"}>Preview typed path</button></div>
             </div>
             {inputPreview && <FolderPreview label="Input folder" preview={inputPreview} />}
             <div className="directory-field">
@@ -814,6 +970,13 @@ export function NewProjectWizard({
           </section>
         );
       case 1:
+        if (isOntPipeline) return (
+          <section className="wizard-card">
+            <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>Select ONT BAM files</h2></div><button className="button primary" type="button" onClick={() => void addOntBamSamples()} disabled={busy === "ont-bam-select"}>{busy === "ont-bam-select" ? "Selecting…" : "Select BAM files…"}</button></div>
+            <p className="helper-copy">Select the BAM chunks for the single mouse sample. Additional selections add files to the editable <code>ont_bam_files</code> list.</p>
+            {samples.length === 0 ? <div className="empty-state compact"><div className="empty-orbit" aria-hidden="true">⌁</div><h3>No ONT BAM samples</h3><p>Select the BAM files for a sample to continue.</p></div> : <div className="file-preview"><h3>Selected BAM samples</h3><div className="file-preview-list">{samples.map((sample) => <div key={sample.sample_id}><span className="read-chip">BAM</span><code>{sample.sample_id}</code><small>{sample.ont_bam_files.length} file(s)</small></div>)}</div></div>}
+          </section>
+        );
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>{startStage === "analysis" ? "Discover Kallisto results" : "Discover FASTQ files"}</h2></div><button className="button primary" type="button" onClick={discover} disabled={busy === "discover" || !details.inputDirectory}>{busy === "discover" ? "Scanning…" : "Scan directory"}</button></div>
@@ -828,6 +991,13 @@ export function NewProjectWizard({
           </section>
         );
       case 2:
+        if (isOntPipeline) return (
+          <section className="wizard-card wide-card">
+            <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>Review ONT BAM samples</h2></div><span className="count-pill">{samples.length}</span></div>
+            <p className="helper-copy">Review the biological sample identifiers and their explicitly selected BAM chunks.</p>
+            {samples.length === 0 ? <p className="empty-copy">No BAM samples selected. Return to BAM selection first.</p> : <div className="table-scroll"><table className="sample-table analysis-input-table"><thead><tr><th>Use</th><th>Sample identifier</th><th>ONT BAM files</th><th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td><td><div className="sample-path-editor"><textarea rows={3} value={sample.ont_bam_files.join("\n")} onChange={(event) => updateSample(index, "ont_bam_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`ONT BAM files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "ont_bam_files")}>Browse…</button></div></td><td><span className="pair-status pair-single">BAM input</span></td></tr>)}</tbody></table></div>}
+          </section>
+        );
         return (
           <section className="wizard-card wide-card">
             <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>{startStage === "analysis" ? "Review samples and abundance tables" : "Review samples and read pairs"}</h2></div><span className="count-pill">{samples.length}</span></div>
@@ -838,6 +1008,17 @@ export function NewProjectWizard({
           </section>
         );
       case 3:
+        if (isOntPipeline) return (
+          <section className="wizard-card form-stack">
+            <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>ONT pipeline options</h2></div></div>
+            <p className="helper-copy">ONT analysis uses mouse long-read BAM inputs. Library layout and strandedness are recorded as single-end and unknown; no Kallisto or differential-expression settings apply.</p>
+            <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
+            <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<input value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)} /></label></div>
+            <fieldset><legend>Alignment reference paths</legend><p className="helper-copy">Reference FASTA, its separately supplied FASTA index, and a matching minimap2 index are required for the ONT workflow.</p>{referenceFileField("Reference FASTA", "referenceFasta", "/references/GRCm38p6.fa", true)}{referenceFileField("Reference FASTA index (.fai)", "referenceFai", "/references/GRCm38p6.fa.fai", true)}{referenceFileField("minimap2 index", "minimap2Index", "/references/GRCm38p6.mmi", true)}</fieldset>
+            <fieldset><legend>Coverage and methylation parameters</legend><p className="helper-copy">These settings are saved in the manifest. Changing them invalidates the affected stage outputs; scientific interpretation remains single-sample and descriptive.</p><div className="field-triple"><label>Window size (bases)<input type="number" min="1" step="1" value={options.coverageWindowSize} onChange={(event) => updateOptions("coverageWindowSize", Number(event.target.value))} /></label><label>Modkit filter percentile (less than 1)<input type="number" min="0" max="0.99" step="0.01" value={options.modkitFilterPercentile} onChange={(event) => updateOptions("modkitFilterPercentile", Number(event.target.value))} /></label><label>Maximum pileup depth<input type="number" min="1" max="60000" step="1" value={options.modkitMaxDepth} onChange={(event) => updateOptions("modkitMaxDepth", Number(event.target.value))} /></label></div><div className="field-pair"><label>Minimum valid CpG coverage<input type="number" min="1" step="1" value={options.explorationMinValidCoverage} onChange={(event) => updateOptions("explorationMinValidCoverage", Number(event.target.value))} /></label><label>Minimum measured CpGs per feature<input type="number" min="1" step="1" value={options.explorationMinFeatureCpgs} onChange={(event) => updateOptions("explorationMinFeatureCpgs", Number(event.target.value))} /></label></div></fieldset>
+            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local tools</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+          </section>
+        );
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>Confirm experimental design</h2></div></div>
@@ -860,6 +1041,14 @@ export function NewProjectWizard({
           </section>
         );
       case 4:
+        if (isOntPipeline) return (
+          <section className="wizard-card form-stack">
+            <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Optional annotation exploration</h2></div></div>
+            <p className="helper-copy">No existing figures or reports are required. The pipeline generates its own applicable plots and tables from your BAMs. Leave these fields empty for alignment, QC, coverage, and methylation analysis. To add annotation-based exploration, supply all four matching mouse annotation resources below; these describe genomic features, not prior analysis results.</p>
+            <fieldset><legend>Optional annotation set (all four or none)</legend>{referenceFileField("GENCODE GFF3", "gencodeGff3", "/references/gencode.vM25.annotation.gff3.gz")}{referenceFileField("CpG islands JSON", "cpgIslands", "/references/cpg_islands.json")}{referenceFileField("cCRE CSV table", "ccreTable", "/references/ccre.csv")}{referenceFileField("Intergenic BED", "intergenicBed", "/references/intergenic.bed")}</fieldset>
+            <fieldset><legend>Optional sequencing provenance</legend><p className="helper-copy">An existing instrument report may be retained as provenance, but is not needed to run analysis.</p>{referenceFileField("ONT instrument report (optional)", "ontInstrumentReport", "/data/ont/report_run.html")}</fieldset>
+          </section>
+        );
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Build comparisons</h2></div></div>
@@ -869,6 +1058,14 @@ export function NewProjectWizard({
           </section>
         );
       case 5:
+        if (isOntPipeline) return (
+          <section className="wizard-card">
+            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate"}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
+            <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
+            {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
+            <CheckList checks={validation?.checks ?? []} />
+          </section>
+        );
         return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Pipeline options</h2></div></div>
@@ -883,6 +1080,15 @@ export function NewProjectWizard({
           </section>
         );
       case 6:
+        if (isOntPipeline) return (
+          <section className="wizard-card">
+            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Review and save</h2></div></div>
+            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
+            {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
+            {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
+            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save"} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
+          </section>
+        );
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate"}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
@@ -907,7 +1113,7 @@ export function NewProjectWizard({
   return (
     <div className="page-stack wizard-page">
       <header className="page-header">
-        <div><p className="eyebrow">New bulk RNA-seq project</p><h1>{details.projectName || "Untitled project"}</h1><p className="lede">Step {step + 1} of {steps.length} · {steps[step]}</p></div>
+        <div><p className="eyebrow">New {isOntPipeline ? "ONT analysis" : "bulk RNA-seq"} project</p><h1>{details.projectName || "Untitled project"}</h1><p className="lede">Step {step + 1} of {steps.length} · {steps[step]}</p></div>
         <div className="page-header-actions"><button className="button secondary" type="button" onClick={() => void importSettings()} disabled={busy === "import-settings"}>{busy === "import-settings" ? "Importing…" : "Import settings"}</button><button className="button secondary" type="button" onClick={() => void exportSettings()} disabled={busy === "export-settings"}>{busy === "export-settings" ? "Exporting…" : "Export settings"}</button><span className="draft-chip">Unsaved</span><small>Exports include local paths and sample IDs.</small></div>
       </header>
 
