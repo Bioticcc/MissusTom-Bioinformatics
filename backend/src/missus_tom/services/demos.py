@@ -352,9 +352,7 @@ class DemoService:
                     "synthetic_only": True,
                     "network_downloads": False,
                     "execution_supported": True,
-                    "purpose": (
-                        "Synthetic functional validation fixture; not biological data."
-                    ),
+                    "purpose": ("Synthetic functional validation fixture; not biological data."),
                 }
             ),
         )
@@ -393,9 +391,7 @@ class DemoService:
                 if path.is_file() and not path.is_symlink()
             }
         )
-        file_hashes = {
-            relative: self._sha256(bundle / relative) for relative in relative_files
-        }
+        file_hashes = {relative: self._sha256(bundle / relative) for relative in relative_files}
         project_manifest = "project_manifest.json"
         execution_supported = pipeline_identifier == "bulk-rnaseq"
         metadata = {
@@ -440,7 +436,7 @@ class DemoService:
                 fasta.write(f"{header}\n{sequence}\n")
                 biomart_lines.append(f"{gene_id}\t{gene_type}\t{gene_name}\n")
                 gtf_lines.append(
-                    f'synthetic\tfixture\texon\t1\t{len(sequence)}\t.\t+\t.\t'
+                    f"synthetic\tfixture\texon\t1\t{len(sequence)}\t.\t+\t.\t"
                     f'gene_id "{gene_id}"; transcript_id "{transcript_id}";\n'
                 )
             self._write_text(biomart, "".join(biomart_lines))
@@ -467,10 +463,7 @@ class DemoService:
                     read2 = reverse_complement(sequence[-_READ_LENGTH:])
                     read = read1 if mate == 1 else read2
                     for pair in range(1, count + 1):
-                        record = (
-                            f"@{sample_id}_g{index}_p{pair}/{mate}\n"
-                            f"{read}\n+\n{quality}\n"
-                        )
+                        record = f"@{sample_id}_g{index}_p{pair}/{mate}\n{read}\n+\n{quality}\n"
                         handle.write(record.encode("ascii"))
             self._write_bytes(inputs / f"{sample_id}_R{mate}.fastq.gz", buffer.getvalue())
         self._log(job, f"Wrote paired FASTQs for {sample_id}.")
@@ -489,9 +482,7 @@ class DemoService:
         if not index_path.is_file():
             raise RuntimeError("kallisto index command did not create the expected index file")
 
-    def _bulk_manifest(
-        self, bundle: Path, inputs: str, references: str
-    ) -> dict[str, object]:
+    def _bulk_manifest(self, bundle: Path, inputs: str, references: str) -> dict[str, object]:
         samples = [
             self._sample(sample_id, condition, inputs, replicate=replicate)
             for sample_id, condition, replicate, _smoke in _BULK_SAMPLES
@@ -953,9 +944,7 @@ class DemoService:
             process.wait()
             raise
         if return_code != 0:
-            raise RuntimeError(
-                f"command failed with exit code {return_code}: {' '.join(command)}"
-            )
+            raise RuntimeError(f"command failed with exit code {return_code}: {' '.join(command)}")
 
 
 demo_service = DemoService()

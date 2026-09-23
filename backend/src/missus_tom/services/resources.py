@@ -124,9 +124,9 @@ def _filesystem_type(resolved_path: Path) -> str | None:
             if len(parts) < 3:
                 continue
             mount_point = _decode_mount_point(parts[1])
-            if (
-                target == mount_point or target.startswith(mount_point.rstrip("/") + "/")
-            ) and len(mount_point) >= len(best_mount):
+            if (target == mount_point or target.startswith(mount_point.rstrip("/") + "/")) and len(
+                mount_point
+            ) >= len(best_mount):
                 best_mount = mount_point
                 best_fstype = parts[2]
         return best_fstype
@@ -230,9 +230,7 @@ def _workflow_disk_check_status(
     failure: CheckStatus,
     strict: bool,
 ) -> CheckStatus:
-    unconfirmed_wsl = (
-        inspection.measurement == "wsl_virtual" and inspection.host_free_bytes is None
-    )
+    unconfirmed_wsl = inspection.measurement == "wsl_virtual" and inspection.host_free_bytes is None
     if unconfirmed_wsl and strict:
         return failure
     if admission_free is None:
@@ -357,10 +355,7 @@ def execution_resource_checks(
             "(estimate, including work and published copies)"
         )
         if admission_free is None:
-            budget_extra = (
-                "Windows host free space could not be confirmed; "
-                + budget_extra
-            )
+            budget_extra = "Windows host free space could not be confirmed; " + budget_extra
         checks.append(
             PreflightCheck(
                 check_id="workflow_disk_budget",

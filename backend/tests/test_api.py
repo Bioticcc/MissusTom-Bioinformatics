@@ -139,9 +139,7 @@ async def test_demo_prepare_endpoint_accepts_explicit_consent(
         if job["status"] != DemoPrepareStatus.RUNNING:
             break
         await asyncio.sleep(0.05)
-        poll = await client.get(
-            f"/api/v1/demos/bulk-rnaseq/prepare/jobs/{job['job_identifier']}"
-        )
+        poll = await client.get(f"/api/v1/demos/bulk-rnaseq/prepare/jobs/{job['job_identifier']}")
         assert poll.status_code == 200
         job = poll.json()["data"]
     assert job["status"] == DemoPrepareStatus.SUCCEEDED

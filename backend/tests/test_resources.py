@@ -177,9 +177,7 @@ def test_estimated_input_bytes_uses_ont_bams_only(
     assert resources.estimated_input_bytes(manifest) == len(b"bam-data")
 
 
-def test_inspect_storage_wsl_host_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_inspect_storage_wsl_host_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(resources, "is_wsl", lambda: True)

@@ -54,9 +54,7 @@ exit 2
     return script
 
 
-def wait_for_prepare(
-    service: DemoService, job_identifier: str, *, timeout: float = 60.0
-) -> None:
+def wait_for_prepare(service: DemoService, job_identifier: str, *, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         job = service.prepare_job(job_identifier)
@@ -152,9 +150,7 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
         assert project is not None and project.manifest.pipeline_identifier == "bulk-rnaseq"
 
 
-def test_status_rejects_tampered_fixture_file(
-    demos: DemoService, kallisto_stub: Path
-) -> None:
+def test_status_rejects_tampered_fixture_file(demos: DemoService, kallisto_stub: Path) -> None:
     del kallisto_stub
     prepared = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True))
     assert prepared.data is not None
@@ -177,9 +173,7 @@ def test_unknown_demo_is_not_created(demos: DemoService) -> None:
     assert not (demos.root / "unknown").exists()
 
 
-def test_prepare_job_log_endpoint(
-    demos: DemoService, kallisto_stub: Path
-) -> None:
+def test_prepare_job_log_endpoint(demos: DemoService, kallisto_stub: Path) -> None:
     del kallisto_stub
     prepared = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True))
     assert prepared.data is not None

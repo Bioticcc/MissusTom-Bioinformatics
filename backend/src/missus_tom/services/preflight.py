@@ -100,11 +100,7 @@ def _disk_preflight_check(
         message = f"{message}. {inspection.warning}"
     if effective_free < 2 * GIB:
         status = CheckStatus.BLOCKING
-    elif (
-        effective_free < 10 * GIB
-        or inspection.measurement == "wsl_virtual"
-        or inspection.warning
-    ):
+    elif effective_free < 10 * GIB or inspection.measurement == "wsl_virtual" or inspection.warning:
         status = CheckStatus.WARNING
     else:
         status = CheckStatus.PASSED
@@ -170,9 +166,7 @@ def system_preflight() -> SystemPreflightResult:
                 )
             }
         )
-    nextflow_check = _version_check(
-        "nextflow", "Nextflow", "nextflow", ["-version"], optional=True
-    )
+    nextflow_check = _version_check("nextflow", "Nextflow", "nextflow", ["-version"], optional=True)
     if nextflow_check.details and isinstance(nextflow_check.details.get("path"), str):
         nextflow_check = nextflow_check.model_copy(
             update={
