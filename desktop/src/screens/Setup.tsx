@@ -132,7 +132,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
       for (const pipeline of setupPipelines) {
         if (!selectedActions(current, pipeline).includes("fixtures")) continue;
         try {
-          let demoStatus = await apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/status`, { signal: controller.signal });
+          const demoStatus = await apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/status`, { signal: controller.signal });
           if (demoStatus.available) {
             current = record(current, pipeline, "fixtures", "complete", demoStatus.message);
             continue;

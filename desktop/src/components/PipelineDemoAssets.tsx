@@ -58,12 +58,12 @@ export function PipelineDemoAssets({ pipelineIdentifier }: { pipelineIdentifier:
     };
   }, [refresh]);
 
+  const trackedJob = assets?.job;
   useEffect(() => {
-    const job = assets?.job;
-    if (!job || job.status !== "running") return;
-    setPrepareJob(job);
+    if (!trackedJob || trackedJob.status !== "running") return;
+    setPrepareJob(trackedJob);
     const controller = new AbortController();
-    void pollDemoJob(pipelineIdentifier, job.job_identifier, controller.signal)
+    void pollDemoJob(pipelineIdentifier, trackedJob.job_identifier, controller.signal)
       .then((finished) => {
         setPrepareJob(finished);
         return refresh(controller.signal);
@@ -72,7 +72,7 @@ export function PipelineDemoAssets({ pipelineIdentifier }: { pipelineIdentifier:
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Demo preparation could not be tracked.");
       });
     return () => controller.abort();
-  }, [assets?.job?.job_identifier, assets?.job?.status, pipelineIdentifier, refresh]);
+  }, [trackedJob, pipelineIdentifier, refresh]);
 
   const prepare = async () => {
     const controller = controllerRef.current;
