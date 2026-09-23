@@ -175,7 +175,8 @@ def system_preflight() -> SystemPreflightResult:
                 )
             }
         )
-    memory_ok = host.available_memory_bytes is not None
+    available_memory = host.available_memory_bytes
+    memory_ok = available_memory is not None
     checks = [
         PreflightCheck(
             check_id="operating_system",
@@ -196,8 +197,8 @@ def system_preflight() -> SystemPreflightResult:
             label="Available memory",
             status=CheckStatus.PASSED if memory_ok else CheckStatus.WARNING,
             message=(
-                f"{host.available_memory_bytes / GIB:.1f} GiB available"
-                if memory_ok
+                f"{available_memory / GIB:.1f} GiB available"
+                if available_memory is not None
                 else "Unavailable"
             ),
             details={

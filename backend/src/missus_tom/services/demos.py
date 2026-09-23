@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import fcntl
 import gzip
 import hashlib
@@ -140,7 +141,7 @@ class DemoService:
     def jobs_root(self) -> Path:
         return self.root / "jobs"
 
-    def list(self) -> list[DemoStatus]:
+    def list(self) -> builtins.list[DemoStatus]:
         return [self.status(identifier) for identifier in _CATALOG]
 
     def status(self, pipeline_identifier: str) -> DemoStatus:
@@ -411,14 +412,14 @@ class DemoService:
         }
         self._write_text(bundle / _BUNDLE_MANIFEST, self._json(metadata))
 
-    def _write_bulk_references(self, references: Path, job: DemoPrepareJob) -> list[str]:
+    def _write_bulk_references(self, references: Path, job: DemoPrepareJob) -> builtins.list[str]:
         transcripts = references / "transcripts.fa"
         biomart = references / "biomart.tsv"
         gtf = references / "annotation.gtf"
-        sequences: list[str] = []
+        sequences: builtins.list[str] = []
         with transcripts.open("w", encoding="utf-8") as fasta:
             biomart_lines = ["Gene stable ID version\tGene type\tGene name\n"]
-            gtf_lines: list[str] = []
+            gtf_lines: builtins.list[str] = []
             for index in range(_TRANSCRIPT_COUNT):
                 sequence = lcg_sequence(index + 17)
                 sequences.append(sequence)
@@ -450,7 +451,7 @@ class DemoService:
         *,
         sample_id: str,
         smoke_tag: str,
-        sequences: list[str],
+        sequences: builtins.list[str],
         job: DemoPrepareJob,
     ) -> None:
         quality = "I" * _READ_LENGTH
@@ -901,7 +902,7 @@ class DemoService:
     def _run_subprocess(
         self,
         job: DemoPrepareJob,
-        command: list[str],
+        command: builtins.list[str],
         *,
         env: dict[str, str] | None = None,
     ) -> None:
