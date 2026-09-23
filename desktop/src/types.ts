@@ -165,6 +165,11 @@ export interface PipelineDependencyJob {
   pipeline_identifier: string;
   status: "running" | "succeeded" | "failed";
   message: string;
+  current_stage: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  last_output_at: string | null;
   log_tail: string[];
 }
 
@@ -183,6 +188,19 @@ export interface DemoIntegrity {
   file_count: number;
 }
 
+export interface DemoPrepareJob {
+  job_identifier: string;
+  pipeline_identifier: string;
+  status: "running" | "succeeded" | "failed";
+  message: string;
+  current_stage: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  last_output_at: string | null;
+  log_tail: string[];
+}
+
 export interface DemoStatus {
   pipeline_identifier: string;
   title: string;
@@ -193,6 +211,16 @@ export interface DemoStatus {
   prepared_at: string | null;
   message: string;
   execution_note: string;
+  job?: DemoPrepareJob | null;
+  execution_supported: boolean;
+}
+
+export interface CommandLogChunk {
+  text: string;
+  next_offset: number;
+  bytes_available: number;
+  truncated: boolean;
+  last_output_at: string | null;
 }
 
 export type RunStatus = "queued" | "preparing" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -244,6 +272,9 @@ export interface RunLog {
   job_identifier: string;
   text: string;
   truncated: boolean;
+  next_offset?: number | null;
+  bytes_available?: number | null;
+  last_output_at?: string | null;
 }
 
 export interface ResultArtifact {

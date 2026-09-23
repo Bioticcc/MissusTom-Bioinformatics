@@ -264,20 +264,40 @@ class RunManager:
             if not pending:
                 return
 
-    def read_log(self, job_identifier: str, *, limit: int = 100_000) -> RunLog:
+    def read_log(
+        self, job_identifier: str, *, offset: int | None = None, limit: int = 100_000
+    ) -> RunLog:
         record = self.get(job_identifier)
         path = Path(record.log_path)
         if not path.is_file():
             return RunLog(job_identifier=job_identifier, text="")
-        size = path.stat().st_size
+        stat = path.stat()
+        size = stat.st_size
+        last_output_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        if offset is None:
+            with path.open("rb") as handle:
+                if size > limit:
+                    handle.seek(-limit, os.SEEK_END)
+                data = handle.read(limit)
+            return RunLog(
+                job_identifier=job_identifier,
+                text=data.decode("utf-8", errors="replace"),
+                truncated=size > limit,
+                bytes_available=size,
+                last_output_at=last_output_at,
+            )
+        clamped = min(max(offset, 0), size)
+        truncated = offset > size
         with path.open("rb") as handle:
-            if size > limit:
-                handle.seek(-limit, os.SEEK_END)
+            handle.seek(clamped)
             data = handle.read(limit)
         return RunLog(
             job_identifier=job_identifier,
             text=data.decode("utf-8", errors="replace"),
-            truncated=size > limit,
+            truncated=truncated,
+            next_offset=clamped + len(data),
+            bytes_available=size,
+            last_output_at=last_output_at,
         )
 
     def artifacts(self, job_identifier: str) -> list[ResultArtifact]:

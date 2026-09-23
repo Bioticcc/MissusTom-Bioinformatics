@@ -192,6 +192,26 @@ def test_command_output_is_streamed_to_private_log(tmp_path: Path) -> None:
     assert job.log_tail[-1].endswith("bounded output")
 
 
+def test_dependency_install_log_supports_offset_reads(tmp_path: Path) -> None:
+    installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
+    installer._safe_directory(tmp_path / "dependencies" / "jobs")
+    job = DependencyInstallJob(
+        job_identifier="00000000-0000-0000-0000-000000000004",
+        pipeline_identifier="bulk-rnaseq",
+        status=DependencyInstallStatus.RUNNING,
+        message="test",
+    )
+    installer._append_command_log(job, "alpha")
+    installer._append_command_log(job, "beta")
+
+    first = installer.read_log(job.job_identifier, offset=0, limit=6)
+    second = installer.read_log(job.job_identifier, offset=first.next_offset, limit=10)
+
+    assert first.text == "alpha\n"
+    assert second.text == "beta\n"
+    assert second.next_offset == first.bytes_available
+
+
 def test_shared_run_admission_lock_excludes_second_installer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -206,3 +226,33 @@ def test_shared_run_admission_lock_excludes_second_installer(
             second._acquire_run_lock("00000000-0000-0000-0000-000000000004")
     finally:
         first._release_run_lock(identifier)
+
+
+def test_install_rejects_unconfirmed_wsl_virtual_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from missus_tom.services.resources import StorageInspection
+
+    installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
+    job = DependencyInstallJob(
+        job_identifier="00000000-0000-0000-0000-000000000005",
+        pipeline_identifier="bulk-rnaseq",
+        status=DependencyInstallStatus.RUNNING,
+        message="test",
+    )
+
+    def fake_storage(_path: Path) -> StorageInspection:
+        return StorageInspection(
+            path="/home/user/.missus-tom",
+            filesystem_type="ext4",
+            free_bytes=500 * 1024**3,
+            total_bytes=1000 * 1024**3,
+            host_free_bytes=None,
+            measurement="wsl_virtual",
+            warning="WSL virtual disk free space may not reflect Windows host free space",
+        )
+
+    monkeypatch.setattr(dependencies, "inspect_storage", fake_storage)
+
+    with pytest.raises(RuntimeError, match="cannot confirm Windows host free space"):
+        installer._install_environment(job)

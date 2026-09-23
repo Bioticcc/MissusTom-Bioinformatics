@@ -70,6 +70,205 @@ def inspect_host_resources() -> HostResources:
     return HostResources(cpus, total, available)
 
 
+@dataclass(frozen=True)
+class StorageInspection:
+    path: str
+    filesystem_type: str | None
+    free_bytes: int
+    total_bytes: int
+    host_free_bytes: int | None
+    measurement: str
+    warning: str | None
+
+
+def is_wsl() -> bool:
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def _decode_mount_point(raw: str) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(raw):
+        if raw[index] == "\\" and index + 3 < len(raw) and raw[index + 1 : index + 4].isdigit():
+            parts.append(chr(int(raw[index + 1 : index + 4], 8)))
+            index += 4
+        else:
+            parts.append(raw[index])
+            index += 1
+    return "".join(parts)
+
+
+def _existing_storage_path(path: Path) -> Path:
+    candidate = path.expanduser()
+    try:
+        candidate = candidate.resolve(strict=False)
+    except OSError:
+        candidate = path.expanduser().absolute()
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def _filesystem_type(resolved_path: Path) -> str | None:
+    try:
+        target = str(resolved_path.resolve())
+        best_mount = ""
+        best_fstype: str | None = None
+        for line in Path("/proc/mounts").read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mount_point = _decode_mount_point(parts[1])
+            if (
+                target == mount_point or target.startswith(mount_point.rstrip("/") + "/")
+            ) and len(mount_point) >= len(best_mount):
+                best_mount = mount_point
+                best_fstype = parts[2]
+        return best_fstype
+    except OSError:
+        return None
+
+
+def _wsl_host_mount() -> Path | None:
+    preferred = Path("/mnt/c")
+    if preferred.is_dir():
+        return preferred
+    mounts_root = Path("/mnt")
+    if not mounts_root.is_dir():
+        return None
+    for entry in sorted(mounts_root.iterdir()):
+        if entry.is_dir() and len(entry.name) == 1 and entry.name.isalpha():
+            return entry
+    return None
+
+
+def _wsl_windows_mount_path(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+    except OSError:
+        resolved = path.expanduser().absolute()
+    parts = resolved.parts
+    if len(parts) < 3 or parts[0] != "/" or parts[1] != "mnt":
+        return False
+    drive = parts[2]
+    return len(drive) == 1 and drive.isalpha()
+
+
+def inspect_storage(path: Path) -> StorageInspection:
+    inspected = _existing_storage_path(path)
+    usage = shutil.disk_usage(inspected)
+    fstype = _filesystem_type(inspected)
+    measurement = "linux"
+    warning: str | None = None
+    host_free: int | None = None
+
+    if is_wsl():
+        if _wsl_windows_mount_path(path):
+            measurement = "windows_mount"
+        else:
+            host_mount = _wsl_host_mount()
+            if host_mount is not None:
+                try:
+                    host_free = shutil.disk_usage(host_mount).free
+                except OSError:
+                    host_free = None
+            if host_free is not None and host_free < usage.free:
+                measurement = "wsl_host_bounded"
+                warning = (
+                    "Reported Linux free space may exceed what the Windows host can provide; "
+                    "capacity is limited by Windows host storage"
+                )
+            else:
+                measurement = "wsl_virtual"
+                warning = (
+                    "WSL virtual disk free space may not reflect Windows host free space; "
+                    "do not treat unbounded VHD capacity as confirmed physical storage"
+                )
+
+    return StorageInspection(
+        path=str(inspected),
+        filesystem_type=fstype,
+        free_bytes=usage.free,
+        total_bytes=usage.total,
+        host_free_bytes=host_free,
+        measurement=measurement,
+        warning=warning,
+    )
+
+
+def effective_free_bytes(inspection: StorageInspection) -> int:
+    if inspection.host_free_bytes is not None:
+        if inspection.measurement == "wsl_host_bounded":
+            return inspection.host_free_bytes
+        if inspection.measurement == "wsl_virtual":
+            return min(inspection.free_bytes, inspection.host_free_bytes)
+    return inspection.free_bytes
+
+
+def admission_free_bytes(inspection: StorageInspection, *, strict: bool) -> int | None:
+    if inspection.measurement in ("linux", "windows_mount"):
+        return inspection.free_bytes
+    if inspection.measurement == "wsl_host_bounded":
+        return inspection.host_free_bytes
+    if inspection.measurement == "wsl_virtual":
+        if inspection.host_free_bytes is not None:
+            return min(inspection.free_bytes, inspection.host_free_bytes)
+        return None if strict else inspection.free_bytes
+    return inspection.free_bytes
+
+
+def _workflow_disk_check_status(
+    inspection: StorageInspection,
+    *,
+    admission_free: int | None,
+    required_bytes: int,
+    failure: CheckStatus,
+    strict: bool,
+) -> CheckStatus:
+    unconfirmed_wsl = (
+        inspection.measurement == "wsl_virtual" and inspection.host_free_bytes is None
+    )
+    if unconfirmed_wsl and strict:
+        return failure
+    if admission_free is None:
+        return failure if strict else CheckStatus.WARNING
+    if admission_free < required_bytes:
+        return failure
+    if inspection.measurement == "wsl_virtual" and not strict:
+        return CheckStatus.WARNING
+    if unconfirmed_wsl:
+        return CheckStatus.WARNING
+    return CheckStatus.PASSED
+
+
+def _storage_check_message(
+    inspection: StorageInspection,
+    effective_free: int,
+    *,
+    extra: str = "",
+) -> str:
+    fstype = inspection.filesystem_type or "unknown"
+    host_note = (
+        f"; Windows host bound to {inspection.host_free_bytes / GIB:.1f} GiB free"
+        if inspection.host_free_bytes is not None and inspection.measurement == "wsl_host_bounded"
+        else ""
+    )
+    message = (
+        f"{effective_free / GIB:.1f} GiB free on {inspection.path} "
+        f"({fstype}, measurement={inspection.measurement}){host_note}"
+    )
+    if extra:
+        message = f"{message}. {extra}"
+    if inspection.warning:
+        message = f"{message}. {inspection.warning}"
+    return message
+
+
 def estimated_input_bytes(manifest: ProjectManifest, *, analysis_only: bool = False) -> int:
     paths: set[Path] = set()
     for sample in manifest.samples:
@@ -150,22 +349,40 @@ def execution_resource_checks(
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
     try:
-        free = shutil.disk_usage(parent).free
+        disk = inspect_storage(parent)
+        admission_free = admission_free_bytes(disk, strict=strict)
+        effective_free = effective_free_bytes(disk)
+        budget_extra = (
+            f"allow at least {required_bytes / GIB:.1f} GiB for this run "
+            "(estimate, including work and published copies)"
+        )
+        if admission_free is None:
+            budget_extra = (
+                "Windows host free space could not be confirmed; "
+                + budget_extra
+            )
         checks.append(
             PreflightCheck(
                 check_id="workflow_disk_budget",
                 label="Workflow disk budget",
-                status=CheckStatus.PASSED if free >= required_bytes else failure,
-                message=(
-                    f"{free / GIB:.1f} GiB free on the output filesystem; "
-                    f"allow at least {required_bytes / GIB:.1f} GiB for this run "
-                    "(estimate, including work and published copies)"
+                status=_workflow_disk_check_status(
+                    disk,
+                    admission_free=admission_free,
+                    required_bytes=required_bytes,
+                    failure=failure,
+                    strict=strict,
                 ),
+                message=_storage_check_message(disk, effective_free, extra=budget_extra),
                 details={
-                    "free_bytes": free,
+                    "free_bytes": disk.free_bytes,
+                    "host_free_bytes": disk.host_free_bytes,
+                    "measurement": disk.measurement,
+                    "warning": disk.warning,
+                    "admission_free_bytes": admission_free,
                     "estimated_required_bytes": required_bytes,
                     "input_bytes": input_bytes,
-                    "path": str(parent),
+                    "path": disk.path,
+                    "filesystem_type": disk.filesystem_type,
                 },
             )
         )

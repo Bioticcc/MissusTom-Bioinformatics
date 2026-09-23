@@ -4,10 +4,14 @@ import test from "node:test";
 
 const source = await readFile(new URL("../src/components/PipelineDemoAssets.tsx", import.meta.url), "utf8");
 
-test("PipelineDemoAssets uses the synchronous demo status and preparation contract", () => {
+test("PipelineDemoAssets uses async demo preparation with live command logs", () => {
   assert.match(source, /`\/api\/v1\/demos\/\$\{pipelineIdentifier\}\/status`/);
   assert.match(source, /`\/api\/v1\/demos\/\$\{pipelineIdentifier\}\/prepare`/);
+  assert.match(source, /prepare\/jobs\/\$\{/);
+  assert.match(source, /prepare\/jobs\/\$\{.*\}\/logs\?offset=\$\{offset\}/);
   assert.match(source, /method: "POST", body: JSON\.stringify\(\{ consent: true \}\)/);
+  assert.match(source, /DemoPrepareJob/);
+  assert.match(source, /LiveCommandLog/);
   assert.match(source, /assets\.available/);
   assert.match(source, /assets\.message/);
   assert.match(source, /assets\.execution_note/);
@@ -16,5 +20,4 @@ test("PipelineDemoAssets uses the synchronous demo status and preparation contra
   assert.match(source, /Local self-consistency:/);
   assert.doesNotMatch(source, /Integrity:/);
   assert.doesNotMatch(source, /\/api\/v1\/pipelines\/.*demo-assets/);
-  assert.doesNotMatch(source, /assets\.job|POLL_INTERVAL_MS|setInterval/);
 });

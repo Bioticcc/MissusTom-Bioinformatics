@@ -1,8 +1,40 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { CheckList } from "../components/CheckList";
+import { LiveCommandLog } from "../components/LiveCommandLog";
 import { selectFiles } from "../native";
-import type { HumanDemoProject, OpenProjectResult, ProjectManifest, ProjectSummary, RunPlan, SystemPreflight } from "../types";
+import type {
+  CommandLogChunk,
+  DemoPrepareJob,
+  DemoStatus,
+  HumanDemoProject,
+  OpenProjectResult,
+  ProjectManifest,
+  ProjectSummary,
+  RunPlan,
+  SystemPreflight,
+} from "../types";
+
+const POLL_INTERVAL_MS = 2_000;
+
+async function pollDemoJob(job: DemoPrepareJob, signal: AbortSignal): Promise<DemoPrepareJob> {
+  while (!signal.aborted) {
+    if (job.status !== "running") return job;
+    job = await apiRequest<DemoPrepareJob>(
+      `/api/v1/demos/bulk-rnaseq/prepare/jobs/${job.job_identifier}`,
+      { signal },
+    );
+    if (job.status !== "running") return job;
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(resolve, POLL_INTERVAL_MS);
+      signal.addEventListener("abort", () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Demo preparation cancelled", "AbortError"));
+      }, { once: true });
+    });
+  }
+  throw new DOMException("Demo preparation cancelled", "AbortError");
+}
 
 export function Dashboard({
   onNew,
@@ -17,9 +49,19 @@ export function Dashboard({
   const [error, setError] = useState("");
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
+  const [prepareJob, setPrepareJob] = useState<DemoPrepareJob | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsError, setProjectsError] = useState("");
   const [openingPath, setOpeningPath] = useState("");
+  const demoControllerRef = useRef<AbortController | null>(null);
+
+  const fetchPrepareLog = useCallback(
+    (jobIdentifier: string) => (offset: number, signal: AbortSignal) => apiRequest<CommandLogChunk>(
+      `/api/v1/demos/bulk-rnaseq/prepare/jobs/${jobIdentifier}/logs?offset=${offset}`,
+      { signal },
+    ),
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -42,19 +84,53 @@ export function Dashboard({
     };
   }, []);
 
+  useEffect(() => () => {
+    demoControllerRef.current?.abort();
+  }, []);
+
   const passed = preflight?.checks.filter((check) => check.status === "passed").length ?? 0;
   const attention = preflight?.checks.filter((check) => check.status !== "passed").length ?? 0;
 
-  const loadDemo = async () => {
+  const runBulkDemo = async () => {
+    demoControllerRef.current?.abort();
+    const controller = new AbortController();
+    demoControllerRef.current = controller;
     setLoadingDemo(true);
     setDemoError("");
+    setPrepareJob(null);
     try {
-      const demo = await apiRequest<HumanDemoProject>("/api/v1/demos/human");
-      onDemo(demo.manifest, demo.plan);
+      let status = await apiRequest<DemoStatus>("/api/v1/demos/bulk-rnaseq/status", { signal: controller.signal });
+      if (!status.available) {
+        let job = status.job?.status === "running" ? status.job : null;
+        if (!job) {
+          job = await apiRequest<DemoPrepareJob>("/api/v1/demos/bulk-rnaseq/prepare", {
+            method: "POST",
+            body: JSON.stringify({ consent: true }),
+            signal: controller.signal,
+          });
+        }
+        setPrepareJob(job);
+        const finished = job.status === "running" ? await pollDemoJob(job, controller.signal) : job;
+        if (controller.signal.aborted) return;
+        setPrepareJob(finished);
+        if (finished.status !== "succeeded") {
+          setDemoError(finished.message || "Bulk RNA-seq demo preparation failed.");
+          return;
+        }
+        status = await apiRequest<DemoStatus>("/api/v1/demos/bulk-rnaseq/status", { signal: controller.signal });
+      }
+      const demo = await apiRequest<HumanDemoProject>("/api/v1/demos/bulk-rnaseq/project", { signal: controller.signal });
+      if (!controller.signal.aborted) onDemo(demo.manifest, demo.plan);
     } catch (reason) {
-      setDemoError(reason instanceof Error ? reason.message : "The demo could not be loaded.");
+      if (!controller.signal.aborted) {
+        setDemoError(reason instanceof Error ? reason.message : "The bulk RNA-seq demo could not be loaded.");
+      }
     } finally {
-      setLoadingDemo(false);
+      if (!controller.signal.aborted) {
+        setLoadingDemo(false);
+        setPrepareJob(null);
+      }
+      if (demoControllerRef.current === controller) demoControllerRef.current = null;
     }
   };
 
@@ -92,8 +168,8 @@ export function Dashboard({
           <p className="lede">Configure pipeline-specific inputs, resources, and workflow parameters.</p>
         </div>
         <div className="header-actions">
-          <button type="button" className="button primary large" onClick={loadDemo} disabled={loadingDemo}>
-            {loadingDemo ? "Loading…" : "Load human demo"}
+          <button type="button" className="button primary large" onClick={() => void runBulkDemo()} disabled={loadingDemo}>
+            {loadingDemo ? "Preparing demo…" : "Run Bulk RNA-seq Demo"}
           </button>
           <button type="button" className="button secondary large" onClick={onNew}>
             New project
@@ -106,13 +182,24 @@ export function Dashboard({
 
       {demoError && <div className="inline-error" role="alert">{demoError}</div>}
 
+      {prepareJob && <LiveCommandLog
+        title="Bulk RNA-seq demo preparation"
+        resetKey={prepareJob.job_identifier}
+        active={prepareJob.status === "running"}
+        status={prepareJob.status}
+        stage={prepareJob.current_stage}
+        startedAt={prepareJob.started_at}
+        lastOutputAt={prepareJob.last_output_at}
+        fetchChunk={fetchPrepareLog(prepareJob.job_identifier)}
+      />}
+
       <section className="development-banner" aria-label="Development notice">
         <span className="notice-icon" aria-hidden="true">
           i
         </span>
         <div>
           <strong>Local pipeline workbench</strong>
-          <p>Create human bulk RNA-seq or mouse ONT analysis projects. The bundled human demo remains available for supported execution checks.</p>
+          <p>Create human bulk RNA-seq or mouse ONT analysis projects. The bulk RNA-seq demo uses local synthetic fixtures that support controlled execution when your environment is ready.</p>
         </div>
       </section>
 

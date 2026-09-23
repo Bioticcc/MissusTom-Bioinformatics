@@ -10,8 +10,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
 from missus_tom.config import settings
+from missus_tom.models.command_log import CommandLogChunk
 from missus_tom.models.common import ApiResponse
-from missus_tom.models.demos import DemoPrepareRequest, DemoStatus
+from missus_tom.models.demos import DemoPrepareJob, DemoPrepareRequest, DemoStatus
 from missus_tom.models.dependencies import (
     DependencyInstallJob,
     DependencyInstallRequest,
@@ -259,11 +260,11 @@ def get_demo_status(pipeline_identifier: str) -> ApiResponse[DemoStatus]:
 
 @router.post(
     f"{settings.api_prefix}/demos/{{pipeline_identifier}}/prepare",
-    response_model=ApiResponse[DemoStatus],
+    response_model=ApiResponse[DemoPrepareJob],
 )
 def post_demo_prepare(
     pipeline_identifier: str, request: DemoPrepareRequest
-) -> ApiResponse[DemoStatus]:
+) -> ApiResponse[DemoPrepareJob]:
     # Typed consent prevents a bodyless cross-site-simple POST from creating files.
     del request
     try:
@@ -271,6 +272,57 @@ def post_demo_prepare(
     except ValueError as exc:
         status_code = 404 if str(exc).startswith("unsupported demo") else 409
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/demos/{{pipeline_identifier}}/prepare/jobs/{{job_identifier}}",
+    response_model=ApiResponse[DemoPrepareJob],
+)
+def get_demo_prepare_job(
+    pipeline_identifier: str, job_identifier: str
+) -> ApiResponse[DemoPrepareJob]:
+    del pipeline_identifier
+    try:
+        return ApiResponse(data=demo_service.prepare_job(job_identifier))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/demos/{{pipeline_identifier}}/prepare/jobs/{{job_identifier}}/logs",
+    response_model=ApiResponse[CommandLogChunk],
+)
+def get_demo_prepare_job_log(
+    pipeline_identifier: str,
+    job_identifier: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100_000, ge=1_000, le=1_000_000),
+) -> ApiResponse[CommandLogChunk]:
+    del pipeline_identifier
+    try:
+        return ApiResponse(data=demo_service.read_log(job_identifier, offset=offset, limit=limit))
+    except ValueError as exc:
+        status_code = 404 if str(exc).startswith("unknown demo prepare job") else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/demos/bulk-rnaseq/project",
+    response_model=ApiResponse[HumanDemoProject],
+)
+def get_bulk_rnaseq_demo_project() -> ApiResponse[HumanDemoProject]:
+    try:
+        manifest = demo_service.load_project("bulk-rnaseq")
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("unsupported") or "not available" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=409, detail=message) from exc
+    return ApiResponse(
+        data=HumanDemoProject(
+            manifest=manifest, plan=_adapter_for(manifest).construct_run_plan(manifest)
+        )
+    )
 
 
 @router.post(f"{settings.api_prefix}/runs/start", response_model=ApiResponse[RunRecord])
@@ -325,10 +377,11 @@ def get_run(job_identifier: str) -> ApiResponse[RunRecord]:
 )
 def get_run_log(
     job_identifier: str,
+    offset: int | None = Query(default=None, ge=0),
     limit: int = Query(default=100_000, ge=1_000, le=1_000_000),
 ) -> ApiResponse[RunLog]:
     try:
-        log = run_manager.read_log(job_identifier, limit=limit)
+        log = run_manager.read_log(job_identifier, offset=offset, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ApiResponse(data=log)
@@ -409,3 +462,27 @@ def post_pipeline_dependencies_install(
         if message.startswith("unsupported pipeline identifier"):
             raise HTTPException(status_code=404, detail=message) from exc
         raise HTTPException(status_code=409, detail=message) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/pipelines/{{pipeline_identifier}}/dependencies/jobs/{{job_identifier}}/logs",
+    response_model=ApiResponse[CommandLogChunk],
+)
+def get_dependency_install_log(
+    pipeline_identifier: str,
+    job_identifier: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100_000, ge=1_000, le=1_000_000),
+) -> ApiResponse[CommandLogChunk]:
+    try:
+        pipeline_registry.get(pipeline_identifier)
+        job = dependency_installer.get_job(job_identifier)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.pipeline_identifier != pipeline_identifier:
+        raise HTTPException(status_code=404, detail="dependency job not found for this pipeline")
+    return ApiResponse(
+        data=dependency_installer.read_log(job_identifier, offset=offset, limit=limit)
+    )

@@ -864,6 +864,30 @@ h4 {
   white-space: pre-wrap;
 }
 
+.live-command-log {
+  margin-top: 0.75rem;
+}
+
+.live-command-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  margin: 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.live-command-log-meta strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.live-command-log-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
 .log-note,
 .field-help {
   margin: 0.5rem 0 0;

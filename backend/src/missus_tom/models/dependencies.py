@@ -26,6 +26,10 @@ class DependencyInstallJob(BaseModel):
     status: DependencyInstallStatus
     message: str
     created_at: datetime = Field(default_factory=lambda: datetime.now().astimezone())
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_output_at: datetime | None = None
+    current_stage: str = ""
     log_tail: list[str] = Field(default_factory=list)
 
 

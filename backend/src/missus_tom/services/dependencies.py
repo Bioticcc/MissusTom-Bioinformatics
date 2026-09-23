@@ -29,6 +29,8 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from missus_tom.config import settings
+from missus_tom.models.command_log import CommandLogChunk
+from missus_tom.services.resources import admission_free_bytes, inspect_storage
 from missus_tom.models.dependencies import (
     DependencyInstallJob,
     DependencyInstallStatus,
@@ -280,6 +282,8 @@ class DependencyInstaller:
                 pipeline_identifier=pipeline_identifier,
                 status=DependencyInstallStatus.RUNNING,
                 message="Preparing local environment",
+                started_at=datetime.now(UTC),
+                current_stage="preparing",
             )
             lock_descriptor = self._acquire_run_lock(job.job_identifier)
             self._jobs[job.job_identifier] = job
@@ -457,6 +461,43 @@ class DependencyInstaller:
             detail="available" if available else "build with the fixed project build script",
         )
 
+    def get_job(self, job_identifier: str) -> DependencyInstallJob:
+        with self._lock:
+            try:
+                return self._jobs[job_identifier].model_copy(deep=True)
+            except KeyError as exc:
+                raise KeyError(f"unknown dependency job: {job_identifier}") from exc
+
+    def read_log(
+        self,
+        job_identifier: str,
+        *,
+        offset: int = 0,
+        limit: int = 100_000,
+    ) -> CommandLogChunk:
+        path = self.state_directory / "jobs" / f"{job_identifier}.install.log"
+        if not path.is_file():
+            return CommandLogChunk(
+                text="",
+                next_offset=0,
+                bytes_available=0,
+            )
+        stat = path.stat()
+        size = stat.st_size
+        last_output_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        clamped = min(max(offset, 0), size)
+        truncated = offset > size
+        with path.open("rb") as handle:
+            handle.seek(clamped)
+            data = handle.read(limit)
+        return CommandLogChunk(
+            text=data.decode("utf-8", errors="replace"),
+            truncated=truncated,
+            next_offset=clamped + len(data),
+            bytes_available=size,
+            last_output_at=last_output_at,
+        )
+
     def _install_worker(self, job_identifier: str) -> None:
         with self._lock:
             job = self._jobs[job_identifier]
@@ -472,12 +513,16 @@ class DependencyInstaller:
             job.message = str(exc)
             self._log(job, f"Installation failed: {exc}")
         finally:
+            job.finished_at = datetime.now(UTC)
+            job.current_stage = ""
             try:
                 self._persist(job)
             finally:
                 self._release_run_lock(job.job_identifier)
 
     def _install_environment(self, job: DependencyInstallJob) -> None:
+        job.current_stage = "installing"
+        self._persist(job)
         root = _managed_root(job.pipeline_identifier)
         self._safe_directory(root.parent)
         self._safe_directory(root)
@@ -489,10 +534,19 @@ class DependencyInstaller:
             minimum_free = (
                 20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 15 * 1024**3
             )
-            if shutil.disk_usage(root).free < minimum_free:
+            disk = inspect_storage(root)
+            install_free = admission_free_bytes(disk, strict=True)
+            if install_free is None:
+                raise RuntimeError(
+                    "installation cannot confirm Windows host free space on the dependency "
+                    "filesystem (WSL virtual disk reporting is not sufficient)"
+                )
+            if install_free < minimum_free:
                 raise RuntimeError(
                     f"installation needs at least {minimum_free // 1024**3} GiB free "
-                    "on the dependency filesystem"
+                    f"on the dependency filesystem ({disk.path}, "
+                    f"measurement={disk.measurement})"
+                    + (f". {disk.warning}" if disk.warning else "")
                 )
             mamba = self._ensure_micromamba(staging, job)
             self._safe_directory(environment.parent)
@@ -530,6 +584,8 @@ class DependencyInstaller:
 
     def _verify_environment(self, job: DependencyInstallJob, prefix: Path) -> None:
         """Verify an inactive prefix before switching away from a working install."""
+        job.current_stage = "verifying"
+        self._persist(job)
         environment = _environment_for_prefix(job.pipeline_identifier, prefix)
         tools = _TOOL_CATALOG[job.pipeline_identifier]
         if job.pipeline_identifier == "bulk-rnaseq":
@@ -992,9 +1048,11 @@ class DependencyInstaller:
     def _log(self, job: DependencyInstallJob, line: str) -> None:
         stamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         job.log_tail = [*job.log_tail, f"{stamp} {line}"][-80:]
+        job.last_output_at = datetime.now(UTC)
         self._persist(job)
 
     def _append_command_log(self, job: DependencyInstallJob, line: str) -> None:
+        job.last_output_at = datetime.now(UTC)
         path = self.state_directory / "jobs" / f"{job.job_identifier}.install.log"
         descriptor = os.open(
             path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
+import { LiveCommandLog } from "./LiveCommandLog";
 import { setDependencyInstallActive } from "../native";
-import type { PipelineDependencies } from "../types";
+import type { CommandLogChunk, PipelineDependencies } from "../types";
 
 const POLL_INTERVAL_MS = 5_000;
-const LOG_TAIL_LIMIT = 20;
 const dependencyBusy = new Map<string, boolean>();
 
 function setPipelineDependencyBusy(pipelineIdentifier: string, active: boolean): void {
@@ -210,7 +210,23 @@ export function PipelineDependencies({
           </li>)}
         </ul>
         {dependencies.manual_requirements.length > 0 && <div className="manual-requirements"><strong>Manual prerequisites</strong><ul>{dependencies.manual_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul></div>}
-        {job && <div className={`dependency-job ${job.status}`}><strong>{job.status === "running" ? "Installing packages" : job.status === "succeeded" ? "Installation complete" : "Installation failed"}</strong><p>{job.message}</p>{job.log_tail.length > 0 && <pre aria-label="Installation log tail">{job.log_tail.slice(-LOG_TAIL_LIMIT).join("\n")}</pre>}</div>}
+        {job && <div className={`dependency-job ${job.status}`}>
+          <strong>{job.status === "running" ? "Installing packages" : job.status === "succeeded" ? "Installation complete" : "Installation failed"}</strong>
+          <p>{job.message}</p>
+          <LiveCommandLog
+            title="Installation log"
+            resetKey={job.job_identifier}
+            active={job.status === "running"}
+            status={job.status}
+            stage={job.current_stage || null}
+            startedAt={job.started_at}
+            lastOutputAt={job.last_output_at}
+            fetchChunk={(offset, signal) => apiRequest<CommandLogChunk>(
+              `/api/v1/pipelines/${pipelineIdentifier}/dependencies/jobs/${job.job_identifier}/logs?offset=${offset}`,
+              { signal },
+            )}
+          />
+        </div>}
         <button className="button primary" type="button" onClick={() => void install()} disabled={!dependencies.installable || dependencies.missing.length === 0 || running || installing}>
           {running || installing ? "Installing…" : "Install required packages"}
         </button>

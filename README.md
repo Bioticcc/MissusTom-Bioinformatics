@@ -34,10 +34,12 @@ On first launch, open **Setup** and select Bulk RNA-seq, ONT analysis, or both.
 Setup can prepare dependencies and/or a synthetic demo fixture for each selected
 pipeline independently. You can return later to set up the other pipeline.
 
-The synthetic demo fixtures are lightweight setup and UI fixtures only. They do
-not contain biological data, and they are **not executable end-to-end today**:
-their placeholder inputs and references cannot validate or run a scientific
-workflow.
+The synthetic demo fixtures are lightweight and contain no biological data. They
+are for **functional workflow validation only**, not biological or clinical
+interpretation. From the Dashboard, **Run Bulk RNA-seq Demo** prepares the bulk
+fixture locally (when needed) and opens it for a controlled local-profile run
+once Bulk managed dependencies are installed. The ONT synthetic fixture remains
+a non-executable UI placeholder.
 
 Bulk RNA-seq can start from raw paired reads, which require a compatible
 kallisto index, or from compatible existing per-sample `abundance.tsv`
@@ -78,8 +80,9 @@ proceed offline when the project's reference files are already on the machine.
 ## Use the app
 
 1. Open **Setup** and prepare one or both pipeline environments.
-2. Select **New project**, choose a pipeline, and provide its inputs and
-   required reference files.
+2. Try **Run Bulk RNA-seq Demo** on the Dashboard for a quick synthetic bulk
+   smoke path, or select **New project**, choose a pipeline, and provide its
+   inputs and required reference files.
 3. Confirm the project details, save the project, and review the run plan.
 4. Select **Run pipeline** and follow progress in **Jobs**.
 5. Open **Results** to see files produced for that project.
@@ -131,8 +134,11 @@ overview](docs/mvp_architecture.md).
   runtime state are not included in releases.
 - Normal bulk runs use the local Nextflow profile and managed native tools.
   The Docker profile is retained for regression.
-- Synthetic fixtures do not establish workflow readiness, end-to-end execution,
-  or scientific validity.
+- Synthetic fixtures validate pipeline wiring only; they do not establish
+  scientific validity. The ONT synthetic bundle cannot run the ONT workflow.
+- On WSL, preflight storage checks may warn that Linux-reported free space does
+  not reflect Windows host capacity; place outputs where the host filesystem has
+  room.
 - Clean-machine GUI installation remains unverified. Clean-machine internet
   installation of the managed tools, and scientific equivalence of native-tool
   versus Docker-profile results, have not been verified.

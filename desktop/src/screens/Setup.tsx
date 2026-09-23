@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { apiRequest, setupInstallConflictMessage } from "../api";
+import { LiveCommandLog } from "../components/LiveCommandLog";
 import { setDependencyInstallActive } from "../native";
-import type { DemoStatus, PipelineDependencies, RunRecord } from "../types";
+import type { CommandLogChunk, DemoPrepareJob, DemoStatus, PipelineDependencies, RunRecord } from "../types";
 import {
   areRequestedActionsComplete,
   loadSetupState,
@@ -22,8 +23,50 @@ const pipelines: Array<{ id: SetupPipelineIdentifier; name: string; detail: stri
 
 const POLL_INTERVAL_MS = 2_000;
 
+type LiveJobKind = "fixtures" | "dependencies";
+
+interface LiveJobContext {
+  kind: LiveJobKind;
+  pipeline: SetupPipelineIdentifier;
+  jobIdentifier: string;
+  status: string;
+  stage: string | null;
+  startedAt: string | null;
+  lastOutputAt: string | null;
+}
+
 function actionLabel(action: SetupAction): string {
   return action === "fixtures" ? "synthetic fixtures" : "dependencies";
+}
+
+async function pollDemoJob(pipeline: SetupPipelineIdentifier, jobIdentifier: string, signal: AbortSignal): Promise<DemoPrepareJob> {
+  while (!signal.aborted) {
+    const job = await apiRequest<DemoPrepareJob>(`/api/v1/demos/${pipeline}/prepare/jobs/${jobIdentifier}`, { signal });
+    if (job.status !== "running") return job;
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(resolve, POLL_INTERVAL_MS);
+      signal.addEventListener("abort", () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Setup cancelled", "AbortError"));
+      }, { once: true });
+    });
+  }
+  throw new DOMException("Setup cancelled", "AbortError");
+}
+
+async function pollInstall(pipeline: SetupPipelineIdentifier, controller: AbortSignal): Promise<PipelineDependencies> {
+  while (!controller.aborted) {
+    const status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller });
+    if (status.job?.status !== "running") return status;
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(resolve, POLL_INTERVAL_MS);
+      controller.addEventListener("abort", () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Setup cancelled", "AbortError"));
+      }, { once: true });
+    });
+  }
+  throw new DOMException("Setup cancelled", "AbortError");
 }
 
 export function Setup({ activeRun, isRunActive, onContinue }: {
@@ -33,6 +76,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
 }) {
   const [state, setState] = useState<PersistedSetupState>(() => loadSetupState(window.localStorage));
   const [working, setWorking] = useState(false);
+  const [liveJob, setLiveJob] = useState<LiveJobContext | null>(null);
   const [error, setError] = useState("");
   const mounted = useRef(true);
   const controllerRef = useRef<AbortController | null>(null);
@@ -53,25 +97,27 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     commit(updateSetupSelection(state, pipeline, field, value));
   };
 
-  const pollInstall = async (pipeline: SetupPipelineIdentifier, controller: AbortController): Promise<PipelineDependencies> => {
-    while (!controller.signal.aborted) {
-      const status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal });
-      if (status.job?.status !== "running") return status;
-      await new Promise<void>((resolve, reject) => {
-        const timer = window.setTimeout(resolve, POLL_INTERVAL_MS);
-        controller.signal.addEventListener("abort", () => {
-          window.clearTimeout(timer);
-          reject(new DOMException("Setup cancelled", "AbortError"));
-        }, { once: true });
-      });
-    }
-    throw new DOMException("Setup cancelled", "AbortError");
-  };
-
   const record = (current: PersistedSetupState, pipeline: SetupPipelineIdentifier, action: SetupAction, outcome: "pending" | "complete" | "skipped" | "failed", reason: string) => {
     const next = recordSetupOutcome(current, pipeline, action, { state: outcome, reason });
     commit(next);
     return next;
+  };
+
+  const syncDependencyLiveJob = (pipeline: SetupPipelineIdentifier, status: PipelineDependencies) => {
+    const job = status.job;
+    if (!job) {
+      setLiveJob(null);
+      return;
+    }
+    setLiveJob({
+      kind: "dependencies",
+      pipeline,
+      jobIdentifier: job.job_identifier,
+      status: job.status,
+      stage: job.current_stage || null,
+      startedAt: job.started_at,
+      lastOutputAt: job.last_output_at,
+    });
   };
 
   const prepare = async () => {
@@ -80,15 +126,48 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     controllerRef.current = controller;
     setWorking(true);
     setError("");
+    setLiveJob(null);
     let current = state;
     try {
       for (const pipeline of setupPipelines) {
         if (!selectedActions(current, pipeline).includes("fixtures")) continue;
         try {
-          const result = await apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/prepare`, {
-            method: "POST", body: JSON.stringify({ consent: true }), signal: controller.signal,
+          let demoStatus = await apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/status`, { signal: controller.signal });
+          if (demoStatus.available) {
+            current = record(current, pipeline, "fixtures", "complete", demoStatus.message);
+            continue;
+          }
+          let job = demoStatus.job?.status === "running" ? demoStatus.job : null;
+          if (!job) {
+            job = await apiRequest<DemoPrepareJob>(`/api/v1/demos/${pipeline}/prepare`, {
+              method: "POST", body: JSON.stringify({ consent: true }), signal: controller.signal,
+            });
+          }
+          setLiveJob({
+            kind: "fixtures",
+            pipeline,
+            jobIdentifier: job.job_identifier,
+            status: job.status,
+            stage: job.current_stage,
+            startedAt: job.started_at,
+            lastOutputAt: job.last_output_at,
           });
-          current = record(current, pipeline, "fixtures", "complete", result.message);
+          const finished = job.status === "running"
+            ? await pollDemoJob(pipeline, job.job_identifier, controller.signal)
+            : job;
+          if (controller.signal.aborted) throw new DOMException("Setup cancelled", "AbortError");
+          setLiveJob({
+            kind: "fixtures",
+            pipeline,
+            jobIdentifier: finished.job_identifier,
+            status: finished.status,
+            stage: finished.current_stage,
+            startedAt: finished.started_at,
+            lastOutputAt: finished.last_output_at,
+          });
+          current = finished.status === "succeeded"
+            ? record(current, pipeline, "fixtures", "complete", finished.message)
+            : record(current, pipeline, "fixtures", "failed", finished.message);
         } catch (reason) {
           if (controller.signal.aborted) throw reason;
           current = record(current, pipeline, "fixtures", "failed", reason instanceof Error ? reason.message : "Fixture preparation failed.");
@@ -111,24 +190,24 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
             continue;
           }
           if (status.job?.status === "running") {
-            await setDependencyInstallActive(true).catch(() => {
-              // Backend admission remains authoritative if native reporting fails.
-            });
-            status = await pollInstall(pipeline, controller);
+            syncDependencyLiveJob(pipeline, status);
+            await setDependencyInstallActive(true).catch(() => undefined);
+            status = await pollInstall(pipeline, controller.signal);
             await setDependencyInstallActive(false).catch(() => undefined);
           }
           if (status.missing.length === 0 || status.job?.status === "succeeded") {
             current = record(current, pipeline, "dependencies", "complete", status.job?.message ?? "Dependencies are ready.");
             continue;
           }
-          await setDependencyInstallActive(true).catch(() => {
-            // Backend admission remains authoritative if native reporting fails.
-          });
-          await apiRequest(`/api/v1/pipelines/${pipeline}/dependencies/install`, {
-            method: "POST", body: JSON.stringify({ consent: true }), signal: controller.signal,
-          });
-          status = await pollInstall(pipeline, controller);
+          await setDependencyInstallActive(true).catch(() => undefined);
+          const installJob = await apiRequest<NonNullable<PipelineDependencies["job"]>>(
+            `/api/v1/pipelines/${pipeline}/dependencies/install`,
+            { method: "POST", body: JSON.stringify({ consent: true }), signal: controller.signal },
+          );
+          syncDependencyLiveJob(pipeline, { ...status, job: installJob });
+          status = await pollInstall(pipeline, controller.signal);
           await setDependencyInstallActive(false).catch(() => undefined);
+          syncDependencyLiveJob(pipeline, status);
           current = status.job?.status === "succeeded"
             ? record(current, pipeline, "dependencies", "complete", status.job.message)
             : record(current, pipeline, "dependencies", "failed", status.job?.message ?? "Installation did not complete.");
@@ -146,15 +225,43 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Setup did not complete.");
     } finally {
-      if (mounted.current) setWorking(false);
+      if (mounted.current) {
+        setWorking(false);
+        setLiveJob(null);
+      }
       if (controllerRef.current === controller) controllerRef.current = null;
     }
   };
 
+  const liveLogFetch = liveJob
+    ? (offset: number, signal: AbortSignal) => {
+      if (liveJob.kind === "fixtures") {
+        return apiRequest<CommandLogChunk>(
+          `/api/v1/demos/${liveJob.pipeline}/prepare/jobs/${liveJob.jobIdentifier}/logs?offset=${offset}`,
+          { signal },
+        );
+      }
+      return apiRequest<CommandLogChunk>(
+        `/api/v1/pipelines/${liveJob.pipeline}/dependencies/jobs/${liveJob.jobIdentifier}/logs?offset=${offset}`,
+        { signal },
+      );
+    }
+    : null;
+
   return <div className="page-stack">
     <header className="page-header"><div><p className="eyebrow">Local environment</p><h1>Setup</h1><p className="lede">Choose the pipelines and local actions to prepare. Nothing installs until you explicitly start setup.</p></div></header>
-    <section className="development-banner setup-sequence-note"><span className="notice-icon" aria-hidden="true">i</span><div><strong>Machine-local, non-executable fixtures</strong><p>Synthetic fixtures only support local setup checks; they do not execute a pipeline or upload biological data. Managed dependency installations run strictly one at a time.</p></div></section>
+    <section className="development-banner setup-sequence-note"><span className="notice-icon" aria-hidden="true">i</span><div><strong>Machine-local synthetic fixtures</strong><p>Bulk RNA-seq synthetic fixtures support local setup checks and controlled execution when your environment is ready. ONT synthetic fixtures remain setup-only and do not execute a pipeline. Managed dependency installations run strictly one at a time; biological data is not uploaded.</p></div></section>
     {error && <div className="inline-error" role="alert">{error}</div>}
+    {liveJob && liveLogFetch && <LiveCommandLog
+      title={liveJob.kind === "fixtures" ? `${liveJob.pipeline} fixture preparation` : `${liveJob.pipeline} dependency installation`}
+      resetKey={`${liveJob.kind}-${liveJob.jobIdentifier}`}
+      active={liveJob.status === "running"}
+      status={liveJob.status}
+      stage={liveJob.stage}
+      startedAt={liveJob.startedAt}
+      lastOutputAt={liveJob.lastOutputAt}
+      fetchChunk={liveLogFetch}
+    />}
     <div className="setup-pipeline-grid">
       {pipelines.map((pipeline) => {
         const configured = state.pipelines[pipeline.id];
@@ -174,7 +281,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     </div>
     <div className="setup-footer">
       <button className="button primary" type="button" disabled={working || !setupPipelines.some((pipeline) => selectedActions(state, pipeline).length > 0)} onClick={() => void prepare()}>
-        {working ? "Preparing selected setup…" : "Prepare selected setup"}
+        {working ? "Running selected setup…" : "Prepare selected setup"}
       </button>
       {areRequestedActionsComplete(state) && <button className="button secondary" type="button" onClick={onContinue}>Continue to Dashboard</button>}
       {activeRun && <p className="field-help">Fixture preparation remains available while this run is active; dependency installation is deferred.</p>}

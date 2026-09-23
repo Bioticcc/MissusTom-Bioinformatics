@@ -1,5 +1,10 @@
 # Multi-pipeline setup and synthetic demo bundles
 
+> **Completed (2026-09-23).** Executable synthetic bulk demo preparation, Dashboard
+> **Run Bulk RNA-seq Demo**, live preparation logs, and readiness/storage checks
+> shipped. See [executable-demo-live-logs-readiness.md](./executable-demo-live-logs-readiness.md)
+> for the closing summary. Planning notes below are historical.
+
 ## Goal
 
 Provide a dedicated setup experience where an operator can select Bulk RNA-seq,
@@ -56,16 +61,14 @@ checking rather than trusted tamper-proof integrity.
 - The managed installer pins the reviewed Dorado 2.1.2 official archive and
   fails closed when its SHA-256 does not match. It has not been installed into
   or exercised against the active ONT environment.
-- Clean-VM installation and executable synthetic-demo validation remain
-  deferred. The prepared fixtures are deliberately non-executable and are not
-  evidence of scientific or end-to-end runtime readiness.
+- Executable synthetic bulk demo, async preparation jobs, live logs, and Dashboard
+  entry shipped with contract tests; clean-VM GUI install and full native E2E on
+  every target host remain operator verification (see closing summary doc).
 
 ## Completion boundary
 
-The safe setup scope is complete when the dedicated multi-selection UI and
-synchronous synthetic-demo contract are implemented with isolated frontend and
-backend tests. The demo bundles remain deliberately non-executable: both
-pipelines must still be prepared and launched on a clean supported machine
-before any end-to-end readiness can be claimed. During the active ONT run,
-completion remains limited to safe setup UI, packaging infrastructure, and
-isolated contract tests.
+Met for in-repo scope: multi-pipeline Setup UI, async synthetic-demo API, bulk
+functional execution support when managed tools are present, live command logs,
+and isolated frontend/backend tests. ONT synthetic bundle remains non-executable
+by design. Cross-machine readiness still requires managed Bulk install plus a
+local-profile smoke run on each environment.

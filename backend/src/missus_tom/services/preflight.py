@@ -12,9 +12,21 @@ from pathlib import Path
 from missus_tom.config import settings
 from missus_tom.models.manifest import ExecutionProfile, ProjectManifest, ReadLayout
 from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
-from missus_tom.services.dependencies import runtime_environment, runtime_tool
+from missus_tom.services.dependencies import (
+    _managed_root,
+    dependency_installer,
+    runtime_environment,
+    runtime_tool,
+)
 from missus_tom.services.quantifications import has_kallisto_header
-from missus_tom.services.resources import execution_resource_checks
+from missus_tom.services.resources import (
+    GIB,
+    StorageInspection,
+    effective_free_bytes,
+    execution_resource_checks,
+    inspect_host_resources,
+    inspect_storage,
+)
 
 
 def _version_check(
@@ -63,29 +75,114 @@ def _version_check(
         )
 
 
-def _memory_bytes() -> int | None:
-    try:
-        with Path("/proc/meminfo").open(encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
+def _managed_tool_label(label: str, path: str | None, pipeline_identifier: str) -> str:
+    if path and str(_managed_root(pipeline_identifier)) in path:
+        return f"{label} (managed)"
+    return label
+
+
+def _disk_preflight_check(
+    check_id: str,
+    label: str,
+    inspection: StorageInspection,
+) -> PreflightCheck:
+    effective_free = effective_free_bytes(inspection)
+    fstype = inspection.filesystem_type or "unknown"
+    host_note = (
+        f"; Windows host bound to {inspection.host_free_bytes / GIB:.1f} GiB free"
+        if inspection.host_free_bytes is not None
+        else ""
+    )
+    message = (
+        f"{effective_free / GIB:.1f} GiB free on {inspection.path} "
+        f"({fstype}, measurement={inspection.measurement}){host_note}"
+    )
+    if inspection.warning:
+        message = f"{message}. {inspection.warning}"
+    if effective_free < 2 * GIB:
+        status = CheckStatus.BLOCKING
+    elif (
+        effective_free < 10 * GIB
+        or inspection.measurement == "wsl_virtual"
+        or inspection.warning
+    ):
+        status = CheckStatus.WARNING
+    else:
+        status = CheckStatus.PASSED
+    return PreflightCheck(
+        check_id=check_id,
+        label=label,
+        status=status,
+        message=message,
+        details={
+            "path": inspection.path,
+            "filesystem_type": inspection.filesystem_type,
+            "free_bytes": inspection.free_bytes,
+            "host_free_bytes": inspection.host_free_bytes,
+            "measurement": inspection.measurement,
+            "warning": inspection.warning,
+        },
+    )
+
+
+def _managed_pipeline_check(
+    pipeline_identifier: str, *, check_id: str, label: str
+) -> PreflightCheck:
+    status_payload = dependency_installer.status(pipeline_identifier)
+    if status_payload.manual_requirements:
+        return PreflightCheck(
+            check_id=check_id,
+            label=label,
+            status=CheckStatus.WARNING,
+            message="; ".join(status_payload.manual_requirements),
+            details={"missing": status_payload.missing},
+        )
+    if not status_payload.missing:
+        return PreflightCheck(
+            check_id=check_id,
+            label=label,
+            status=CheckStatus.PASSED,
+            message="All required managed tools are installed",
+        )
+    missing = ", ".join(status_payload.missing)
+    message = (
+        f"Missing managed tools: {missing}. "
+        "Open Setup and install pipeline dependencies before running workflows."
+    )
+    return PreflightCheck(
+        check_id=check_id,
+        label=label,
+        status=CheckStatus.WARNING,
+        message=message,
+        details={"missing": status_payload.missing, "installable": status_payload.installable},
+    )
 
 
 def system_preflight() -> SystemPreflightResult:
-    memory = _memory_bytes()
-    disk = shutil.disk_usage(Path.home())
+    host = inspect_host_resources()
+    disk_state = inspect_storage(settings.state_directory)
+    disk_home = inspect_storage(Path.home())
     java_check = _version_check("java", "Java", "java", ["-version"], optional=False)
-    nextflow_check = _version_check("nextflow", "Nextflow", "nextflow", ["-version"], optional=True)
-    docker_check = _version_check(
-        "docker",
-        "Docker",
-        "docker",
-        ["version", "--format", "{{.Server.Version}}"],
-        optional=True,
+    if java_check.details and isinstance(java_check.details.get("path"), str):
+        java_check = java_check.model_copy(
+            update={
+                "label": _managed_tool_label(
+                    java_check.label, java_check.details["path"], "bulk-rnaseq"
+                )
+            }
+        )
+    nextflow_check = _version_check(
+        "nextflow", "Nextflow", "nextflow", ["-version"], optional=True
     )
+    if nextflow_check.details and isinstance(nextflow_check.details.get("path"), str):
+        nextflow_check = nextflow_check.model_copy(
+            update={
+                "label": _managed_tool_label(
+                    nextflow_check.label, nextflow_check.details["path"], "bulk-rnaseq"
+                )
+            }
+        )
+    memory_ok = host.available_memory_bytes is not None
     checks = [
         PreflightCheck(
             check_id="operating_system",
@@ -98,27 +195,37 @@ def system_preflight() -> SystemPreflightResult:
             check_id="cpu",
             label="CPU",
             status=CheckStatus.PASSED,
-            message=f"{os.cpu_count() or 1} logical CPU(s) available",
-            details={"logical_cpus": os.cpu_count() or 1},
+            message=f"{host.logical_cpus} logical CPU(s) available for workflows",
+            details={"logical_cpus": host.logical_cpus},
         ),
         PreflightCheck(
             check_id="memory",
             label="Available memory",
-            status=CheckStatus.PASSED if memory is not None else CheckStatus.WARNING,
-            message=f"{memory / 1024**3:.1f} GiB available" if memory else "Unavailable",
-            details={"available_bytes": memory},
+            status=CheckStatus.PASSED if memory_ok else CheckStatus.WARNING,
+            message=(
+                f"{host.available_memory_bytes / GIB:.1f} GiB available"
+                if memory_ok
+                else "Unavailable"
+            ),
+            details={
+                "available_bytes": host.available_memory_bytes,
+                "total_bytes": host.total_memory_bytes,
+            },
         ),
-        PreflightCheck(
-            check_id="disk",
-            label="Available disk space",
-            status=CheckStatus.PASSED,
-            message=f"{disk.free / 1024**3:.1f} GiB free on the user-data filesystem",
-            details={"free_bytes": disk.free},
-        ),
+        _disk_preflight_check("disk_state", "Application state filesystem", disk_state),
+        _disk_preflight_check("disk_home", "User-data filesystem", disk_home),
         java_check,
         nextflow_check,
-        docker_check,
-        _version_check("apptainer", "Apptainer", "apptainer", ["--version"], optional=True),
+        _managed_pipeline_check(
+            "bulk-rnaseq",
+            check_id="managed_dependencies_bulk_rnaseq",
+            label="Bulk RNA-seq managed dependencies",
+        ),
+        _managed_pipeline_check(
+            "ont-analysis",
+            check_id="managed_dependencies_ont_analysis",
+            label="ONT analysis managed dependencies",
+        ),
         PreflightCheck(
             check_id="bulk_adapter",
             label="Bulk RNA-seq adapter",
@@ -522,16 +629,8 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
 
     checks.extend(execution_resource_checks(manifest))
 
-    disk = shutil.disk_usage(output_parent)
-    checks.append(
-        PreflightCheck(
-            check_id="project_disk_space",
-            label="Project disk space",
-            status=CheckStatus.WARNING if disk.free < 10 * 1024**3 else CheckStatus.PASSED,
-            message=f"{disk.free / 1024**3:.1f} GiB free",
-            details={"free_bytes": disk.free, "path": str(output_parent)},
-        )
-    )
+    project_disk = inspect_storage(output_parent)
+    checks.append(_disk_preflight_check("project_disk_space", "Project disk space", project_disk))
 
     required_references = {"biomart"} if analysis_only else {"kallisto_index", "biomart"}
     unconfigured_references = sorted(required_references - manifest.reference_resources.keys())

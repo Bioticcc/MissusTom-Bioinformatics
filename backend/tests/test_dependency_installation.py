@@ -15,6 +15,19 @@ import pytest
 
 from missus_tom.models.dependencies import DependencyInstallJob
 from missus_tom.services import dependencies
+from missus_tom.services.resources import StorageInspection
+
+
+def _linux_storage(path: Path, *, free_bytes: int = 100 * 1024**3) -> StorageInspection:
+    return StorageInspection(
+        path=str(path),
+        filesystem_type="ext4",
+        free_bytes=free_bytes,
+        total_bytes=free_bytes * 2,
+        host_free_bytes=None,
+        measurement="linux",
+        warning=None,
+    )
 
 
 def job() -> DependencyInstallJob:
@@ -325,9 +338,7 @@ def test_failed_candidate_does_not_replace_active_prefix(
     original = {"environment": "environments/previous/environment"}
     (root / "active.json").write_text(json.dumps(original))
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
-    monkeypatch.setattr(
-        dependencies.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3)
-    )
+    monkeypatch.setattr(dependencies, "inspect_storage", lambda path: _linux_storage(path))
     monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
     monkeypatch.setattr(installer, "_run", Mock())
     monkeypatch.setattr(installer, "_install_dorado", Mock())
@@ -345,9 +356,7 @@ def test_bulk_install_uses_native_r_packages_without_docker_images(
 ) -> None:
     monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
-    monkeypatch.setattr(
-        dependencies.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3)
-    )
+    monkeypatch.setattr(dependencies, "inspect_storage", lambda path: _linux_storage(path))
     monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
     run = Mock()
     monkeypatch.setattr(installer, "_run", run)

@@ -138,6 +138,25 @@ def wait_for_status(manager: RunManager, job_identifier: str, status: RunStatus)
     pytest.fail(f"run did not reach {status}")
 
 
+def test_run_log_offset_read(tmp_path: Path, manifest_payload: dict[str, Any]) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    started = manager.start(manifest)
+    record = wait_for_terminal(manager, started.job_identifier)
+    assert record.status == RunStatus.COMPLETED
+
+    tail = manager.read_log(started.job_identifier, limit=1000)
+    assert tail.truncated in {True, False}
+    assert tail.bytes_available is not None
+
+    head = manager.read_log(started.job_identifier, offset=0, limit=5)
+    rest = manager.read_log(started.job_identifier, offset=head.next_offset, limit=10_000)
+    assert head.text == tail.text[: len(head.text)]
+    assert head.text + rest.text == tail.text[: head.next_offset + len(rest.text)]
+
+
 def test_run_manager_captures_status_and_log(
     tmp_path: Path, manifest_payload: dict[str, Any]
 ) -> None:

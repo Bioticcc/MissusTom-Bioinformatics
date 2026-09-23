@@ -109,6 +109,9 @@ class RunLog(BaseModel):
     job_identifier: str
     text: str
     truncated: bool = False
+    next_offset: int | None = None
+    bytes_available: int | None = None
+    last_output_at: datetime | None = None
 
 
 class ResultArtifact(BaseModel):

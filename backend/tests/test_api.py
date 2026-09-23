@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import stat
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -9,6 +12,8 @@ from httpx import ASGITransport, AsyncClient
 
 from missus_tom.api import routes
 from missus_tom.main import app
+from missus_tom.models.demos import DemoPrepareStatus
+from missus_tom.services import demos as demos_module
 from missus_tom.services.demos import DemoService
 
 pytestmark = pytest.mark.anyio
@@ -27,6 +32,31 @@ def isolated_demo_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> De
     service = DemoService(state_directory=tmp_path / "state")
     monkeypatch.setattr(routes, "demo_service", service)
     return service
+
+
+@pytest.fixture
+def kallisto_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    script = tmp_path / "kallisto-stub"
+    script.write_text(
+        """#!/bin/sh
+if [ "$1" = "index" ] && [ "$2" = "-i" ] && [ -n "$3" ]; then
+  printf 'KALLISTO\\0stub-index' > "$3"
+  exit 0
+fi
+exit 2
+""",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    def runtime_tool(name: str, pipeline_identifier: str) -> str | None:
+        if name == "kallisto" and pipeline_identifier == "bulk-rnaseq":
+            return str(script)
+        return None
+
+    monkeypatch.setattr(demos_module, "runtime_tool", runtime_tool)
+    monkeypatch.setattr(demos_module, "runtime_environment", lambda _: {"PATH": str(tmp_path)})
+    return script
 
 
 async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
@@ -94,15 +124,33 @@ async def test_demo_status_endpoint_uses_isolated_service(
 
 
 async def test_demo_prepare_endpoint_accepts_explicit_consent(
-    client: AsyncClient, isolated_demo_service: DemoService
+    client: AsyncClient,
+    isolated_demo_service: DemoService,
+    kallisto_stub: Path,
 ) -> None:
+    del kallisto_stub
     response = await client.post("/api/v1/demos/bulk-rnaseq/prepare", json={"consent": True})
 
     assert response.status_code == 200
-    assert response.json()["data"]["available"] is True
-    assert response.json()["data"]["bundle_directory"].startswith(
-        str(isolated_demo_service.state_directory)
-    )
+    job = response.json()["data"]
+    assert job["job_identifier"]
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        if job["status"] != DemoPrepareStatus.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+        poll = await client.get(
+            f"/api/v1/demos/bulk-rnaseq/prepare/jobs/{job['job_identifier']}"
+        )
+        assert poll.status_code == 200
+        job = poll.json()["data"]
+    assert job["status"] == DemoPrepareStatus.SUCCEEDED
+
+    status_response = await client.get("/api/v1/demos/bulk-rnaseq/status")
+    assert status_response.status_code == 200
+    status = status_response.json()["data"]
+    assert status["available"] is True
+    assert status["bundle_directory"].startswith(str(isolated_demo_service.state_directory))
 
 
 @pytest.mark.parametrize("payload", ({}, {"consent": False}))
@@ -323,7 +371,10 @@ async def test_system_preflight_keeps_framework_available(
     assert {check["check_id"] for check in body["checks"]} >= {
         "java",
         "nextflow",
-        "docker",
-        "apptainer",
+        "disk_state",
+        "disk_home",
+        "managed_dependencies_bulk_rnaseq",
         "bulk_adapter",
     }
+    assert "docker" not in {check["check_id"] for check in body["checks"]}
+    assert "apptainer" not in {check["check_id"] for check in body["checks"]}

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
+import { LiveCommandLog } from "../components/LiveCommandLog";
 import { openDirectory } from "../native";
 import type { RunLog, RunRecord, RunStatus } from "../types";
 
@@ -19,47 +19,35 @@ function needsStatusRefresh(run: RunRecord) {
 
 export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
   const [runs, setRuns] = useState<RunRecord[]>(activeRun ? [activeRun] : []);
-  const [logs, setLogs] = useState<Record<string, RunLog>>({});
-  const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
-  const logElements = useRef<Record<string, HTMLPreElement | null>>({});
-  const followLogs = useRef<Record<string, boolean>>({});
-  const expandedLogsRef = useRef(expandedLogs);
-  const logControllers = useRef<Record<string, AbortController | undefined>>({});
+  const [lastOutputByJob, setLastOutputByJob] = useState<Record<string, string | null>>({});
   const priorStatuses = useRef<Record<string, RunStatus>>({});
   const mounted = useRef(false);
 
-  useEffect(() => { expandedLogsRef.current = expandedLogs; }, [expandedLogs]);
-
-  const scrollLogToLatest = useCallback((identifier: string) => {
-    const element = logElements.current[identifier];
-    if (element && followLogs.current[identifier] !== false) element.scrollTop = element.scrollHeight;
-  }, []);
-
-  useLayoutEffect(() => { Object.keys(logs).forEach(scrollLogToLatest); }, [logs, scrollLogToLatest]);
-
-  const loadLog = useCallback(async (identifier: string, replace = false) => {
-    if (logControllers.current[identifier] && !replace) return;
-    logControllers.current[identifier]?.abort();
-    const controller = new AbortController();
-    logControllers.current[identifier] = controller;
-    try {
-      const log = await apiRequest<RunLog>(`/api/v1/runs/${identifier}/logs`, { signal: controller.signal });
-      if (mounted.current && logControllers.current[identifier] === controller) {
-        setLogs((existing) => ({ ...existing, [identifier]: log }));
-        setError("");
-      }
-    } catch (reason) {
-      if (mounted.current && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Log output could not be loaded.");
-    } finally {
-      if (logControllers.current[identifier] === controller) delete logControllers.current[identifier];
+  const fetchRunLog = useCallback((jobIdentifier: string) => (
+    offset: number,
+    signal: AbortSignal,
+  ) => apiRequest<RunLog>(`/api/v1/runs/${jobIdentifier}/logs?offset=${offset}`, { signal }).then((log) => {
+    const lastOutput = log.last_output_at ?? null;
+    if (lastOutput) {
+      setLastOutputByJob((current) => (
+        current[jobIdentifier] === lastOutput
+          ? current
+          : { ...current, [jobIdentifier]: lastOutput }
+      ));
     }
-  }, []);
+    return {
+      text: log.text,
+      next_offset: log.next_offset ?? offset + (log.text?.length ?? 0),
+      bytes_available: log.bytes_available ?? 0,
+      truncated: log.truncated,
+      last_output_at: log.last_output_at ?? null,
+    };
+  }), []);
 
   useEffect(() => {
     mounted.current = true;
-    const activeLogControllers = logControllers.current;
     let timer: number | undefined;
     let controller: AbortController | undefined;
     const refresh = async () => {
@@ -67,19 +55,9 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
       try {
         const records = await apiRequest<RunRecord[]>("/api/v1/runs", { signal: controller.signal });
         if (!mounted.current) return;
-        const finalOpenedLogs = records.filter((record) => {
-          const previousStatus = priorStatuses.current[record.job_identifier];
-          return expandedLogsRef.current[record.job_identifier]
-            && terminalStatuses.has(record.status)
-            && (Boolean(previousStatus && pollableStatuses.has(previousStatus)) || record.holds_admission);
-        });
         priorStatuses.current = Object.fromEntries(records.map((record) => [record.job_identifier, record.status]));
         setRuns(records);
         setError("");
-        await Promise.all([
-          ...records.filter((record) => needsStatusRefresh(record) && expandedLogsRef.current[record.job_identifier]),
-          ...finalOpenedLogs,
-        ].map((record) => loadLog(record.job_identifier)));
         if (mounted.current && records.some(needsStatusRefresh)) timer = window.setTimeout(() => void refresh(), POLL_MS);
       } catch (reason) {
         if (mounted.current && !controller.signal.aborted) {
@@ -92,10 +70,9 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
     return () => {
       mounted.current = false;
       controller?.abort();
-      Object.values(activeLogControllers).forEach((logController) => logController?.abort());
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [loadLog]);
+  }, []);
 
   const cancel = async (identifier: string) => {
     setCancelling((current) => new Set(current).add(identifier));
@@ -110,19 +87,6 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
     }
   };
 
-  const trackLogPosition = (identifier: string, element: HTMLPreElement) => {
-    followLogs.current[identifier] = element.scrollHeight - element.scrollTop - element.clientHeight <= 8;
-  };
-
-  const revealLog = (identifier: string, event: SyntheticEvent<HTMLDetailsElement>) => {
-    const open = event.currentTarget.open;
-    setExpandedLogs((current) => ({ ...current, [identifier]: open }));
-    if (open) {
-      void loadLog(identifier);
-      window.requestAnimationFrame(() => scrollLogToLatest(identifier));
-    }
-  };
-
   return (
     <div className="page-stack">
       <header className="page-header"><div><p className="eyebrow">Execution status</p><h1>Jobs</h1><p className="lede">Local Nextflow job state and logs.</p></div></header>
@@ -130,21 +94,25 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
       <section className="panel">
         {runs.length === 0 ? <div className="empty-state"><div className="empty-orbit" aria-hidden="true">◷</div><h2>No jobs</h2><p>No job records exist.</p></div> : <div className="job-list">
           {runs.map((run) => {
-            const log = logs[run.job_identifier];
             const retryCleanup = run.status === "interrupted" && run.holds_admission;
             const busy = cancelling.has(run.job_identifier) || run.status === "cancelling";
+            const logActive = pollableStatuses.has(run.status);
             return <article className="job-card" key={run.job_identifier}>
               <div className="section-heading"><div><h2>{run.project_name}</h2><p>{run.current_stage ?? "No stage reported"}</p></div><span className={`job-state state-${run.status}`}>{run.status}</span></div>
               <dl className="job-metadata"><dt>Started</dt><dd>{formatTime(run.started_at)}</dd><dt>Finished</dt><dd>{formatTime(run.finished_at)}</dd><dt>Pipeline</dt><dd>{run.pipeline_identifier === "ont-analysis" ? "ONT analysis" : run.pipeline_identifier === "bulk-rnaseq" ? "Bulk RNA-seq" : "Configured workflow"}</dd><dt>Run scope</dt><dd>{run.pipeline_identifier === "ont-analysis" ? "Configured ONT workflow" : run.start_stage === "analysis" ? "Analysis only" : "Quantification + analysis"}</dd><dt>Exit code</dt><dd>{run.exit_code ?? "—"}</dd></dl>
               {run.error_message && <p className="inline-error">{run.error_message}</p>}
               {(cancellableStatuses.has(run.status) || retryCleanup) && <button type="button" className="button secondary" disabled={busy} onClick={() => void cancel(run.job_identifier)}>{busy ? "Cancelling…" : retryCleanup ? "Retry cleanup" : "Cancel"}</button>}
               {terminalStatuses.has(run.status) && <button type="button" className="button secondary" onClick={() => void openDirectory(run.results_directory).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "The output folder could not be opened."))}>Open output folder</button>}
-              <details onToggle={(event) => revealLog(run.job_identifier, event)}>
-                <summary>Log output</summary>
-                <button type="button" className="text-button log-refresh" onClick={() => void loadLog(run.job_identifier, true)}>Refresh log</button>
-                {log?.truncated && <p className="log-note">Showing the retained log output.</p>}
-                <pre aria-label={`Log output for ${run.project_name}`} className="command-preview job-log" onScroll={(event) => trackLogPosition(run.job_identifier, event.currentTarget)} ref={(element) => { logElements.current[run.job_identifier] = element; }}>{log ? log.text || "No log output yet." : "Loading log output…"}</pre>
-              </details>
+              <LiveCommandLog
+                title="Log output"
+                resetKey={run.job_identifier}
+                active={logActive}
+                status={run.status}
+                stage={run.current_stage}
+                startedAt={run.started_at}
+                lastOutputAt={lastOutputByJob[run.job_identifier] ?? null}
+                fetchChunk={fetchRunLog(run.job_identifier)}
+              />
             </article>;
           })}
         </div>}
