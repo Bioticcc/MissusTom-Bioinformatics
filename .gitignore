@@ -22,6 +22,11 @@ desktop/src-tauri/gen/
 *.log
 .nextflow/
 
+# Project-settings exports contain local paths and sample identifiers. Keep only
+# the intentionally sanitized example filename eligible for version control.
+*-debug-settings.json
+!example_settings.json
+
 # Bioinformatics data must never enter this application repository
 *.fastq
 *.fastq.gz
