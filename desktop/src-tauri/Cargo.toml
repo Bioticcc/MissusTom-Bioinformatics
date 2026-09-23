@@ -1,8 +1,8 @@
 [package]
 name = "missus-tom"
 version = "0.3.0"
-description = "Yan Lab bioinformatics workbench"
-authors = ["Yan Lab"]
+description = "Local bioinformatics workbench"
+authors = ["Missus Tom contributors"]
 edition = "2021"
 
 [lib]

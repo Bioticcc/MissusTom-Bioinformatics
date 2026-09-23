@@ -87,7 +87,7 @@ export function Dashboard({
     <div className="page-stack">
       <header className="page-header hero-header">
         <div>
-          <p className="eyebrow">Yan Lab · local bioinformatics</p>
+          <p className="eyebrow">Local bioinformatics</p>
           <h1>Bioinformatics project configuration</h1>
           <p className="lede">Configure pipeline-specific inputs, resources, and workflow parameters.</p>
         </div>

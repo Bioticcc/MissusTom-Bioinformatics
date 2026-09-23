@@ -140,7 +140,7 @@ export default function App() {
           </div>
           <div>
             <strong>Missus Tom</strong>
-            <span>Yan Lab workbench</span>
+            <span>Local bioinformatics workbench</span>
           </div>
         </div>
 

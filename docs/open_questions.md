@@ -51,7 +51,7 @@
 21. Which container registry and version-review policy should be used for Docker
     and Apptainer images?
 22. Where should shared references, indexes, application state, Nextflow work,
-    and final projects live on Yan Lab workstations?
+    and final projects live on laboratory workstations?
 
 ## ONT modified-base analysis
 
