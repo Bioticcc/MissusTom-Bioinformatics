@@ -4,6 +4,18 @@ import re
 from pathlib import Path
 
 
+def test_release_publish_job_targets_repository_without_checkout() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    release_workflow = (repository_root / ".github" / "workflows" / "release-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    publish_job = release_workflow.split("\n  publish:\n", maxsplit=1)[1]
+
+    assert "actions/checkout" not in publish_job
+    assert "GH_REPO: ${{ github.repository }}" in publish_job
+    assert 'gh release create "${RELEASE_TAG}"' in publish_job
+
+
 def test_local_workflow_has_no_fixed_task_wall_time() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow_root = repository_root / "workflows" / "bulk_rnaseq"
