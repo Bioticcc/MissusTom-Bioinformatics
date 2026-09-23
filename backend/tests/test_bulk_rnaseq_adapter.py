@@ -26,7 +26,7 @@ def host_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         resources.shutil,
         "disk_usage",
-        lambda _: SimpleNamespace(free=1000 * resources.GIB),
+        lambda _: SimpleNamespace(free=1000 * resources.GIB, total=2000 * resources.GIB),
     )
 
 
