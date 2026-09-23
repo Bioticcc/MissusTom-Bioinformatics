@@ -39,7 +39,7 @@ def supported_manifest(
         pipeline_version="0.4.0",
         organism="Homo sapiens",
         reference_genome="GRCh38",
-        execution_profile="docker",
+        execution_profile="local",
         pipeline_status="planned",
     )
     payload["parameters"] = {
@@ -102,6 +102,8 @@ def test_supported_user_project_is_executable(
     plan = adapter.construct_run_plan(manifest)
 
     assert plan.execution_enabled is True
+    assert plan.execution_profile == "local"
+    assert plan.command_preview[plan.command_preview.index("-profile") + 1] == "local"
     assert "--max_cpus" in plan.command_preview
     assert plan.command_preview[-2:] == ["--start_stage", "quantification"]
 
@@ -210,3 +212,80 @@ def test_analysis_only_accepts_external_kallisto_tables(
     adapter.validate_execution(manifest, start_stage=RunStartStage.ANALYSIS)
 
     assert adapter.construct_run_plan(manifest).command_preview[-1] == "analysis"
+
+
+def test_local_profile_requires_nextflow_only(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_EXECUTION_ENABLED", "1")
+    manifest = supported_manifest(tmp_path, manifest_payload)
+    save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "local-state.sqlite3"))
+    seen: list[str] = []
+
+    def runtime_tool(executable: str, _pipeline: str) -> str | None:
+        seen.append(executable)
+        return "/usr/bin/nextflow" if executable == "nextflow" else None
+
+    def reject_docker_query(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        raise AssertionError("local profile must not query Docker")
+
+    monkeypatch.setattr(bulk_module, "runtime_tool", runtime_tool)
+    monkeypatch.setattr(bulk_module.subprocess, "run", reject_docker_query)
+
+    BulkRnaSeqAdapter().validate_execution(manifest)
+
+    assert seen == ["nextflow"]
+
+
+def test_docker_profile_still_checks_docker(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_EXECUTION_ENABLED", "1")
+    manifest = supported_manifest(tmp_path, manifest_payload)
+    payload = manifest.model_dump(mode="json")
+    payload["execution_profile"] = "docker"
+    docker_manifest = ProjectManifest.model_validate(payload)
+    save_project(
+        docker_manifest,
+        history_store=ProjectHistoryStore(tmp_path / "docker-state.sqlite3"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bulk_module, "runtime_tool", lambda executable, _: f"/usr/bin/{executable}")
+
+    def run(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bulk_module.subprocess, "run", run)
+
+    adapter = BulkRnaSeqAdapter()
+    adapter.validate_execution(docker_manifest)
+    plan = adapter.construct_run_plan(docker_manifest)
+
+    assert calls == [["docker", "info", "--format", "{{.ServerVersion}}"]]
+    assert plan.execution_enabled is True
+    assert plan.execution_profile == "docker"
+
+
+def test_adapter_rejects_profiles_other_than_local_and_docker(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_EXECUTION_ENABLED", "1")
+    manifest = supported_manifest(tmp_path, manifest_payload)
+    payload = manifest.model_dump(mode="json")
+    payload["execution_profile"] = "apptainer"
+    rejected = ProjectManifest.model_validate(payload)
+    monkeypatch.setattr(bulk_module, "runtime_tool", lambda executable, _: f"/usr/bin/{executable}")
+
+    with pytest.raises(ValueError, match="local tools or Docker"):
+        BulkRnaSeqAdapter().validate_execution(rejected)
+
+    plan = BulkRnaSeqAdapter().construct_run_plan(rejected)
+    assert plan.execution_enabled is False
+    assert any("Local tools or Docker" in warning for warning in plan.warnings)

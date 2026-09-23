@@ -49,10 +49,25 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly fields: string[] = [],
+    public readonly status?: number,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+const CONCURRENT_INSTALL = /already running|another dependency installation/i;
+const ACTIVE_RUN_LOCK = /a workflow run is active|another workflow job is active/i;
+
+export function setupInstallConflictMessage(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  if (CONCURRENT_INSTALL.test(error.message)) {
+    return "The backend is busy with another dependency installation. The completed work is saved; retry to resume.";
+  }
+  if (ACTIVE_RUN_LOCK.test(error.message)) {
+    return "A workflow run is active or needs recovery. Dependency installation stays locked until that run is finished.";
+  }
+  return null;
 }
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -95,7 +110,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
         .map(([text, count]) => count > 1 ? `${text} (${count} fields)` : text)
         .join("; ") || response.statusText;
       const fields = envelope.errors?.flatMap((error) => (error.field ? [error.field] : [])) ?? [];
-      throw new ApiError(message, fields);
+      throw new ApiError(message, fields, response.status);
     }
     return envelope.data;
   } finally {

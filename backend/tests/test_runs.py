@@ -87,6 +87,17 @@ class DescendantAdapter(SleepingAdapter):
         return [sys.executable, "-c", parent]
 
 
+class NextflowCommandAdapter(StubAdapter):
+    def construct_command(
+        self,
+        _manifest: ProjectManifest,
+        *,
+        start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+    ) -> list[str]:
+        del start_stage
+        return ["nextflow", "run", "main.nf", "-resume"]
+
+
 class ResumeRequiredAdapter(StubAdapter):
     @property
     def requires_resume(self) -> bool:
@@ -696,6 +707,34 @@ def test_sigkill_escalation_stops_stubborn_descendant_group(
     manager.cancel(started.job_identifier)
 
     assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.CANCELLED
+
+
+def test_container_cleanup_follows_nextflow_execution_profile(
+    tmp_path: Path, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    original_popen = subprocess.Popen
+
+    def fake_popen(_command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        return original_popen([sys.executable, "-c", "print('profile-check')"], **kwargs)
+
+    monkeypatch.setattr(runs_module.subprocess, "Popen", fake_popen)
+    manager = RunManager(NextflowCommandAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    monkeypatch.setattr(manager, "_cleanup_owned_containers", lambda _job_identifier: True)
+
+    local_manifest = ProjectManifest.model_validate(manifest_payload)
+    local_run = manager.start(local_manifest)
+    assert local_run.container_cleanup_required is False
+    assert local_run.command[0] == "nextflow"
+    assert wait_for_terminal(manager, local_run.job_identifier).status == RunStatus.COMPLETED
+
+    docker_payload = dict(manifest_payload)
+    docker_payload["execution_profile"] = "docker"
+    docker_payload["output_directory"] = str(tmp_path / "docker-project")
+    docker_run = manager.start(ProjectManifest.model_validate(docker_payload))
+    assert docker_run.container_cleanup_required is True
+    assert wait_for_terminal(manager, docker_run.job_identifier).status == RunStatus.COMPLETED
 
 
 def test_docker_cleanup_failure_holds_admission_and_retry_can_finish(

@@ -21,10 +21,16 @@ DESeq2 analyses, and writes normalized matrices, differential-expression tables,
 PCA, heatmaps, volcano/MA plots, distribution plots, sample distances, and
 comparison summaries.
 
-BioContainer inputs are pinned by SHA-256 digest in `conf/resources.config`.
-The differential-expression image is built from the digest-pinned Bioconductor
-base with `scripts/build-analysis-image.sh`. Containers run without network
-access. Nextflow reports, trace data, and the work directory are retained for
+`local` is the normal Nextflow profile. It sets `docker.enabled = false` and
+runs these processes with managed native tools on the local executor. `docker`
+is retained for regression: it enables Docker, keeps containers off the
+network, applies per-task CPU and memory-swap limits, and labels containers
+with the run id. Digest-pinned BioContainer inputs in `conf/resources.config`,
+and the differential-expression image built by `scripts/build-analysis-image.sh`,
+apply to that Docker profile. Routine tests have not compared native-tool and
+Docker-profile scientific outputs.
+
+Nextflow reports, trace data, and the work directory are retained for
 auditing and `-resume`. Most local tasks have no fixed wall-time limit because
 input size and analysis duration vary. Each per-sample Kallisto quantification
 has a two-hour watchdog. The watchdog sends `TERM`, escalates to `KILL` after 60
@@ -53,9 +59,9 @@ The Kallisto watchdog uses an explicit task-local process monitor rather than
 Nextflow's `time` directive. Supported local-executor versions can report a
 timeout without a usable exit status, preventing the configured retry from
 running. Exit 240 is reserved for this watchdog. No userspace watchdog can reap
-a process blocked indefinitely in uninterruptible kernel I/O; Missus Tom's
-owned-container cleanup gate remains the final
-safety mechanism for that operating-system failure mode.
+a process blocked indefinitely in uninterruptible kernel I/O. On the Docker
+profile, owned-container cleanup remains the final safety mechanism for that
+operating-system failure mode.
 
 ## Local resource containment
 
@@ -76,9 +82,10 @@ caps common BLAS/OpenMP thread environment variables at one; this avoids nested
 linear-algebra thread pools while leaving the analysis calculations unchanged.
 
 The backend passes a UUID as `--run_id` for application-launched workflows. It
-is validated before any task starts and becomes the Docker label
-`missus_tom.run_id=<UUID>`, allowing the runner to identify only containers
-belonging to that job. The parameter is optional for direct command-line use.
+is validated before any task starts. On the Docker profile it becomes the
+container label `missus_tom.run_id=<UUID>`, so cleanup can identify only
+containers belonging to that job. The parameter is optional for direct
+command-line use.
 
 Single-lane paired inputs are passed directly to Cutadapt from their staged
 paths. For multi-lane samples, each read direction is concatenated in manifest

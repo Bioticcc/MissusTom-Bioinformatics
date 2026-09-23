@@ -162,7 +162,7 @@ class DemoService:
                 }
             ],
             parameters={"demo_fixture": True, "scientific_execution_supported": False},
-            execution_profile="docker",
+            execution_profile="local",
         )
         result: dict[str, bytes] = {"project_manifest.json": self._json(manifest).encode("utf-8")}
         for sample in ("SYN_CONTROL_01", "SYN_TREATMENT_01"):

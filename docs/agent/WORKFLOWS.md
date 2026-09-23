@@ -67,9 +67,12 @@ cd backend
 
 ## Nextflow and R workflow
 
-Keep verbose resolved configuration outside model context:
+Keep verbose resolved configuration outside model context. Prefer the local
+profile for configuration checks. The Docker profile remains available for
+regression inspection:
 
 ```bash
+nextflow config workflows/bulk_rnaseq -profile local > /tmp/missus-tom-nextflow.config
 nextflow config workflows/bulk_rnaseq -profile docker > /tmp/missus-tom-nextflow.config
 Rscript -e "parse(file='workflows/bulk_rnaseq/bin/full_human_analysis.R')"
 ```
@@ -83,7 +86,9 @@ checks:
 
 Real demo runs are final integration validation, not a routine source check.
 
-For a complete synthetic toolchain check with locally cached Docker images:
+`scripts/agent/synthetic-workflow-smoke.sh` is still a Docker-profile regression
+check. It needs locally cached images and does not exercise the normal native
+install. For a complete synthetic toolchain check with those cached images:
 
 ```bash
 ./scripts/agent/synthetic-workflow-smoke.sh

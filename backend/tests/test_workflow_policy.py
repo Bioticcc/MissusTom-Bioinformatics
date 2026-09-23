@@ -212,6 +212,18 @@ def test_workflow_resource_profile_is_a_total_local_executor_budget() -> None:
     assert "maxForks = params.max_parallel_tasks" not in resources
 
 
+def test_local_profile_disables_docker_and_uses_the_host_executor() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    config = (repository_root / "workflows" / "bulk_rnaseq" / "nextflow.config").read_text(
+        encoding="utf-8"
+    )
+    local_profile = re.search(r"local \{(?P<body>.*?)\n    \}", config, re.DOTALL)
+    assert local_profile is not None
+    assert "process.executor = 'local'" in local_profile.group("body")
+    assert "docker.enabled = false" in local_profile.group("body")
+    assert "docker.enabled = true" in config
+
+
 def test_docker_tasks_have_hard_resource_limits_and_scoped_run_label() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow_root = repository_root / "workflows" / "bulk_rnaseq"

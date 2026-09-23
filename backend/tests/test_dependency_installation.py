@@ -26,6 +26,15 @@ def job() -> DependencyInstallJob:
     )
 
 
+def bulk_job() -> DependencyInstallJob:
+    return DependencyInstallJob(
+        job_identifier=str(uuid4()),
+        pipeline_identifier="bulk-rnaseq",
+        status="running",
+        message="testing",
+    )
+
+
 def trust_dorado_archive(monkeypatch: pytest.MonkeyPatch, archive: Path) -> None:
     monkeypatch.setattr(
         dependencies,
@@ -329,6 +338,58 @@ def test_failed_candidate_does_not_replace_active_prefix(
     with pytest.raises(RuntimeError, match="unusable"):
         installer._install_environment(job())
     assert json.loads((root / "active.json").read_text()) == original
+
+
+def test_bulk_install_uses_native_r_packages_without_docker_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
+    monkeypatch.setattr(
+        dependencies.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3)
+    )
+    monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
+    run = Mock()
+    monkeypatch.setattr(installer, "_run", run)
+    install_r = Mock()
+    monkeypatch.setattr(installer, "_install_bulk_r_packages", install_r)
+    install_images = Mock()
+    monkeypatch.setattr(installer, "_install_bulk_images", install_images)
+    monkeypatch.setattr(installer, "_verify_environment", Mock())
+    monkeypatch.setattr(installer, "_activate", Mock())
+
+    install_job = bulk_job()
+    installer._install_environment(install_job)
+
+    create_command = run.call_args.args[1]
+    assert "fastqc=0.12.1" in create_command
+    assert "multiqc=1.33" in create_command
+    assert "cutadapt=5.2" in create_command
+    assert "kallisto=0.52.0" in create_command
+    install_r.assert_called_once()
+    assert install_r.call_args.args[0] is install_job
+    install_images.assert_not_called()
+
+
+def test_bulk_verification_checks_kallisto_and_r_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    prefix = tmp_path / "dependencies/bulk-rnaseq/environments/generation/environment"
+    (prefix / "bin").mkdir(parents=True)
+    for tool in dependencies._TOOL_CATALOG["bulk-rnaseq"]:
+        (prefix / "bin" / tool).write_text("#!/bin/sh\n", encoding="utf-8")
+    installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
+    run = Mock()
+    monkeypatch.setattr(installer, "_run", run)
+
+    installer._verify_environment(bulk_job(), prefix)
+
+    commands = [call.args[1] for call in run.call_args_list]
+    assert [str(prefix / "bin" / "kallisto"), "version"] in commands
+    r_command = commands[-1]
+    assert r_command[:3] == [str(prefix / "bin" / "Rscript"), "--vanilla", "-e"]
+    assert all(package in r_command[-1] for package in dependencies.BULK_R_PACKAGES)
 
 
 def test_active_prefix_is_not_renamed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

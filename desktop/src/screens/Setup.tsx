@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, apiRequest } from "../api";
+import { apiRequest, setupInstallConflictMessage } from "../api";
 import { setDependencyInstallActive } from "../native";
 import type { DemoStatus, PipelineDependencies, RunRecord } from "../types";
 import {
@@ -136,8 +136,9 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
           if (controller.signal.aborted) throw reason;
           const message = reason instanceof Error ? reason.message : "Dependency installation failed.";
           current = record(current, pipeline, "dependencies", "failed", message);
-          if (reason instanceof ApiError && /409|already running|installation/i.test(message)) {
-            setError(`The backend is busy with another dependency installation. The completed work is saved; retry to resume.`);
+          const conflict = setupInstallConflictMessage(reason);
+          if (conflict) {
+            setError(conflict);
             break;
           }
         }

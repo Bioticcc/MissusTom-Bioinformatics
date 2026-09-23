@@ -64,9 +64,16 @@ sudo apt install ./missus-tom_<version>_linux-x86_64.deb
 ```
 
 Open **Setup**, choose the pipeline or pipelines you need, review any missing
-requirements, then choose package installation where it is offered. The app
-does not run `sudo`, install GPU drivers or Docker Engine, or download biological
-data and references.
+requirements, then choose package installation where it is offered. Setup
+downloads managed native tools over the internet. Bulk RNA-seq installation
+uses an application-managed Micromamba environment with pinned Nextflow,
+Java, FastQC, MultiQC, Cutadapt, and Kallisto versions, plus R with DESeq2,
+tximport, and ggplot2 resolved from conda-forge/bioconda at install time.
+Docker Engine is not part of that install and is not required for normal
+local-profile runs; it remains optional for the Docker regression profile
+only. The app does not run `sudo`, install GPU drivers, or download biological
+data and references. After a successful install, local-profile runs can
+proceed offline when the project's reference files are already on the machine.
 
 ## Use the app
 
@@ -122,6 +129,10 @@ overview](docs/mvp_architecture.md).
 
 - This is local-only software; data, reference files, results, logs, and
   runtime state are not included in releases.
+- Normal bulk runs use the local Nextflow profile and managed native tools.
+  The Docker profile is retained for regression.
 - Synthetic fixtures do not establish workflow readiness, end-to-end execution,
   or scientific validity.
-- Clean-machine GUI installation remains unverified.
+- Clean-machine GUI installation remains unverified. Clean-machine internet
+  installation of the managed tools, and scientific equivalence of native-tool
+  versus Docker-profile results, have not been verified.

@@ -141,7 +141,7 @@ export function RunPlanScreen({
         <div>
           <p className="eyebrow">Project</p>
           <h1>{manifest.project_name}</h1>
-          <p className="lede">{isOntPipeline ? "Local mouse modBAM analysis with validated, restartable stages." : "Local Docker execution with resumable Nextflow work."}</p>
+          <p className="lede">{isOntPipeline ? "Local mouse modBAM analysis with validated, restartable stages." : "Local tools with resumable Nextflow work."}</p>
         </div>
         <div className="header-actions">
           <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>

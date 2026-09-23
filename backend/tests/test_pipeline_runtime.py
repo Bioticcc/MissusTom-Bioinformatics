@@ -153,7 +153,7 @@ def test_runtime_tool_allows_dorado_link_within_managed_generation(
     )
 
 
-def test_docker_remains_an_explicit_system_prerequisite(
+def test_docker_remains_resolvable_as_an_optional_bulk_regression_tool(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))

@@ -155,7 +155,9 @@ class RunManager:
                 resume_from_run_name=resume_from_run_name,
                 start_stage=start_stage,
                 holds_admission=True,
-                container_cleanup_required=is_nextflow_command,
+                container_cleanup_required=(
+                    is_nextflow_command and manifest.execution_profile.value == "docker"
+                ),
             )
             self._records[job_identifier] = record
             self._locks[job_identifier] = locks
@@ -1019,10 +1021,8 @@ class RunManager:
                         "This run predates the current host boot, so its local process tree "
                         "cannot still exist. No run-labelled Docker containers were found."
                         if record.container_cleanup_required
-                        else "This legacy run predates the current host boot, so its local "
-                        "process tree cannot still exist. It has no persisted process identity "
-                        "or Docker run label; legacy workflow containers use --rm and no "
-                        "restart policy."
+                        else "This run predates the current host boot, so its local process "
+                        "tree cannot still exist. It has no persisted process identity."
                     )
                     if predates_current_boot
                     else (

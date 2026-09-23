@@ -174,7 +174,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             manifest.pipeline_version in self.supported_pipeline_versions
             and manifest.organism == "Homo sapiens"
             and manifest.read_layout.value == "paired-end"
-            and manifest.execution_profile.value == "docker"
+            and manifest.execution_profile.value in {"local", "docker"}
             and bool(manifest.comparisons)
         )
         execution_enabled = self.execution_enabled and supported_project
@@ -182,8 +182,8 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             warnings.append("Execution is disabled in the backend environment.")
         elif not supported_project:
             warnings.append(
-                "Execution currently supports human paired-end projects using Docker "
-                "with at least one comparison."
+                "Execution currently supports human paired-end projects using "
+                "Local tools or Docker with at least one comparison."
             )
         for sample in manifest.samples:
             if not sample.included:
@@ -231,8 +231,8 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             raise ValueError("unsupported pipeline identifier")
         if manifest.pipeline_version not in self.supported_pipeline_versions:
             raise ValueError("unsupported bulk RNA-seq pipeline version")
-        if manifest.execution_profile.value != "docker":
-            raise ValueError("bulk RNA-seq execution currently requires the Docker profile")
+        if manifest.execution_profile.value not in {"local", "docker"}:
+            raise ValueError("bulk RNA-seq execution supports the local tools or Docker profile")
         if manifest.organism != "Homo sapiens" or manifest.read_layout.value != "paired-end":
             raise ValueError("this workflow supports Homo sapiens paired-end projects")
         if not manifest.comparisons:
@@ -351,24 +351,26 @@ class BulkRnaSeqAdapter(PipelineAdapter):
 
         validate_execution_resources(manifest, analysis_only=start_stage == RunStartStage.ANALYSIS)
 
-        if (
-            runtime_tool("nextflow", self.pipeline_identifier) is None
-            or runtime_tool("docker", self.pipeline_identifier) is None
-        ):
-            raise ValueError("Nextflow and Docker must be available in PATH")
-        try:
-            docker_check = subprocess.run(
-                ["docker", "info", "--format", "{{.ServerVersion}}"],
-                capture_output=True,
-                text=True,
-                timeout=8,
-                check=False,
-                env=runtime_environment(self.pipeline_identifier),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError("Docker status could not be checked") from exc
-        if docker_check.returncode != 0:
-            raise ValueError("Docker is unavailable to the backend process")
+        if runtime_tool("nextflow", self.pipeline_identifier) is None:
+            if manifest.execution_profile.value == "docker":
+                raise ValueError("Nextflow and Docker must be available in PATH")
+            raise ValueError("Nextflow must be available in PATH")
+        if manifest.execution_profile.value == "docker":
+            if runtime_tool("docker", self.pipeline_identifier) is None:
+                raise ValueError("Nextflow and Docker must be available in PATH")
+            try:
+                docker_check = subprocess.run(
+                    ["docker", "info", "--format", "{{.ServerVersion}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    check=False,
+                    env=runtime_environment(self.pipeline_identifier),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ValueError("Docker status could not be checked") from exc
+            if docker_check.returncode != 0:
+                raise ValueError("Docker is unavailable to the backend process")
 
     @staticmethod
     def validate_saved_manifest(manifest: ProjectManifest) -> None:

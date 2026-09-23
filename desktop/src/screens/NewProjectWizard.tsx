@@ -170,7 +170,7 @@ export function NewProjectWizard({
     libraryType: "total RNA",
     readLayout: "paired-end",
     strandedness: "reverse",
-    executionProfile: "docker",
+    executionProfile: "local",
     cpus: projectDefaults.cpus,
     memoryGb: projectDefaults.memoryGb,
     minimumReadLength: 20,
@@ -288,7 +288,7 @@ export function NewProjectWizard({
           libraryType: "total RNA",
           readLayout: "paired-end",
           strandedness: "reverse",
-          executionProfile: "docker",
+          executionProfile: "local",
         });
     invalidateValidation();
   };
@@ -757,7 +757,17 @@ export function NewProjectWizard({
       setPipelineIdentifier(importedPipeline);
       setStartStage(imported.start_stage === "analysis" ? "analysis" : "quantification");
       setDetails(imported.details as unknown as DetailsState);
-      setOptions((current) => ({ ...current, ...(imported.options as Partial<OptionsState>), executionProfile: importedPipeline === "ont-analysis" ? "local" : "docker" }));
+      setOptions((current) => {
+        const importedOptions = imported.options as Partial<OptionsState>;
+        const importedProfile = importedOptions.executionProfile;
+        const executionProfile =
+          importedPipeline === "ont-analysis"
+            ? "local"
+            : importedProfile === "docker" || importedProfile === "local"
+              ? importedProfile
+              : "local";
+        return { ...current, ...importedOptions, executionProfile };
+      });
       setSamples(importedSamples);
       setComparisons(importedComparisons);
       setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
@@ -1075,7 +1085,7 @@ export function NewProjectWizard({
             {startStage === "quantification" && <div className="field-pair"><label>Read layout<select value={options.readLayout} onChange={(event) => updateOptions("readLayout", event.target.value as OptionsState["readLayout"])}><option value="paired-end">Paired-end</option><option value="single-end">Single-end</option></select></label><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as OptionsState["strandedness"])}><option value="unknown">Unknown (confirm)</option><option value="reverse">Reverse / RF</option><option value="forward">Forward / FR</option><option value="unstranded">Unstranded</option></select></label></div>}
             <fieldset><legend>Reference resource paths</legend><p className="helper-copy">{startStage === "analysis" ? "The human BioMart table must match the transcript annotation used for the supplied Kallisto results." : "Kallisto index and BioMart table are required. FASTA and GTF are retained as project provenance."}</p>{startStage === "quantification" && referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}{referenceFileField("BioMart table", "biomart", "/references/biomart.tsv", true)}{startStage === "quantification" && <>{referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa")}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}</>}</fieldset>
             <fieldset><legend>{startStage === "analysis" ? "Analysis" : "Trimming and analysis"}</legend>{startStage === "quantification" && <><div className="field-pair"><label>R1 adapter<input value={options.adapterR1} onChange={(event) => updateOptions("adapterR1", event.target.value)} /></label><label>R2 adapter<input value={options.adapterR2} onChange={(event) => updateOptions("adapterR2", event.target.value)} /></label></div><div className="field-pair"><label>Trim quality<input type="number" min="0" max="50" value={options.trimQuality} onChange={(event) => updateOptions("trimQuality", Number(event.target.value))} /></label><label>Minimum read length<input type="number" min="1" value={options.minimumReadLength} onChange={(event) => updateOptions("minimumReadLength", Number(event.target.value))} /></label></div></>}<div className="field-triple"><label>Minimum group size<input type="number" min="2" value={options.minimumGroupSize} onChange={(event) => updateOptions("minimumGroupSize", Number(event.target.value))} /></label><label>Adjusted p-value<input type="number" min="0" max="1" step="0.01" value={options.adjustedPValue} onChange={(event) => updateOptions("adjustedPValue", Number(event.target.value))} /></label><label>Absolute log2 fold change<input type="number" min="0" step="0.05" value={options.absoluteLog2FoldChange} onChange={(event) => updateOptions("absoluteLog2FoldChange", Number(event.target.value))} /></label></div></fieldset>
-            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="docker">Docker</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local tools</option><option value="docker">Docker (regression)</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
             <p className="field-help">These limits cover the workflow as a whole. Leave CPU and RAM available for the desktop and other local work.</p>
           </section>
         );

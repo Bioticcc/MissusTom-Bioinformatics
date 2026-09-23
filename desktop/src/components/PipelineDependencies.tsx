@@ -197,7 +197,7 @@ export function PipelineDependencies({
       <p className="helper-copy">
         Managed installation downloads software from the internet and does not upload biological data. {pipelineIdentifier === "ont-analysis"
           ? <>ONT setup can download several GiB, including Dorado, and requires additional extracted disk space; it may take time.</>
-          : <>Bulk RNA-seq setup can download large container images and may take time.</>} Downloads remain subject to third-party license terms{pipelineIdentifier === "ont-analysis" ? <>; see the <a href="https://github.com/nanoporetech/dorado#license" target="_blank" rel="noopener noreferrer">Dorado license</a>.</> : "."}
+          : <>Bulk RNA-seq setup downloads managed native tools and may take time.</>} Downloads remain subject to third-party license terms{pipelineIdentifier === "ont-analysis" ? <>; see the <a href="https://github.com/nanoporetech/dorado#license" target="_blank" rel="noopener noreferrer">Dorado license</a>.</> : "."}
       </p>
       {error && <div className="inline-error" role="alert">{error}</div>}
       {loading && !dependencies ? <p className="loading-copy">Checking required packages…</p> : dependencies && <>

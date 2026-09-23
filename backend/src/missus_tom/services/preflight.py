@@ -136,7 +136,6 @@ def system_preflight() -> SystemPreflightResult:
             settings.execution_enabled
             and java_check.status == CheckStatus.PASSED
             and nextflow_check.status == CheckStatus.PASSED
-            and docker_check.status == CheckStatus.PASSED
         ),
         checks=checks,
     )

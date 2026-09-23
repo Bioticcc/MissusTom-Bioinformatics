@@ -313,7 +313,7 @@ def _manifest(
             "absolute_log2_fold_change": 0.30,
         },
         "resource_profile": {"cpus": 8, "memory_gb": 16, "max_parallel_tasks": 2},
-        "execution_profile": "docker",
+        "execution_profile": "local",
         "application_version": "0.3.0",
         "pipeline_status": "validated",
     }

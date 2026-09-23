@@ -23,7 +23,8 @@ environment. Pipeline execution retains existing validation/admission gates.
 5. Build an accessible Tauri/React workbench around discovery, design, preflight,
    save, and plan workflows.
 6. Run FastQC, MultiQC, Cutadapt, kallisto, tximport, and manifest-defined
-   two-group DESeq2 analyses through controlled containers.
+   two-group DESeq2 analyses with managed native tools on the Nextflow local
+   profile. The Docker profile remains available for regression.
 
 No inspected incompatibility required deviation from the requested technology
 stack.
@@ -111,7 +112,8 @@ interrupted state, timestamps, command arguments, exit code, and a local log pat
 Persisted admission state and Linux process identity support conservative
 reconciliation after a backend restart. Global and project filesystem locks are
 inherited by the child process. Cancellation retains admission until the process
-group and job-labelled Docker containers have stopped. Engine logs are unique to
+group has stopped. Docker-profile runs also wait until job-labelled containers
+have stopped. Engine logs are unique to
 each run. Explicit Nextflow run names keep resume scoped to the same project;
 legacy session names can be recovered from bounded local logs. Nextflow reports
 and scientific outputs remain shared project outputs; work directories are never
@@ -131,8 +133,9 @@ each request to finish before scheduling another.
 
 Execution admission compares workflow budgets against available CPU/RAM with
 desktop reserves and estimates disk requirements on the output filesystem. The
-Nextflow local executor applies total CPU, memory, and task-queue limits; Docker
-enforces per-task CPU/memory/no-extra-swap limits. A lightweight runtime monitor
+Nextflow local executor applies total CPU, memory, and task-queue limits. The
+Docker regression profile also enforces per-task CPU, memory, and no-extra-swap
+limits. A lightweight runtime monitor
 requests controlled cancellation after sustained critical host pressure. Policy
 thresholds and user recovery steps are documented in `README.md`.
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +15,7 @@ from missus_tom.models.dependencies import (
 )
 from missus_tom.services import dependencies
 from missus_tom.services.dependencies import (
+    BULK_R_PACKAGES,
     ONT_R_PACKAGES,
     DependencyInstaller,
     runtime_environment,
@@ -51,6 +54,53 @@ def test_ont_installation_status_is_available_with_pinned_dorado_digest(
 
     assert status.installable is True
     assert status.manual_requirements == []
+
+
+def test_bulk_requirements_are_native_and_do_not_require_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
+    monkeypatch.setattr(dependencies, "runtime_tool", lambda *_: None)
+
+    status = installer.status("bulk-rnaseq")
+    requirement_names = [requirement.name for requirement in status.requirements]
+
+    assert dependencies._PACKAGE_CATALOG["bulk-rnaseq"] == (
+        "nextflow=24.04.4",
+        "openjdk=17",
+        "fastqc=0.12.1",
+        "multiqc=1.33",
+        "cutadapt=5.2",
+        "kallisto=0.52.0",
+        "r-base",
+    )
+    assert BULK_R_PACKAGES == ("DESeq2", "tximport", "ggplot2")
+    assert requirement_names == [
+        "nextflow",
+        "java",
+        "fastqc",
+        "multiqc",
+        "cutadapt",
+        "kallisto",
+        "Rscript",
+        "Bulk R packages",
+    ]
+    assert "Docker daemon" not in requirement_names
+    assert "Bulk analysis image" not in requirement_names
+    assert status.manual_requirements == []
+
+
+def test_kallisto_readiness_uses_version_subcommand(monkeypatch: pytest.MonkeyPatch) -> None:
+    installer = DependencyInstaller()
+    monkeypatch.setattr(dependencies, "runtime_tool", lambda *_: "/managed/bin/kallisto")
+    monkeypatch.setattr(dependencies, "runtime_environment", lambda _: {"PATH": "/managed/bin"})
+    run = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(dependencies.subprocess, "run", run)
+
+    requirement = installer._tool_requirement("kallisto", "bulk-rnaseq", managed=False)
+
+    assert requirement.installed is True
+    assert run.call_args.args[0] == ["/managed/bin/kallisto", "version"]
 
 
 def test_ont_installation_still_fails_closed_without_a_dorado_digest(

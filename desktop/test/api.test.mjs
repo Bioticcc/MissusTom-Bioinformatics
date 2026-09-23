@@ -97,11 +97,29 @@ test("apiRequest distinguishes unavailable, malformed, and HTTP failure response
       statusText: "Conflict",
       json: async () => ({ success: false, data: null, errors: [{ code: "blocked", message: "Project is locked", field: "manifest" }], meta: {} }),
     });
-    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.message === "Project is locked" && error.fields[0] === "manifest");
+    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.status === 409 && error.message === "Project is locked" && error.fields[0] === "manifest");
   } finally {
     globalThis.fetch = previousFetch;
     timers.restore();
   }
+});
+
+test("setup install conflicts require HTTP 409 and a specific message", async () => {
+  const { ApiError, setupInstallConflictMessage } = await loadApi();
+  const concurrent = new ApiError("another dependency installation is already running", [], 409);
+  const samePipeline = new ApiError("dependency installation is already running for this pipeline", [], 409);
+  const activeRun = new ApiError("a workflow run is active or requires recovery", [], 409);
+  const otherJob = new ApiError("another workflow job is active", [], 409);
+  const bareInstallation = new ApiError("Installation failed", [], 409);
+  const wrongStatus = new ApiError("another dependency installation is already running", [], 400);
+
+  assert.match(setupInstallConflictMessage(concurrent), /another dependency installation/);
+  assert.match(setupInstallConflictMessage(samePipeline), /another dependency installation/);
+  assert.match(setupInstallConflictMessage(activeRun), /workflow run is active/);
+  assert.match(setupInstallConflictMessage(otherJob), /workflow run is active/);
+  assert.equal(setupInstallConflictMessage(bareInstallation), null);
+  assert.equal(setupInstallConflictMessage(wrongStatus), null);
+  assert.equal(setupInstallConflictMessage(new Error("already running")), null);
 });
 
 test("selectApiBaseUrl uses a packaged sidecar base and retains browser fallback", async () => {

@@ -48,8 +48,17 @@ ONT_R_PACKAGES: Final[tuple[str, ...]] = (
     "rtracklayer",
     "jsonlite",
 )
+BULK_R_PACKAGES: Final[tuple[str, ...]] = ("DESeq2", "tximport", "ggplot2")
 _PACKAGE_CATALOG: Final[dict[str, tuple[str, ...]]] = {
-    "bulk-rnaseq": ("nextflow=24.04.4", "openjdk=17"),
+    "bulk-rnaseq": (
+        "nextflow=24.04.4",
+        "openjdk=17",
+        "fastqc=0.12.1",
+        "multiqc=1.33",
+        "cutadapt=5.2",
+        "kallisto=0.52.0",
+        "r-base",
+    ),
     "ont-analysis": (
         "samtools",
         "htslib",
@@ -61,7 +70,15 @@ _PACKAGE_CATALOG: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 _TOOL_CATALOG: Final[dict[str, tuple[str, ...]]] = {
-    "bulk-rnaseq": ("nextflow", "java"),
+    "bulk-rnaseq": (
+        "nextflow",
+        "java",
+        "fastqc",
+        "multiqc",
+        "cutadapt",
+        "kallisto",
+        "Rscript",
+    ),
     "ont-analysis": (
         "dorado",
         "samtools",
@@ -141,6 +158,12 @@ def runtime_environment(pipeline_identifier: str) -> dict[str, str]:
     return _environment_for_prefix(pipeline_identifier, _managed_bin(pipeline_identifier).parent)
 
 
+def _version_arguments(tool: str) -> list[str]:
+    if tool == "kallisto":
+        return ["version"]
+    return ["-version"] if tool in {"nextflow", "java"} else ["--version"]
+
+
 def _environment_for_prefix(pipeline_identifier: str, prefix: Path) -> dict[str, str]:
     managed_bin = prefix / "bin"
     environment = os.environ.copy()
@@ -174,6 +197,12 @@ def _environment_for_prefix(pipeline_identifier: str, prefix: Path) -> dict[str,
     if (managed_bin / "java").is_file():
         environment["JAVA_HOME"] = str(managed_bin.parent)
     if pipeline_identifier == "bulk-rnaseq" and (managed_bin / "nextflow").is_file():
+        # Keep the Nextflow home and engine cache inside the managed root so
+        # install-time warmup survives and offline runs do not depend on ~/.nextflow.
+        nextflow_home = _managed_root(pipeline_identifier) / "nextflow-home"
+        with suppress(OSError):
+            nextflow_home.mkdir(parents=True, exist_ok=True)
+        environment["NXF_HOME"] = str(nextflow_home)
         environment["NXF_VER"] = "24.04.4"
         environment["NXF_OFFLINE"] = "true"
     return environment
@@ -182,7 +211,7 @@ def _environment_for_prefix(pipeline_identifier: str, prefix: Path) -> dict[str,
 def runtime_tool(name: str, pipeline_identifier: str) -> str | None:
     managed_bin = _managed_bin(pipeline_identifier)
     if name == "docker" and pipeline_identifier == "bulk-rnaseq":
-        return shutil.which("docker")  # explicit system-daemon prerequisite, not pipeline software
+        return shutil.which("docker")  # optional system tool for the regression profile
     if name not in _TOOL_CATALOG[pipeline_identifier]:
         return None
     executable = shutil.which(name, path=str(managed_bin))
@@ -213,16 +242,12 @@ class DependencyInstaller:
             pipeline_identifier != "ont-analysis" or _DORADO_ARCHIVE_SHA256 is not None
         )
         manual_requirements = (
-            ["Install and start Docker; the daemon is required for bulk RNA-seq containers."]
-            if pipeline_identifier == "bulk-rnaseq"
-            else (
-                [
-                    "Managed ONT installation is disabled until the Dorado archive has "
-                    "an authoritative pinned SHA-256 digest."
-                ]
-                if not dorado_verified
-                else []
-            )
+            [
+                "Managed ONT installation is disabled until the Dorado archive has "
+                "an authoritative pinned SHA-256 digest."
+            ]
+            if pipeline_identifier == "ont-analysis" and not dorado_verified
+            else []
         )
         return DependencyStatus(
             pipeline_identifier=pipeline_identifier,
@@ -243,10 +268,6 @@ class DependencyInstaller:
             raise ValueError(
                 "managed ONT installation is disabled until the Dorado archive "
                 "has an authoritative pinned SHA-256 digest"
-            )
-        if pipeline_identifier == "bulk-rnaseq" and not self._docker_requirement(False).installed:
-            raise ValueError(
-                "Install/start Docker and allow backend access before bulk installation"
             )
         with self._lock:
             active = self._job_for_pipeline(pipeline_identifier)
@@ -299,10 +320,14 @@ class DependencyInstaller:
                 )
             )
         if pipeline_identifier == "ont-analysis":
-            items.append(self._r_requirement(pipeline_identifier, managed))
+            items.append(
+                self._r_requirement(pipeline_identifier, managed, ONT_R_PACKAGES, "ONT R packages")
+            )
         elif pipeline_identifier == "bulk-rnaseq":
-            items.extend(
-                [self._docker_requirement(managed), self._analysis_image_requirement(managed)]
+            items.append(
+                self._r_requirement(
+                    pipeline_identifier, managed, BULK_R_PACKAGES, "Bulk R packages"
+                )
             )
         self._probe_cache[pipeline_identifier] = (time.monotonic(), items)
         return [requirement.model_copy(deep=True) for requirement in items]
@@ -314,12 +339,15 @@ class DependencyInstaller:
         available = False
         detail = "not found"
         if executable:
+            # Nextflow/Java cold starts and first-time engine probes need more than
+            # a one-second budget; keep CLI tools short so the status panel stays snappy.
+            probe_timeout = 8 if name in {"nextflow", "java"} else 3
             try:
                 completed = subprocess.run(
-                    [executable, "-version" if name in {"nextflow", "java"} else "--version"],
+                    [executable, *_version_arguments(name)],
                     capture_output=True,
                     text=True,
-                    timeout=1,
+                    timeout=probe_timeout,
                     check=False,
                     env=runtime_environment(pipeline_identifier),
                 )
@@ -336,23 +364,31 @@ class DependencyInstaller:
             detail=detail,
         )
 
-    def _r_requirement(self, pipeline_identifier: str, managed: bool) -> DependencyRequirement:
+    def _r_requirement(
+        self,
+        pipeline_identifier: str,
+        managed: bool,
+        packages: tuple[str, ...],
+        requirement_name: str,
+    ) -> DependencyRequirement:
         rscript = runtime_tool("Rscript", pipeline_identifier)
         expression = (
             "p<-c("
-            + ",".join(repr(item) for item in ONT_R_PACKAGES)
+            + ",".join(repr(item) for item in packages)
             + "); m<-p[!vapply(p,requireNamespace,logical(1),quietly=TRUE)]; "
             "cat(paste(m,collapse=', ')); quit(status=if(length(m)) 1 else 0)"
         )
         available = False
         detail = "Rscript not found"
         if rscript:
+            # Bioconductor namespaces (especially DESeq2) can exceed a few seconds
+            # on cold disk cache; keep this above the tool-probe budget.
             try:
                 result = subprocess.run(
                     [rscript, "--vanilla", "-e", expression],
                     capture_output=True,
                     text=True,
-                    timeout=6,
+                    timeout=30,
                     check=False,
                     env=runtime_environment(pipeline_identifier),
                 )
@@ -360,13 +396,12 @@ class DependencyInstaller:
                 detail = (
                     "all required R and Bioconductor packages available"
                     if available
-                    else "missing R packages: "
-                    + (result.stdout.strip() or ", ".join(ONT_R_PACKAGES))
+                    else "missing R packages: " + (result.stdout.strip() or ", ".join(packages))
                 )
             except (OSError, subprocess.TimeoutExpired):
                 detail = "R package check could not complete"
         return DependencyRequirement(
-            name="ONT R packages",
+            name=requirement_name,
             installed=available,
             managed=managed
             and rscript is not None
@@ -450,8 +485,9 @@ class DependencyInstaller:
         staging = Path(mkdtemp(prefix=f".{job.pipeline_identifier}-", dir=root / "staging"))
         environment = root / "environments" / job.job_identifier / "environment"
         try:
+            # Native Bulk now includes R/Bioconductor as well as the scientific CLI tools.
             minimum_free = (
-                20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 10 * 1024**3
+                20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 15 * 1024**3
             )
             if shutil.disk_usage(root).free < minimum_free:
                 raise RuntimeError(
@@ -484,7 +520,7 @@ class DependencyInstaller:
                 self._install_r_packages(job, mamba, environment)
                 self._install_dorado(job, environment.parent)
             elif job.pipeline_identifier == "bulk-rnaseq":
-                self._install_bulk_images(job)
+                self._install_bulk_r_packages(job, mamba, environment)
             self._verify_environment(job, environment)
             self._activate(root, environment)
             shutil.rmtree(staging, ignore_errors=True)
@@ -497,6 +533,9 @@ class DependencyInstaller:
         environment = _environment_for_prefix(job.pipeline_identifier, prefix)
         tools = _TOOL_CATALOG[job.pipeline_identifier]
         if job.pipeline_identifier == "bulk-rnaseq":
+            nextflow_home = _managed_root(job.pipeline_identifier) / "nextflow-home"
+            self._safe_directory(nextflow_home)
+            environment["NXF_HOME"] = str(nextflow_home)
             environment["NXF_OFFLINE"] = (
                 "false"  # warm up the pinned engine while installation permits networking
             )
@@ -508,11 +547,18 @@ class DependencyInstaller:
                 raise RuntimeError(f"new environment tool escapes its private location: {tool}")
             self._run(
                 job,
-                [str(executable), "-version" if tool in {"java", "nextflow"} else "--version"],
+                [str(executable), *_version_arguments(tool)],
                 environment=environment,
             )
-        if job.pipeline_identifier == "ont-analysis":
-            packages = ",".join(json.dumps(name) for name in ONT_R_PACKAGES)
+        r_packages = (
+            ONT_R_PACKAGES
+            if job.pipeline_identifier == "ont-analysis"
+            else BULK_R_PACKAGES
+            if job.pipeline_identifier == "bulk-rnaseq"
+            else ()
+        )
+        if r_packages:
+            packages = ",".join(json.dumps(name) for name in r_packages)
             expression = (
                 f"stopifnot(all(vapply(c({packages}),requireNamespace,logical(1),quietly=TRUE)))"
             )
@@ -557,6 +603,31 @@ class DependencyInstaller:
                 "--channel",
                 "bioconda",
                 *packages,
+            ],
+            environment=self._mamba_environment(job.pipeline_identifier),
+        )
+
+    def _install_bulk_r_packages(
+        self, job: DependencyInstallJob, mamba: Path, environment: Path
+    ) -> None:
+        self._run(
+            job,
+            [
+                str(mamba),
+                "install",
+                "--yes",
+                "--no-rc",
+                "--strict-channel-priority",
+                "--prefix",
+                str(environment),
+                "--override-channels",
+                "--channel",
+                "conda-forge",
+                "--channel",
+                "bioconda",
+                "bioconductor-deseq2",
+                "bioconductor-tximport",
+                "r-ggplot2",
             ],
             environment=self._mamba_environment(job.pipeline_identifier),
         )
