@@ -164,10 +164,20 @@ jobs:
           if [[ "${release_version}" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "${RELEASE_TAG}" \
-            "release-artifacts/missus-tom_${release_version}_linux-x86_64.AppImage" \
-            "release-artifacts/missus-tom_${release_version}_linux-x86_64.deb" \
-            release-artifacts/SHA256SUMS \
-            --title "Missus Tom ${RELEASE_TAG}" \
-            --generate-notes \
-            "${release_flags[@]}"
+          release_assets=(
+            "release-artifacts/missus-tom_${release_version}_linux-x86_64.AppImage"
+            "release-artifacts/missus-tom_${release_version}_linux-x86_64.deb"
+            release-artifacts/SHA256SUMS
+          )
+
+          if gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${release_assets[@]}" \
+              --clobber \
+              --repo "${GH_REPO}"
+          else
+            gh release create "${RELEASE_TAG}" "${release_assets[@]}" \
+              --title "Missus Tom ${RELEASE_TAG}" \
+              --generate-notes \
+              --repo "${GH_REPO}" \
+              "${release_flags[@]}"
+          fi

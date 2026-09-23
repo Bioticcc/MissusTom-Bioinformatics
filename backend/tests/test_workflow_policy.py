@@ -13,7 +13,11 @@ def test_release_publish_job_targets_repository_without_checkout() -> None:
 
     assert "actions/checkout" not in publish_job
     assert "GH_REPO: ${{ github.repository }}" in publish_job
-    assert 'gh release create "${RELEASE_TAG}"' in publish_job
+    assert 'gh release view "${RELEASE_TAG}" --repo "${GH_REPO}"' in publish_job
+    assert 'gh release upload "${RELEASE_TAG}" "${release_assets[@]}"' in publish_job
+    assert "--clobber" in publish_job
+    assert 'gh release create "${RELEASE_TAG}" "${release_assets[@]}"' in publish_job
+    assert publish_job.count('--repo "${GH_REPO}"') == 3
 
 
 def test_local_workflow_has_no_fixed_task_wall_time() -> None:
