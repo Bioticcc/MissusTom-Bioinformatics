@@ -7,7 +7,6 @@ import json
 import shutil
 import tarfile
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
 

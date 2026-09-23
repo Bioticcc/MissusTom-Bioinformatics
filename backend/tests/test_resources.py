@@ -104,7 +104,9 @@ def test_wsl_virtual_disk_does_not_admit_launch_on_inflated_vhd_free(
 
     monkeypatch.setattr(resources, "inspect_storage", inspect_storage)
     disk_check = next(
-        c for c in resources.execution_resource_checks(manifest) if c.check_id == "workflow_disk_budget"
+        check
+        for check in resources.execution_resource_checks(manifest)
+        if check.check_id == "workflow_disk_budget"
     )
     assert disk_check.status == "warning"
     with pytest.raises(ValueError, match="Windows host free space could not be confirmed"):

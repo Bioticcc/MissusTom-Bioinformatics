@@ -4,7 +4,6 @@ import math
 import os
 import platform
 import re
-import shutil
 import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path

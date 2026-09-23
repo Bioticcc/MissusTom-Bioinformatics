@@ -30,13 +30,13 @@ from uuid import UUID, uuid4
 
 from missus_tom.config import settings
 from missus_tom.models.command_log import CommandLogChunk
-from missus_tom.services.resources import admission_free_bytes, inspect_storage
 from missus_tom.models.dependencies import (
     DependencyInstallJob,
     DependencyInstallStatus,
     DependencyRequirement,
     DependencyStatus,
 )
+from missus_tom.services.resources import admission_free_bytes, inspect_storage
 
 ONT_R_PACKAGES: Final[tuple[str, ...]] = (
     "data.table",
