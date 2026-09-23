@@ -139,7 +139,7 @@ def test_runtime_tool_allows_dorado_link_within_managed_generation(
     (root / "active.json").write_text(
         json.dumps({"environment": "environments/generation/environment"}), encoding="utf-8"
     )
-    dorado_distribution = prefix.parent / "dorado/dorado-2.0.0/bin"
+    dorado_distribution = prefix.parent / "dorado/dorado-2.1.2-linux-x64/bin"
     dorado_distribution.mkdir(parents=True)
     (dorado_distribution.parent / "lib").mkdir()
     dorado_executable = dorado_distribution / "dorado"

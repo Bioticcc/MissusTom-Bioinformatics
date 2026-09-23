@@ -34,31 +34,185 @@ def trust_dorado_archive(monkeypatch: pytest.MonkeyPatch, archive: Path) -> None
     )
 
 
+class DownloadResponse:
+    def __init__(self, payload: bytes, content_length: str | None) -> None:
+        self._payload = io.BytesIO(payload)
+        self.headers = {} if content_length is None else {"Content-Length": content_length}
+        self.read_sizes: list[int] = []
+
+    def __enter__(self) -> DownloadResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._payload.close()
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return self._payload.read(size)
+
+
+def test_dorado_release_is_pinned_to_the_reviewed_official_archive() -> None:
+    assert dependencies._DORADO_VERSION == "2.1.2"
+    assert dependencies._DORADO_URL == (
+        "https://cdn.oxfordnanoportal.com/software/analysis/dorado-2.1.2-linux-x64.tar.gz"
+    )
+    assert dependencies._DORADO_ARCHIVE_SHA256 == (
+        "f4ed83acfb75cf07ffe8a0fc78e26828fc911fcfc8177920be6104e1d0e02485"
+    )
+    assert dependencies._DORADO_ARCHIVE_ROOT == "dorado-2.1.2-linux-x64"
+    assert dependencies._DORADO_ARCHIVE_SIZE_BYTES == 3_466_666_099
+    assert dependencies._DORADO_CUDNN_VERSION == "9.8.0"
+    expected_reviewed_links = (
+        ("", "/etc/alternatives/libcudnn_so", "libcudnn.so.9.8.0"),
+        ("_graph", "/etc/alternatives/libcudnn_graph_so", "libcudnn_graph.so.9.8.0"),
+        (
+            "_engines_runtime_compiled",
+            "/etc/alternatives/libcudnn_engines_runtime_compiled_so",
+            "libcudnn_engines_runtime_compiled.so.9.8.0",
+        ),
+        ("_adv", "/etc/alternatives/libcudnn_adv_so", "libcudnn_adv.so.9.8.0"),
+        (
+            "_engines_precompiled",
+            "/etc/alternatives/libcudnn_engines_precompiled_so",
+            "libcudnn_engines_precompiled.so.9.8.0",
+        ),
+        ("_ops", "/etc/alternatives/libcudnn_ops_so", "libcudnn_ops.so.9.8.0"),
+        (
+            "_heuristic",
+            "/etc/alternatives/libcudnn_heuristic_so",
+            "libcudnn_heuristic.so.9.8.0",
+        ),
+        ("_cnn", "/etc/alternatives/libcudnn_cnn_so", "libcudnn_cnn.so.9.8.0"),
+    )
+    assert (
+        tuple(
+            (
+                component,
+                f"/etc/alternatives/libcudnn{component}_so",
+                f"libcudnn{component}.so.{dependencies._DORADO_CUDNN_VERSION}",
+            )
+            for component in dependencies._DORADO_CUDNN_COMPONENTS
+        )
+        == expected_reviewed_links
+    )
+
+
+def test_dorado_download_transfers_exact_expected_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "dorado.tar.gz"
+    payload = b"official-archive"
+    monkeypatch.setattr(
+        dependencies.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: DownloadResponse(payload, str(len(payload))),
+    )
+
+    dependencies.DependencyInstaller._download(
+        dependencies._DORADO_URL, destination, expected_size_bytes=len(payload)
+    )
+
+    assert destination.read_bytes() == payload
+
+
+def test_dorado_download_rejects_content_length_mismatch_and_removes_partial_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "dorado.tar.gz"
+    monkeypatch.setattr(
+        dependencies.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: DownloadResponse(b"payload", "8"),
+    )
+
+    with pytest.raises(RuntimeError, match="Content-Length"):
+        dependencies.DependencyInstaller._download(
+            dependencies._DORADO_URL, destination, expected_size_bytes=7
+        )
+
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [(b"12345678", "exceeded expected size"), (b"123456", "does not match expected size")],
+)
+def test_dorado_download_rejects_oversize_or_short_response_and_removes_partial_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes, message: str
+) -> None:
+    destination = tmp_path / "dorado.tar.gz"
+    response = DownloadResponse(payload, "7")
+    monkeypatch.setattr(
+        dependencies.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        dependencies.DependencyInstaller._download(
+            dependencies._DORADO_URL, destination, expected_size_bytes=7
+        )
+
+    assert not destination.exists()
+    if len(payload) > 7:
+        assert response.read_sizes == [8]
+
+
 def test_dorado_retains_distribution_and_contained_library_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source"
     (source / "bin").mkdir(parents=True)
     (source / "lib").mkdir()
-    (source / "bin" / "dorado").write_text("#!/bin/sh\necho 2.0.0\n")
+    (source / "bin" / "dorado").write_text("#!/bin/sh\necho 2.1.2\n")
     (source / "lib" / "example.so").write_text("library")
     (source / "lib" / "alias.so").symlink_to("example.so")
     archive = tmp_path / "source.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(source, arcname="dorado-2.0.0-linux-x64")
+        bundle.add(source, arcname=dependencies._DORADO_ARCHIVE_ROOT)
     trust_dorado_archive(monkeypatch, archive)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
-    monkeypatch.setattr(installer, "_download", lambda _, target: shutil.copyfile(archive, target))
+    monkeypatch.setattr(
+        installer, "_download", lambda _, target, **__: shutil.copyfile(archive, target)
+    )
     destination = tmp_path / "generation"
     destination.mkdir()
 
-    installer._install_dorado(job(), destination)
+    install_job = job()
+    installer._install_dorado(install_job, destination)
 
     executable = destination / "environment" / "bin" / "dorado"
     assert executable.is_symlink()
     distribution = executable.resolve().parents[1]
     assert (distribution / "lib" / "alias.so").read_text() == "library"
     assert not (destination / "dorado.tar.gz").exists()
+    assert any(
+        "Downloading Dorado 2.1.2 (3,466,666,099 bytes" in line for line in install_job.log_tail
+    )
+    assert any("Installed Dorado 2.1.2" in line for line in install_job.log_tail)
+
+
+def test_dorado_streams_archive_checksum(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source"
+    (source / "bin").mkdir(parents=True)
+    (source / "bin" / "dorado").write_text("#!/bin/sh\n", encoding="utf-8")
+    archive = tmp_path / "source.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(source, arcname=dependencies._DORADO_ARCHIVE_ROOT)
+    trust_dorado_archive(monkeypatch, archive)
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _: (_ for _ in ()).throw(AssertionError("archive must be checksummed as a stream")),
+    )
+    installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
+    monkeypatch.setattr(
+        installer, "_download", lambda _, target, **__: shutil.copyfile(archive, target)
+    )
+    destination = tmp_path / "generation"
+    destination.mkdir()
+
+    installer._install_dorado(job(), destination)
 
 
 def test_dorado_rejects_archive_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,7 +223,9 @@ def test_dorado_rejects_archive_traversal(tmp_path: Path, monkeypatch: pytest.Mo
         bundle.addfile(member, io.BytesIO(b"x"))
     trust_dorado_archive(monkeypatch, archive)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
-    monkeypatch.setattr(installer, "_download", lambda _, target: shutil.copyfile(archive, target))
+    monkeypatch.setattr(
+        installer, "_download", lambda _, target, **__: shutil.copyfile(archive, target)
+    )
     destination = tmp_path / "generation"
     destination.mkdir()
 
@@ -84,17 +240,19 @@ def test_dorado_localizes_all_reviewed_cudnn_links(
     source = tmp_path / "source"
     (source / "bin").mkdir(parents=True)
     (source / "lib").mkdir()
-    (source / "bin" / "dorado").write_text("#!/bin/sh\necho 2.0.0\n")
+    (source / "bin" / "dorado").write_text("#!/bin/sh\necho 2.1.2\n")
     for component in dependencies._DORADO_CUDNN_COMPONENTS:
         name = f"libcudnn{component}.so"
         (source / "lib" / f"{name}.9.8.0").write_text("private library")
         (source / "lib" / name).symlink_to(f"/etc/alternatives/{name.replace('.', '_')}")
     archive = tmp_path / "source.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(source, arcname="dorado-2.0.0-linux-x64")
+        bundle.add(source, arcname=dependencies._DORADO_ARCHIVE_ROOT)
     trust_dorado_archive(monkeypatch, archive)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
-    monkeypatch.setattr(installer, "_download", lambda _, target: shutil.copyfile(archive, target))
+    monkeypatch.setattr(
+        installer, "_download", lambda _, target, **__: shutil.copyfile(archive, target)
+    )
     destination = tmp_path / "generation"
     destination.mkdir()
 
@@ -114,13 +272,15 @@ def test_dorado_never_falls_back_to_external_library(
 ) -> None:
     archive = tmp_path / "source.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        member = tarfile.TarInfo("dorado-2.0.0-linux-x64/lib/libcudnn.so")
+        member = tarfile.TarInfo(f"{dependencies._DORADO_ARCHIVE_ROOT}/lib/libcudnn.so")
         member.type = tarfile.SYMTYPE
         member.linkname = target
         bundle.addfile(member)
     trust_dorado_archive(monkeypatch, archive)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
-    monkeypatch.setattr(installer, "_download", lambda _, path: shutil.copyfile(archive, path))
+    monkeypatch.setattr(
+        installer, "_download", lambda _, path, **__: shutil.copyfile(archive, path)
+    )
     destination = tmp_path / "generation"
     destination.mkdir()
     with pytest.raises(RuntimeError, match="missing required private library|unsafe link"):
@@ -132,12 +292,14 @@ def test_dorado_rejects_archive_without_matching_pinned_digest(
 ) -> None:
     archive = tmp_path / "source.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        member = tarfile.TarInfo("dorado-2.0.0-linux-x64/bin/dorado")
+        member = tarfile.TarInfo(f"{dependencies._DORADO_ARCHIVE_ROOT}/bin/dorado")
         member.size = 1
         bundle.addfile(member, io.BytesIO(b"x"))
     monkeypatch.setattr(dependencies, "_DORADO_ARCHIVE_SHA256", "0" * 64)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "state")
-    monkeypatch.setattr(installer, "_download", lambda _, path: shutil.copyfile(archive, path))
+    monkeypatch.setattr(
+        installer, "_download", lambda _, path, **__: shutil.copyfile(archive, path)
+    )
     destination = tmp_path / "generation"
     destination.mkdir()
 

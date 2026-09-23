@@ -36,17 +36,34 @@ def test_status_reports_missing_requirements_without_marker_trust(tmp_path, monk
 
     assert status.missing == ["modkit"]
     assert status.job is None
-    assert status.installable is False
-    assert "SHA-256" in status.manual_requirements[0]
+    assert status.installable is True
+    assert status.manual_requirements == []
     assert "data.table" in ONT_R_PACKAGES
 
 
-def test_ont_installation_fails_closed_without_reviewed_dorado_digest(
+def test_ont_installation_status_is_available_with_pinned_dorado_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
     monkeypatch.setattr(installer, "_supported_platform", lambda: True)
 
+    status = installer.status("ont-analysis")
+
+    assert status.installable is True
+    assert status.manual_requirements == []
+
+
+def test_ont_installation_still_fails_closed_without_a_dorado_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
+    monkeypatch.setattr(installer, "_supported_platform", lambda: True)
+    monkeypatch.setattr(dependencies, "_DORADO_ARCHIVE_SHA256", None)
+
+    status = installer.status("ont-analysis")
+
+    assert status.installable is False
+    assert "SHA-256" in status.manual_requirements[0]
     with pytest.raises(ValueError, match="authoritative pinned SHA-256"):
         installer.install("ont-analysis")
 

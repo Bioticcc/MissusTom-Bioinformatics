@@ -58,7 +58,7 @@ libraries as substitutes for this environment. Dorado's reviewed cuDNN aliases
 are rewritten to the regular versioned libraries supplied inside its own archive;
 no `/etc/alternatives` target is read or used. Unknown external links are rejected.
 
-The reviewed baseline used Dorado 2.0.0, Minimap2 2.31 (to create the supplied
+The reviewed baseline used Dorado 2.1.2, Minimap2 2.31 (to create the supplied
 `minimap2_index`), Modkit 0.6.4, and Mosdepth 0.3.14. These are source-pinned
 provenance targets, not installation instructions: the runner resolves local
 executables from `PATH`. The annotation-aware Stage 05 R implementation requires

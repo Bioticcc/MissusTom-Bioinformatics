@@ -16,7 +16,7 @@ source verification from large real installation/operator scientific acceptance.
 
 ## Delivered and verified
 
-The upstream 2.0.0 archive has eight cuDNN `/etc/alternatives` aliases plus all
+The reviewed upstream archive has eight cuDNN `/etc/alternatives` aliases plus all
 eight regular versioned `9.8.0` libraries. Only these exact reviewed aliases are
 localized to bundled relative targets. Missing bundled targets and unknown
 external links remain errors; no host library target is read/copied. On-disk

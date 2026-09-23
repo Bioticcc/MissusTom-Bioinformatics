@@ -42,10 +42,8 @@ checking rather than trusted tamper-proof integrity.
    mode required for end-to-end execution; do not perform this step beforehand.
 5. Verify clean-install documentation and run the smallest representative smoke
    checks before claiming cross-device demo readiness.
-6. Pin and verify an authoritative Dorado archive digest before claiming the ONT
-   dependency installer is release-ready. The upstream 2.0.0 CDN exposes no
-   checksum sidecar, and downloading the 3.2 GiB archive to derive a reviewed
-   digest is deferred while the active ONT run is in progress.
+6. Keep the managed ONT installer restricted to the reviewed official Dorado
+   archive, and re-verify the pin before any future archive upgrade.
 
 ## Progress
 
@@ -55,8 +53,9 @@ checking rather than trusted tamper-proof integrity.
   uses temporary state for a loopback-only packaged-backend smoke check, and
   packages release-only workflow resources. It intentionally does not package
   demo data, ONT data, references, runtime outputs, or dependency environments.
-- The authoritative Dorado archive digest remains unverified and deferred; do
-  not describe the ONT installer as release-ready on that basis.
+- The managed installer pins the reviewed Dorado 2.1.2 official archive and
+  fails closed when its SHA-256 does not match. It has not been installed into
+  or exercised against the active ONT environment.
 - Clean-VM installation and executable synthetic-demo validation remain
   deferred. The prepared fixtures are deliberately non-executable and are not
   evidence of scientific or end-to-end runtime readiness.

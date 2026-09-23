@@ -86,7 +86,9 @@ _MICROMAMBA_SHA256: Final = "ffc3cb8d52d4d6b354bdbb979c407719c485392b74e462cbd50
 _MICROMAMBA_ARCHIVE_SHA256: Final = (
     "5512233cdd8564a671626081026dc861537a963baa06706baab08fac6f3bb9d2"
 )
-_DORADO_VERSION: Final = "2.0.0"
+_DORADO_VERSION: Final = "2.1.2"
+_DORADO_ARCHIVE_ROOT: Final = f"dorado-{_DORADO_VERSION}-linux-x64"
+_DORADO_ARCHIVE_SIZE_BYTES: Final = 3_466_666_099
 _DORADO_CUDNN_VERSION: Final = "9.8.0"
 _DORADO_CUDNN_COMPONENTS: Final = (
     "",
@@ -99,12 +101,11 @@ _DORADO_CUDNN_COMPONENTS: Final = (
     "_cnn",
 )
 _DORADO_URL: Final = (
-    "https://cdn.oxfordnanoportal.com/software/analysis/dorado-2.0.0-linux-x64.tar.gz"
+    "https://cdn.oxfordnanoportal.com/software/analysis/dorado-2.1.2-linux-x64.tar.gz"
 )
-# Release installation remains fail-closed until this digest is reviewed from
-# an authoritative upstream artifact. Never replace this with an unverified
-# locally observed value.
-_DORADO_ARCHIVE_SHA256: Final[str | None] = None
+# Verified from the official 2.1.2 CDN archive. Never replace this with an
+# unverified locally observed value.
+_DORADO_ARCHIVE_SHA256: Final = "f4ed83acfb75cf07ffe8a0fc78e26828fc911fcfc8177920be6104e1d0e02485"
 _DOCKER_IMAGES: Final[tuple[str, ...]] = (
     "quay.io/biocontainers/fastqc@sha256:e194048df39c3145d9b4e0a14f4da20b59d59250465b6f2a9cb698445fd45900",
     "quay.io/biocontainers/multiqc@sha256:dfd9fde2c48b896b884e79a71ddc16c72c97a0ee5c5c8e45aaba50f55d07d263",
@@ -607,11 +608,17 @@ class DependencyInstaller:
         archive = staging / "dorado.tar.gz"
         self._log(
             job,
-            "Downloading Dorado 2.0.0 (approximately 3.2 GiB compressed); "
+            f"Downloading Dorado 2.1.2 ({_DORADO_ARCHIVE_SIZE_BYTES:,} bytes; "
+            "approximately 3.23 GiB compressed); "
             "extraction needs additional space.",
         )
-        self._download(_DORADO_URL, archive)
-        actual_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self._download(
+            _DORADO_URL,
+            archive,
+            expected_size_bytes=_DORADO_ARCHIVE_SIZE_BYTES,
+        )
+        with archive.open("rb") as archive_stream:
+            actual_digest = hashlib.file_digest(archive_stream, "sha256").hexdigest()
         if actual_digest != expected_digest:
             raise RuntimeError("Dorado archive checksum verification failed")
         destination = staging / "dorado"
@@ -661,12 +668,12 @@ class DependencyInstaller:
     def _localize_dorado_library_links(
         self, job: DependencyInstallJob, members: list[tarfile.TarInfo]
     ) -> None:
-        """Repair only the reviewed 2.0.0 host aliases using regular bundled files.
+        """Repair only the reviewed 2.1.2 host aliases using regular bundled files.
 
         Never stat, open, or copy the upstream host link's target. Unrecognized
         external links still fail the ordinary archive containment checks.
         """
-        archive_lib = f"dorado-{_DORADO_VERSION}-linux-x64/lib"
+        archive_lib = f"{_DORADO_ARCHIVE_ROOT}/lib"
         entries = {member.name: member for member in members}
         for component in _DORADO_CUDNN_COMPONENTS:
             name = f"libcudnn{component}.so"
@@ -758,9 +765,43 @@ class DependencyInstaller:
             return payload.decode("utf-8")
 
     @staticmethod
-    def _download(url: str, destination: Path) -> None:
-        with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as output:  # noqa: S310 - fixed HTTPS URL
-            shutil.copyfileobj(response, output)
+    def _download(url: str, destination: Path, *, expected_size_bytes: int | None = None) -> None:
+        """Download a fixed HTTPS artifact, optionally enforcing its exact size."""
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310 - fixed HTTPS URL
+                if expected_size_bytes is not None:
+                    try:
+                        content_length = int(response.headers["Content-Length"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise RuntimeError(
+                            "download response is missing a valid Content-Length"
+                        ) from exc
+                    if content_length != expected_size_bytes:
+                        raise RuntimeError(
+                            "download response Content-Length does not match expected size"
+                        )
+
+                with destination.open("wb") as output:
+                    transferred = 0
+                    while True:
+                        read_size = 1024 * 1024
+                        if expected_size_bytes is not None:
+                            # Read at most one byte beyond the pinned size. This detects an
+                            # oversized or never-ending response without growing the archive.
+                            read_size = min(read_size, expected_size_bytes + 1 - transferred)
+                        chunk = response.read(read_size)
+                        if not chunk:
+                            break
+                        transferred += len(chunk)
+                        if expected_size_bytes is not None and transferred > expected_size_bytes:
+                            raise RuntimeError("download exceeded expected size")
+                        output.write(chunk)
+                    if expected_size_bytes is not None and transferred != expected_size_bytes:
+                        raise RuntimeError("download size does not match expected size")
+        except Exception:
+            with suppress(FileNotFoundError):
+                destination.unlink()
+            raise
 
     @staticmethod
     def _safe_directory(directory: Path) -> None:

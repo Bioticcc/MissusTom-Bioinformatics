@@ -6,9 +6,10 @@ the application does not upload biological data.
 
 ## Availability
 
-Linux x86_64 is the only supported release target. Successful tagged releases
-provide an AppImage and a Debian `.deb` package. Windows, macOS, and ARM Linux
-are unavailable.
+Linux x86_64 on Ubuntu and Debian is the only supported release target.
+Successful tagged releases provide one ZIP containing the Debian `.deb`
+installer, its checksum file, and installation instructions. Windows, macOS,
+ARM Linux, and AppImage releases are unavailable.
 
 Clean-machine GUI installation has not yet been verified.
 
@@ -45,32 +46,21 @@ annotation/BioMart data and host software. ONT requires locally supplied pass
 modBAM files and mouse reference resources. The application does not download
 project inputs or reference genomes.
 
-The managed ONT installer is intentionally blocked: an authoritative SHA-256
-checksum for the Dorado 2.0.0 archive still needs review and pinning. Existing
-verified managed environments can be detected, but a new managed ONT dependency
-installation cannot begin until that checksum is available.
+The managed ONT installer downloads the reviewed official Dorado 2.1.2 archive
+and verifies its pinned SHA-256 before extraction. Existing managed environments
+remain isolated from new installations.
 
 ## Install a Linux release
 
-For a successful tagged release, download the matching AppImage or `.deb` and
-its `SHA256SUMS` file from the project's GitHub Releases page. Keep the
-package's release filename unchanged so checksum verification can find it.
+For a successful tagged release, download and extract
+`ver<version>_Linux-x86_64_Ubuntu-Debian.zip` from the project's GitHub Releases
+page. The ZIP contains exactly one `.deb` installer, `SHA256SUMS`, and
+`installation.md`. Keep the installer filename unchanged so checksum
+verification can find it.
 
 ```bash
-sha256sum --ignore-missing --check SHA256SUMS
-```
-
-For an AppImage:
-
-```bash
-chmod +x <downloaded-appimage>.AppImage
-./<downloaded-appimage>.AppImage
-```
-
-For a Debian package:
-
-```bash
-sudo apt install ./<downloaded-package>.deb
+sha256sum --check SHA256SUMS
+sudo apt install ./missus-tom_<version>_linux-x86_64.deb
 ```
 
 Open **Setup**, choose the pipeline or pipelines you need, review any missing

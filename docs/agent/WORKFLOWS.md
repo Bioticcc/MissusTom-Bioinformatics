@@ -123,6 +123,9 @@ and real Nextflow execution.
 Release packaging is Linux x86_64 only. The base `desktop/src-tauri/tauri.conf.json`
 must remain development-safe and must not add `externalBin`; release-only sidecars
 and workflow resources belong in `desktop/src-tauri/tauri.release.conf.json`.
+The release overlay targets Debian packages only. The tag workflow publishes one
+`ver<version>_Linux-x86_64_Ubuntu-Debian.zip`, containing exactly the `.deb`, its
+`SHA256SUMS`, and `installation.md`; AppImage is not a current release format.
 
 After creating `backend/.venv` with the `dev` and `packaging` extras and running
 `npm ci` in `desktop/`, the CI-equivalent sequence is:

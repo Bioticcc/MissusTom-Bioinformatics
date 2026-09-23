@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -17,7 +18,48 @@ def test_release_publish_job_targets_repository_without_checkout() -> None:
     assert 'gh release upload "${RELEASE_TAG}" "${release_assets[@]}"' in publish_job
     assert "--clobber" in publish_job
     assert 'gh release create "${RELEASE_TAG}" "${release_assets[@]}"' in publish_job
-    assert publish_job.count('--repo "${GH_REPO}"') == 3
+    assert 'gh release delete-asset "${RELEASE_TAG}" "${asset_name}"' in publish_job
+    assert "--yes" in publish_job
+    assert "--json assets --jq '.assets[].name'" in publish_job
+    assert publish_job.count('--repo "${GH_REPO}"') == 5
+
+
+def test_linux_release_is_a_deb_only_zip() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    release_workflow = (repository_root / ".github" / "workflows" / "release-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    release_config_path = repository_root / "desktop" / "src-tauri" / "tauri.release.conf.json"
+    release_config = release_config_path.read_text(encoding="utf-8")
+
+    assert '"targets": ["deb"]' in release_config
+    assert "appimage" not in release_workflow.lower()
+    assert "bash scripts/create-linux-release-zip.sh" in release_workflow
+    assert '--version "${release_version}"' in release_workflow
+    assert '--deb "${deb_source}"' in release_workflow
+    assert '--output-dir "${artifact_directory}"' in release_workflow
+    release_zip = '"release-artifacts/ver${release_version}_Linux-x86_64_Ubuntu-Debian.zip"'
+    assert release_zip in release_workflow
+    assert "path: release-artifacts/*.zip" in release_workflow
+
+
+def test_project_settings_exports_are_ignored_except_for_the_sanitized_example() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+
+    for export_name in ("BRS-Human-01-debug-settings.json", "Test1-debug-settings.json"):
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", export_name],
+            cwd=repository_root,
+            check=False,
+        )
+        assert result.returncode == 0, f"{export_name} must be ignored"
+
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--quiet", "example_settings.json"],
+        cwd=repository_root,
+        check=False,
+    )
+    assert result.returncode == 1, "the sanitized example must remain trackable"
 
 
 def test_local_workflow_has_no_fixed_task_wall_time() -> None:
