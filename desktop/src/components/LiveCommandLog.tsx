@@ -140,7 +140,7 @@ export function LiveCommandLog({
 
   const save = async () => {
     try {
-      const path = await saveTextFile("Save command log", "missus-tom-command.log", text || "No log output yet.\n");
+      const path = await saveTextFile("Save command log", "missus-tom-command.log", text || "No log output yet.\n", "log");
       setCopyState(path ? `Saved to ${path}` : "Save cancelled.");
     } catch (reason) {
       setCopyState(reason instanceof Error ? reason.message : "Log could not be saved.");

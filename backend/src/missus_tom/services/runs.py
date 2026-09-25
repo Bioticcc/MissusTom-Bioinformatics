@@ -183,6 +183,7 @@ class RunManager:
                     record.finished_at = datetime.now(UTC)
                     record.holds_admission = False
                     self._persist_safely(record)
+                    self._append_terminal_log_marker(record)
                 else:
                     self._records.pop(job_identifier, None)
                 self._release_locks(job_identifier)
@@ -291,6 +292,7 @@ class RunManager:
         with path.open("rb") as handle:
             handle.seek(clamped)
             data = handle.read(limit)
+        truncated = truncated or clamped + len(data) < size
         return RunLog(
             job_identifier=job_identifier,
             text=data.decode("utf-8", errors="replace"),
@@ -488,11 +490,7 @@ class RunManager:
                 record.current_stage = "Failed"
                 record.error_message = f"Workflow runner exited with status {exit_code}"
             self._persist_safely(record)
-            if record.status == RunStatus.COMPLETED:
-                self._append_log_line_safely(
-                    Path(record.log_path),
-                    f"Completed at {self._format_log_timestamp(finished_at)}.\n",
-                )
+            self._append_terminal_log_marker(record)
             self._release_locks(job_identifier)
 
     def _wait_for_process_with_monitor(
@@ -571,12 +569,27 @@ class RunManager:
         except (OSError, ValueError):
             return
 
+    def _append_terminal_log_marker(self, record: RunRecord) -> None:
+        """Record one operator-visible marker when this path makes a run terminal."""
+        terminal_message = {
+            RunStatus.CANCELLED: "Cancelled",
+            RunStatus.COMPLETED: "Completed",
+            RunStatus.FAILED: "Failed",
+        }.get(record.status)
+        if terminal_message is None or record.finished_at is None:
+            return
+        self._append_log_line_safely(
+            Path(record.log_path),
+            f"{terminal_message} at {self._format_log_timestamp(record.finished_at)}.\n",
+        )
+
     def _finish_cancelled_before_launch(self, record: RunRecord) -> None:
         record.status = RunStatus.CANCELLED
         record.current_stage = "Cancelled before launch"
         record.finished_at = datetime.now(UTC)
         record.holds_admission = False
         self._persist_safely(record)
+        self._append_terminal_log_marker(record)
         self._release_locks(record.job_identifier)
 
     def _fail_before_completion(self, job_identifier: str, message: str) -> None:
@@ -594,6 +607,7 @@ class RunManager:
             record.finished_at = datetime.now(UTC)
             record.holds_admission = False
             self._persist_safely(record)
+            self._append_terminal_log_marker(record)
             self._release_locks(job_identifier)
 
     def _enforce_cancellation(
@@ -685,6 +699,7 @@ class RunManager:
                 record.holds_admission = False
                 record.container_cleanup_verified_at = datetime.now(UTC)
                 self._persist_safely(record)
+                self._append_terminal_log_marker(record)
                 self._release_locks(job_identifier)
         else:
             self._mark_cleanup_unconfirmed(job_identifier)

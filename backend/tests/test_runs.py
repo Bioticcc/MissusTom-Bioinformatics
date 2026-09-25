@@ -154,6 +154,8 @@ def test_run_log_offset_read(tmp_path: Path, manifest_payload: dict[str, Any]) -
     head = manager.read_log(started.job_identifier, offset=0, limit=5)
     rest = manager.read_log(started.job_identifier, offset=head.next_offset, limit=10_000)
     assert head.text == tail.text[: len(head.text)]
+    assert head.truncated is True
+    assert rest.truncated is False
     assert head.text + rest.text == tail.text[: head.next_offset + len(rest.text)]
 
 
@@ -679,8 +681,47 @@ def test_thread_start_failure_persists_terminal_failure_not_queued_state(
     record = manager.list_runs()[0]
     assert record.status == RunStatus.FAILED
     assert record.holds_admission is False
+    assert manager.read_log(record.job_identifier).text.count("Failed at ") == 1
     recovered = RunManager(StubAdapter(tmp_path), registry_directory=registry)  # type: ignore[arg-type]
     assert recovered.get(record.job_identifier).status == RunStatus.FAILED
+
+
+def test_popen_failure_appends_a_single_failed_terminal_marker(
+    tmp_path: Path, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    monkeypatch.setattr(runs_module.subprocess, "Popen", Mock(side_effect=OSError("no runner")))
+
+    started = manager.start(manifest)
+    failed = wait_for_terminal(manager, started.job_identifier)
+
+    assert failed.status == RunStatus.FAILED
+    assert manager.read_log(started.job_identifier).text.count("Failed at ") == 1
+
+
+def test_prelaunch_cancellation_appends_a_cancelled_terminal_marker(tmp_path: Path) -> None:
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier="a0876ed1-10c5-4bfc-b5c4-c367e3781122",
+        project_identifier="d47bbd35-bd13-4698-8eb6-5baf75127835",
+        project_name="Cancelled before launch",
+        pipeline_identifier="bulk-rnaseq",
+        status=RunStatus.CANCELLING,
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project" / "logs" / "run-prelaunch.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+    )
+    manager._records[record.job_identifier] = record
+    manager._persist(record)
+
+    manager._finish_cancelled_before_launch(record)
+
+    assert manager.read_log(record.job_identifier).text.count("Cancelled at ") == 1
 
 
 def test_post_popen_persist_failure_stops_process_before_releasing_admission(
@@ -726,6 +767,7 @@ def test_sigkill_escalation_stops_stubborn_descendant_group(
     manager.cancel(started.job_identifier)
 
     assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.CANCELLED
+    assert manager.read_log(started.job_identifier).text.count("Cancelled at ") == 1
 
 
 def test_container_cleanup_follows_nextflow_execution_profile(
@@ -848,6 +890,7 @@ def test_recovered_dead_leader_allows_only_labelled_container_cleanup(
 
     cancelled = wait_for_terminal(manager, record.job_identifier)
     assert cancelled.status == RunStatus.CANCELLED
+    assert manager.read_log(record.job_identifier).text.count("Cancelled at ") == 1
     kill_process_group.assert_not_called()
 
 

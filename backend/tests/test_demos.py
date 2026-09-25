@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from missus_tom.api import routes
 from missus_tom.models.demos import DemoPrepareRequest, DemoPrepareStatus
+from missus_tom.pipeline_adapters import bulk_rnaseq as bulk_module
+from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
 from missus_tom.services import demos as demos_module
 from missus_tom.services.demos import (
     DemoService,
@@ -61,6 +63,10 @@ def wait_for_prepare(service: DemoService, job_identifier: str, *, timeout: floa
         if job.status in {DemoPrepareStatus.SUCCEEDED, DemoPrepareStatus.FAILED}:
             if job.status == DemoPrepareStatus.FAILED:
                 pytest.fail(job.message)
+            worker = service._threads.get(job_identifier)
+            if worker is not None:
+                worker.join(timeout=1)
+                assert not worker.is_alive(), "demo preparation worker did not release its lock"
             return
         time.sleep(0.05)
     pytest.fail("demo preparation timed out")
@@ -105,6 +111,7 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
     demos: DemoService,
     kallisto_stub: Path,
     pipeline_identifier: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del kallisto_stub
     response = routes.post_demo_prepare(pipeline_identifier, DemoPrepareRequest(consent=True))
@@ -119,7 +126,7 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
     metadata = json.loads((bundle / "BUNDLE_MANIFEST.json").read_text(encoding="utf-8"))
     assert metadata["synthetic_only"] is True
     assert metadata["network_downloads"] is False
-    assert metadata["fixture_version"] == "2"
+    assert metadata["fixture_version"] == "3"
     assert metadata["pipeline_identifier"] == pipeline_identifier
     assert set(metadata["files"]) >= {
         "README.txt",
@@ -143,11 +150,78 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
         assert not index_bytes.startswith(b"NOT_A_KALLISTO")
         manifest = json.loads((bundle / "project_manifest.json").read_text(encoding="utf-8"))
         assert len(manifest["samples"]) == 4
+        assert manifest["parameters"] == {
+            "absolute_log2_fold_change": 0.3,
+            "adapter_r1": "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+            "adapter_r2": "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+            "adjusted_p_value": 0.05,
+            "demo_fixture": True,
+            "minimum_group_size": 2,
+            "scientific_execution_supported": True,
+            "synthetic": True,
+            "trim_minimum_length": 20,
+            "trim_quality": 20,
+        }
         biomart_lines = (bundle / "references/biomart.tsv").read_text(encoding="utf-8").splitlines()
         biomart_header = biomart_lines[0]
         assert biomart_header == "Gene stable ID version\tGene type\tGene name"
         project = routes.get_bulk_rnaseq_demo_project().data
         assert project is not None and project.manifest.pipeline_identifier == "bulk-rnaseq"
+        saved_manifest = bundle / "project-output/input_manifest/project_manifest.json"
+        assert saved_manifest.is_file()
+        assert json.loads(saved_manifest.read_text(encoding="utf-8")) == manifest
+        BulkRnaSeqAdapter.validate_saved_manifest(project.manifest)
+        adapter = BulkRnaSeqAdapter()
+        monkeypatch.setattr(
+            bulk_module,
+            "runtime_tool",
+            lambda executable, _pipeline: "/usr/bin/nextflow" if executable == "nextflow" else None,
+        )
+        monkeypatch.setattr(
+            bulk_module,
+            "validate_execution_resources",
+            lambda _manifest, *, analysis_only: None,
+        )
+        adapter.validate_execution(project.manifest)
+        command = adapter.construct_command(project.manifest)
+        manifest_index = command.index("--manifest") + 1
+        assert Path(command[manifest_index]) == saved_manifest
+        assert Path(command[manifest_index]).is_file()
+        plan = adapter.construct_run_plan(project.manifest)
+        assert plan.command_preview[manifest_index] == str(saved_manifest)
+
+
+def test_stale_non_executable_bulk_fixture_is_prepared_before_project_load(
+    demos: DemoService, kallisto_stub: Path
+) -> None:
+    del kallisto_stub
+    first = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True)).data
+    assert first is not None
+    wait_for_prepare(demos, first.job_identifier)
+
+    bundle = demos.root / "bulk-rnaseq"
+    fixture_path = bundle / "fixture_metadata.json"
+    fixture_metadata = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture_metadata["execution_supported"] = False
+    fixture_path.write_text(json.dumps(fixture_metadata), encoding="utf-8")
+    bundle_metadata_path = bundle / "BUNDLE_MANIFEST.json"
+    bundle_metadata = json.loads(bundle_metadata_path.read_text(encoding="utf-8"))
+    bundle_metadata["files"]["fixture_metadata.json"] = demos._sha256(fixture_path)
+    bundle_metadata_path.write_text(json.dumps(bundle_metadata), encoding="utf-8")
+
+    stale = routes.get_demo_status("bulk-rnaseq").data
+    assert stale is not None
+    assert stale.available is False
+    assert stale.execution_supported is False
+    with pytest.raises(HTTPException, match="not available"):
+        routes.get_bulk_rnaseq_demo_project()
+
+    refreshed = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True)).data
+    assert refreshed is not None
+    wait_for_prepare(demos, refreshed.job_identifier)
+    project = routes.get_bulk_rnaseq_demo_project().data
+    assert project is not None
+    BulkRnaSeqAdapter.validate_saved_manifest(project.manifest)
 
 
 def test_status_rejects_tampered_fixture_file(demos: DemoService, kallisto_stub: Path) -> None:

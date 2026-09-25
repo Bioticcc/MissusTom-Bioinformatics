@@ -1,9 +1,73 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+
+
+def test_debian_release_version_keeps_prereleases_distinct_and_upgradeable(tmp_path: Path) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    package_root = tmp_path / "package"
+    control_directory = package_root / "DEBIAN"
+    control_directory.mkdir(parents=True)
+    (control_directory / "control").write_text(
+        "Package: missus-tom\nVersion: 0.3.0\nArchitecture: amd64\nDescription: test package\n",
+        encoding="utf-8",
+    )
+    source_deb = tmp_path / "missus-tom.deb"
+    subprocess.run(
+        ["dpkg-deb", "--build", "--root-owner-group", package_root, source_deb], check=True
+    )
+    second_deb = tmp_path / "missus-tom-second.deb"
+    shutil.copyfile(source_deb, second_deb)
+
+    subprocess.run(
+        [
+            "bash",
+            str(repository_root / "scripts" / "normalize-debian-release-version.sh"),
+            "--release-version",
+            "0.3.0-rc.1",
+            "--deb",
+            str(source_deb),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(repository_root / "scripts" / "normalize-debian-release-version.sh"),
+            "--release-version",
+            "0.3.0-rc.2",
+            "--deb",
+            str(second_deb),
+        ],
+        check=True,
+    )
+
+    first_version = subprocess.run(
+        ["dpkg-deb", "--field", str(source_deb), "Version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    second_version = subprocess.run(
+        ["dpkg-deb", "--field", str(second_deb), "Version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert (first_version, second_version) == ("0.3.0~rc.1", "0.3.0~rc.2")
+    assert first_version != second_version
+    first_is_prerelease = subprocess.run(
+        ["dpkg", "--compare-versions", first_version, "lt", "0.3.0"]
+    ).returncode
+    second_is_prerelease = subprocess.run(
+        ["dpkg", "--compare-versions", second_version, "lt", "0.3.0"]
+    ).returncode
+    assert first_is_prerelease == 0
+    assert second_is_prerelease == 0
 
 
 def test_linux_release_zip_contains_only_the_deb_checksum_and_instructions(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from missus_tom.models.demos import (
 )
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.services.dependencies import runtime_environment, runtime_tool
+from missus_tom.services.projects import ProjectHistoryStore, save_project
 
 _CATALOG: Final = {
     "bulk-rnaseq": {
@@ -52,7 +53,7 @@ _CATALOG: Final = {
     },
 }
 _BUNDLE_MANIFEST = "BUNDLE_MANIFEST.json"
-_FIXTURE_VERSION: Final = "2"
+_FIXTURE_VERSION: Final = "3"
 _LCG_MODULUS: Final = 2_147_483_647
 _LCG_MULTIPLIER: Final = 1_664_525
 _LCG_INCREMENT: Final = 1_013_904_223
@@ -148,7 +149,7 @@ class DemoService:
         spec = self._spec(pipeline_identifier)
         bundle = self.root / pipeline_identifier
         metadata = self._read_verified_metadata(bundle, pipeline_identifier)
-        execution_supported = self._execution_supported(bundle)
+        execution_supported = metadata is not None and bool(metadata["execution_supported"])
         job = self.latest_job(pipeline_identifier)
         if metadata is None:
             return DemoStatus(
@@ -335,13 +336,22 @@ class DemoService:
                 job=job,
             )
 
-        manifest_payload = self._bulk_manifest(bundle, inputs, references)
-        self._write_text(bundle / "project_manifest.json", self._json(manifest_payload))
-
         self._set_stage(job, "building_index")
         index_path = bundle / references / "transcripts.idx"
         fasta_path = bundle / references / "transcripts.fa"
         self._build_kallisto_index(job, index_path, fasta_path)
+
+        # The runner accepts only the canonical saved-project location.  Write
+        # the bundle copy from the same validated manifest after saving it.
+        manifest = ProjectManifest.model_validate(self._bulk_manifest(bundle, inputs, references))
+        save_project(
+            manifest,
+            history_store=ProjectHistoryStore(self.state_directory / "missus_tom.sqlite3"),
+        )
+        self._write_text(
+            bundle / "project_manifest.json",
+            self._json(manifest.model_dump(mode="json")),
+        )
 
         self._set_stage(job, "finalizing")
         self._write_text(bundle / "README.txt", self._readme(job.pipeline_identifier))
@@ -518,7 +528,13 @@ class DemoService:
                 "demo_fixture": True,
                 "synthetic": True,
                 "scientific_execution_supported": True,
+                "adapter_r1": "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+                "adapter_r2": "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+                "trim_quality": 20,
+                "trim_minimum_length": 20,
                 "minimum_group_size": 2,
+                "adjusted_p_value": 0.05,
+                "absolute_log2_fold_change": 0.3,
             },
             execution_profile="local",
             resource_profile={"cpus": 2, "memory_gb": 4, "max_parallel_tasks": 1},
@@ -679,16 +695,6 @@ class DemoService:
             "machine. Do not use it for workflow or scientific validation.\n"
         )
 
-    def _execution_supported(self, bundle: Path) -> bool:
-        path = bundle / "fixture_metadata.json"
-        if not path.is_file() or path.is_symlink():
-            return False
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        return bool(payload.get("execution_supported"))
-
     def _read_verified_metadata(
         self, bundle: Path, expected_pipeline_identifier: str
     ) -> dict[str, Any] | None:
@@ -698,6 +704,7 @@ class DemoService:
             if (
                 not isinstance(metadata, dict)
                 or metadata.get("format") != "missus-tom-synthetic-demo-bundle"
+                or metadata.get("fixture_version") != _FIXTURE_VERSION
                 or metadata.get("pipeline_identifier") != expected_pipeline_identifier
                 or not isinstance(metadata.get("project_manifest"), str)
                 or not isinstance(metadata.get("prepared_at"), str)
@@ -728,6 +735,17 @@ class DemoService:
             ):
                 return None
             datetime.fromisoformat(metadata["prepared_at"])
+            fixture_path = bundle / "fixture_metadata.json"
+            fixture_metadata = json.loads(fixture_path.read_text(encoding="utf-8"))
+            expected_execution_supported = expected_pipeline_identifier == "bulk-rnaseq"
+            if (
+                "fixture_metadata.json" not in files
+                or not isinstance(fixture_metadata, dict)
+                or fixture_metadata.get("fixture_version") != _FIXTURE_VERSION
+                or fixture_metadata.get("execution_supported") is not expected_execution_supported
+                or metadata.get("execution_supported") is not expected_execution_supported
+            ):
+                return None
             return metadata
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return None

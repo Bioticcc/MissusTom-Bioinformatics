@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -6,10 +7,11 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+use tauri_plugin_dialog::DialogExt;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const RUN_OVERLAY_LABEL: &str = "run-overlay";
@@ -48,6 +50,147 @@ struct BackendStatus {
     base_url: String,
     ready: bool,
     packaged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TextExportKind {
+    Settings,
+    Log,
+}
+
+impl TextExportKind {
+    fn allowed_extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Settings => &["json"],
+            Self::Log => &["log", "txt"],
+        }
+    }
+
+    fn filter_name(&self) -> &'static str {
+        match self {
+            Self::Settings => "JSON files",
+            Self::Log => "Log files",
+        }
+    }
+}
+
+fn enforce_export_extension(
+    mut requested: PathBuf,
+    export_kind: &TextExportKind,
+) -> Result<PathBuf, String> {
+    if requested.extension().is_none() {
+        requested.set_extension(export_kind.allowed_extensions()[0]);
+    }
+    let extension = requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if !extension
+        .as_deref()
+        .is_some_and(|extension| export_kind.allowed_extensions().contains(&extension))
+    {
+        return Err(format!(
+            "The selected export must use one of: {}.",
+            export_kind.allowed_extensions().join(", ")
+        ));
+    }
+    Ok(requested)
+}
+
+fn validate_export_destination(requested: PathBuf) -> Result<PathBuf, String> {
+    if !requested.is_absolute() {
+        return Err("The export path must be absolute.".to_string());
+    }
+    let parent = requested
+        .parent()
+        .ok_or_else(|| "The export path has no parent directory.".to_string())?
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the export directory: {error}"))?;
+    if !parent.is_dir() {
+        return Err("The export destination is not a directory.".to_string());
+    }
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| "The export path has no file name.".to_string())?;
+    let destination = parent.join(file_name);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(
+                    "The export destination must be a regular file, not a link or directory."
+                        .to_string(),
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Could not inspect the export destination: {error}")),
+    }
+    Ok(destination)
+}
+
+#[cfg(unix)]
+fn replace_export_entry(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    // POSIX rename atomically replaces a directory entry and does not follow a final-component
+    // symlink, including one substituted after destination validation.
+    std::fs::rename(temporary, destination)
+}
+
+#[cfg(not(unix))]
+fn replace_export_entry(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    // Keep the conservative rename-only behavior on platforms where replacement semantics differ:
+    // an existing destination can fail, but no selected path is reopened for writing.
+    std::fs::rename(temporary, destination)
+}
+
+fn write_export_atomically(destination: &Path, contents: &str) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "The export destination has no parent directory.".to_string())?;
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| "The export destination has no file name.".to_string())?
+        .to_string_lossy();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("Could not create a temporary export name: {error}"))?
+        .as_nanos();
+    let mut temporary = None;
+    for attempt in 0..32 {
+        let candidate = parent.join(format!(
+            ".{file_name}.missus-tom-{}-{nonce}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(contents.as_bytes()) {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(format!("Could not write the settings export: {error}"));
+                }
+                if let Err(error) = file.sync_all() {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(format!("Could not finalize the settings export: {error}"));
+                }
+                temporary = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not create the settings export: {error}")),
+        }
+    }
+    let temporary =
+        temporary.ok_or_else(|| "Could not create a unique temporary export file.".to_string())?;
+
+    let result = replace_export_entry(&temporary, destination);
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("Could not finalize the settings export: {error}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,124 +505,30 @@ fn restore_main_window(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn select_directory(title: String) -> Result<Option<String>, String> {
-    let output = Command::new("zenity")
-        .args(["--file-selection", "--directory", "--title", &title])
-        .output()
-        .map_err(|error| format!("Could not start the directory selector: {error}"))?;
-
-    if !output.status.success() {
-        if output.status.code() == Some(1) {
-            return Ok(None);
-        }
-        return Err("The directory selector did not complete successfully.".to_string());
-    }
-
-    let selected = String::from_utf8(output.stdout)
-        .map_err(|_| "The directory selector returned an invalid path.".to_string())?;
-    let selected = selected.trim();
-    if selected.is_empty() {
-        return Ok(None);
-    }
-    let canonical = PathBuf::from(selected)
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve the selected directory: {error}"))?;
-    if !canonical.is_dir() {
-        return Err("The selected path is not a directory.".to_string());
-    }
-    Ok(Some(canonical.to_string_lossy().into_owned()))
-}
-
-#[tauri::command]
-fn select_files(title: String, multiple: bool) -> Result<Option<Vec<String>>, String> {
-    let mut command = Command::new("zenity");
-    command.args(["--file-selection", "--title", &title]);
-    if multiple {
-        command.args(["--multiple", "--separator=\n"]);
-    }
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not start the file selector: {error}"))?;
-
-    if !output.status.success() {
-        if output.status.code() == Some(1) {
-            return Ok(None);
-        }
-        return Err("The file selector did not complete successfully.".to_string());
-    }
-
-    let selected = String::from_utf8(output.stdout)
-        .map_err(|_| "The file selector returned an invalid path.".to_string())?;
-    let mut files = Vec::new();
-    for value in selected.lines().filter(|value| !value.trim().is_empty()) {
-        let canonical = PathBuf::from(value.trim())
-            .canonicalize()
-            .map_err(|error| format!("Could not resolve the selected file: {error}"))?;
-        if !canonical.is_file() {
-            return Err("A selected path is not a file.".to_string());
-        }
-        files.push(canonical.to_string_lossy().into_owned());
-    }
-    Ok((!files.is_empty()).then_some(files))
-}
-
-#[tauri::command]
-fn save_text_file(
+async fn save_text_file(
+    window: WebviewWindow,
     title: String,
     suggested_name: String,
     contents: String,
+    export_kind: TextExportKind,
 ) -> Result<Option<String>, String> {
-    let output = Command::new("zenity")
-        .args([
-            "--file-selection",
-            "--save",
-            "--confirm-overwrite",
-            "--title",
-            &title,
-            "--filename",
-            &suggested_name,
-            "--file-filter=JSON files | *.json",
-        ])
-        .output()
-        .map_err(|error| format!("Could not start the file saver: {error}"))?;
-
-    if !output.status.success() {
-        if output.status.code() == Some(1) {
-            return Ok(None);
-        }
-        return Err("The file saver did not complete successfully.".to_string());
-    }
-
-    let selected = String::from_utf8(output.stdout)
-        .map_err(|_| "The file saver returned an invalid path.".to_string())?;
-    let selected = selected.trim();
-    if selected.is_empty() {
+    let selected = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title(title)
+        .set_file_name(suggested_name)
+        .add_filter(export_kind.filter_name(), export_kind.allowed_extensions())
+        .blocking_save_file();
+    let Some(selected) = selected else {
         return Ok(None);
-    }
-    let mut requested = PathBuf::from(selected);
-    if requested.extension().is_none() {
-        requested.set_extension("json");
-    }
-    if !requested.is_absolute() {
-        return Err("The export path must be absolute.".to_string());
-    }
-    let parent = requested
-        .parent()
-        .ok_or_else(|| "The export path has no parent directory.".to_string())?
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve the export directory: {error}"))?;
-    if !parent.is_dir() {
-        return Err("The export destination is not a directory.".to_string());
-    }
-    let file_name = requested
-        .file_name()
-        .ok_or_else(|| "The export path has no file name.".to_string())?;
-    let destination = parent.join(file_name);
-    if destination.exists() && !destination.is_file() {
-        return Err("The export destination is not a file.".to_string());
-    }
-    std::fs::write(&destination, contents)
-        .map_err(|error| format!("Could not write the settings export: {error}"))?;
+    };
+    let requested = selected
+        .into_path()
+        .map_err(|_| "The file saver returned an unsupported path.".to_string())?;
+    let requested = enforce_export_extension(requested, &export_kind)?;
+    let destination = validate_export_destination(requested)?;
+    write_export_atomically(&destination, &contents)?;
     Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
@@ -524,6 +573,7 @@ fn open_directory(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(RunOverlayState::default());
             app.manage(DependencyInstallState::default());
@@ -601,8 +651,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            select_directory,
-            select_files,
             save_text_file,
             read_text_file,
             open_directory,
@@ -620,8 +668,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        bottom_left_overlay_position, close_decision, parse_health_response, should_show_overlay,
-        sidecar_paths, startup_decision, CloseDecision, StartupDecision,
+        bottom_left_overlay_position, close_decision, enforce_export_extension,
+        parse_health_response, should_show_overlay, sidecar_paths, startup_decision,
+        validate_export_destination, write_export_atomically, CloseDecision, StartupDecision,
+        TextExportKind,
     };
 
     #[test]
@@ -698,5 +748,81 @@ mod tests {
             startup_decision(true, false),
             StartupDecision::StartOwnedBackend
         );
+    }
+
+    #[test]
+    fn text_exports_enforce_their_approved_suffixes() {
+        assert_eq!(
+            enforce_export_extension(
+                Path::new("settings").to_path_buf(),
+                &TextExportKind::Settings
+            )
+            .unwrap(),
+            Path::new("settings.json")
+        );
+        assert!(enforce_export_extension(
+            Path::new("settings.txt").to_path_buf(),
+            &TextExportKind::Settings,
+        )
+        .is_err());
+        assert!(enforce_export_extension(
+            Path::new("command.log").to_path_buf(),
+            &TextExportKind::Log
+        )
+        .is_ok());
+        assert!(enforce_export_extension(
+            Path::new("command.txt").to_path_buf(),
+            &TextExportKind::Log
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn text_exports_reject_dangling_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let directory =
+            std::env::temp_dir().join(format!("missus-tom-export-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("export.json");
+        symlink(directory.join("missing-target"), &destination).unwrap();
+
+        assert!(validate_export_destination(destination).is_err());
+
+        std::fs::remove_file(directory.join("export.json")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_export_replaces_a_substituted_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = std::env::temp_dir().join(format!(
+            "missus-tom-atomic-export-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("target.txt");
+        let destination = directory.join("export.json");
+        std::fs::write(&target, "original target").unwrap();
+        symlink(&target, &destination).unwrap();
+
+        write_export_atomically(&destination, "replacement export").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original target");
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "replacement export"
+        );
+        assert!(!std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        std::fs::remove_file(&destination).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

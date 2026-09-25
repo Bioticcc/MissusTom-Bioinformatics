@@ -35,6 +35,8 @@ def test_linux_release_is_a_deb_only_zip() -> None:
     assert '"targets": ["deb"]' in release_config
     assert "appimage" not in release_workflow.lower()
     assert "bash scripts/create-linux-release-zip.sh" in release_workflow
+    assert "bash scripts/normalize-debian-release-version.sh" in release_workflow
+    assert 'dpkg-deb --field "${deb_source}" Version' in release_workflow
     assert '--version "${release_version}"' in release_workflow
     assert '--deb "${deb_source}"' in release_workflow
     assert '--output-dir "${artifact_directory}"' in release_workflow

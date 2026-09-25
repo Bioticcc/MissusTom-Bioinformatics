@@ -490,6 +490,7 @@ class DependencyInstaller:
         with path.open("rb") as handle:
             handle.seek(clamped)
             data = handle.read(limit)
+        truncated = truncated or clamped + len(data) < size
         return CommandLogChunk(
             text=data.decode("utf-8", errors="replace"),
             truncated=truncated,

@@ -208,7 +208,9 @@ def test_dependency_install_log_supports_offset_reads(tmp_path: Path) -> None:
     second = installer.read_log(job.job_identifier, offset=first.next_offset, limit=10)
 
     assert first.text == "alpha\n"
+    assert first.truncated is True
     assert second.text == "beta\n"
+    assert second.truncated is False
     assert second.next_offset == first.bytes_available
 
 

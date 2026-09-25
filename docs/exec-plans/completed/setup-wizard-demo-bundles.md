@@ -64,6 +64,9 @@ checking rather than trusted tamper-proof integrity.
 - Executable synthetic bulk demo, async preparation jobs, live logs, and Dashboard
   entry shipped with contract tests; clean-VM GUI install and full native E2E on
   every target host remain operator verification (see closing summary doc).
+- Bulk fixture version 3 invalidates older/non-executable bundles and saves the
+  exact manifest used by the adapter at
+  `project-output/input_manifest/project_manifest.json` before it is offered for execution.
 
 ## Completion boundary
 

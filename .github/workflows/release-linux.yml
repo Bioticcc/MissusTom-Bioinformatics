@@ -92,6 +92,19 @@ jobs:
           fi
 
           deb_source="${deb_candidates[0]}"
+          bash scripts/normalize-debian-release-version.sh \
+            --release-version "${release_version}" \
+            --deb "${deb_source}"
+
+          debian_version=$(dpkg-deb --field "${deb_source}" Version)
+          expected_debian_version="${package_version}"
+          if [[ "${release_version}" == *-* ]]; then
+            expected_debian_version="${package_version}~${release_version#*-}"
+          fi
+          if [[ "${debian_version}" != "${expected_debian_version}" ]]; then
+            echo "Debian package Version ${debian_version} does not match ${expected_debian_version}." >&2
+            exit 1
+          fi
 
           package_contents=$(mktemp)
           trap 'rm -f "${package_contents}"' EXIT

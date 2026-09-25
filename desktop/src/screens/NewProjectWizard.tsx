@@ -679,6 +679,7 @@ export function NewProjectWizard({
         "Export Missus Tom project settings",
         `${baseName}-debug-settings.json`,
         `${JSON.stringify(payload, null, 2)}\n`,
+        "settings",
       );
       if (path) setExportPath(path);
     } catch (reason) {

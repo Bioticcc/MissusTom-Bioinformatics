@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+type TextExportKind = "settings" | "log";
 
 export function isDesktopShell() {
   return "__TAURI_INTERNALS__" in window;
@@ -9,25 +12,28 @@ export async function selectDirectory(title: string): Promise<string | null> {
   if (!isDesktopShell()) {
     throw new Error("Directory selection is available in the desktop application.");
   }
-  return invoke<string | null>("select_directory", { title });
+  return open({ title, directory: true });
 }
 
 export async function selectFiles(title: string, multiple = false): Promise<string[] | null> {
   if (!isDesktopShell()) {
     throw new Error("File selection is available in the desktop application.");
   }
-  return invoke<string[] | null>("select_files", { title, multiple });
+  const selected = await open({ title, multiple });
+  if (selected === null) return null;
+  return Array.isArray(selected) ? selected : [selected];
 }
 
 export async function saveTextFile(
   title: string,
   suggestedName: string,
   contents: string,
+  exportKind: TextExportKind,
 ): Promise<string | null> {
   if (!isDesktopShell()) {
     throw new Error("Exporting files is available in the desktop application.");
   }
-  return invoke<string | null>("save_text_file", { title, suggestedName, contents });
+  return invoke<string | null>("save_text_file", { title, suggestedName, contents, exportKind });
 }
 
 export async function readTextFile(path: string): Promise<string> {
