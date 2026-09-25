@@ -108,7 +108,7 @@ def test_workflow_retries_native_crashes_once() -> None:
     assert "maxRetries = 1" in kallisto_block.group("body")
 
 
-def test_kallisto_watchdog_defines_bounded_two_hour_retry_signal() -> None:
+def test_kallisto_quant_uses_foreground_run_with_timeout() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow = (repository_root / "workflows" / "bulk_rnaseq" / "main.nf").read_text(
         encoding="utf-8"
@@ -121,16 +121,11 @@ def test_kallisto_watchdog_defines_bounded_two_hour_retry_signal() -> None:
 
     assert process_block is not None
     body = process_block.group("body")
-    assert "sleep 7200" in body
-    assert re.search(r'kill -0 ["\']?\\?\$kallisto_pid', body)
-    assert re.search(r'kill -TERM ["\']?\\?\$kallisto_pid', body)
-    assert "sleep 60" in body
-    assert re.search(r'kill -KILL ["\']?\\?\$kallisto_pid', body)
-    assert re.search(r'wait ["\']?\\?\$kallisto_pid', body)
-    assert re.search(r"kallisto_status\s*=\s*\\?\$\?", body)
-    assert ".kallisto_time_limit_exceeded" in body
-    assert "exit 240" in body
-    assert re.search(r'exit ["\']?\\?\$kallisto_status', body)
+    assert re.search(r"run_with_timeout\s+7200\s+60\s+kallisto\s+quant", body)
+    assert "watchdog_pid" not in body
+    assert ".kallisto_time_limit_exceeded" not in body
+    assert "sleep 7200" not in body
+    assert not re.search(r"kallisto\s+quant[\s\S]*&", body)
 
 
 def test_fastqc_retry_isolates_each_staged_fastq_in_a_one_thread_jvm() -> None:

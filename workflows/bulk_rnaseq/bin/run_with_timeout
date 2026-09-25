@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Run a foreground command under portable GNU/BusyBox timeout(1).
+# When the wall limit is reached (exit 124 GNU, 143 TERM, 137 KILL), emit a
+# clear message and exit 240 for the bulk RNA-seq Kallisto retry policy.
+set -o nounset -o pipefail
+
+usage() {
+  echo "Usage: run_with_timeout TIMEOUT_SECONDS TERM_GRACE_SECONDS COMMAND..." >&2
+  exit 2
+}
+
+if [[ $# -lt 3 ]]; then
+  usage
+fi
+
+timeout_seconds=$1
+grace_seconds=$2
+shift 2
+
+if ! [[ $timeout_seconds =~ ^[1-9][0-9]*$ ]]; then
+  echo "run_with_timeout: TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+
+if ! [[ $grace_seconds =~ ^[1-9][0-9]*$ ]]; then
+  echo "run_with_timeout: TERM_GRACE_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+SECONDS=0
+set +e
+timeout -s TERM -k "$grace_seconds" "$timeout_seconds" "$@"
+status=$?
+set -e
+
+elapsed=$SECONDS
+
+if (( elapsed >= timeout_seconds )) && [[ $status -eq 124 || $status -eq 137 || $status -eq 143 ]]; then
+  echo "run_with_timeout: command exceeded ${timeout_seconds}s limit (timeout exit ${status})" >&2
+  exit 240
+fi
+
+exit "$status"

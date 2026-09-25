@@ -33,8 +33,9 @@ Docker-profile scientific outputs.
 Nextflow reports, trace data, and the work directory are retained for
 auditing and `-resume`. Most local tasks have no fixed wall-time limit because
 input size and analysis duration vary. Each per-sample Kallisto quantification
-has a two-hour watchdog. The watchdog sends `TERM`, escalates to `KILL` after 60
-seconds, and marks the attempt with exit 240. Kallisto retries that timeout once,
+has a two-hour wall limit via `bin/run_with_timeout`. The helper runs Kallisto in
+the foreground under portable `timeout -s TERM -k 60 7200`, maps timeout exits to
+240, and leaves ordinary command statuses unchanged. Kallisto retries that timeout once,
 then fails the run cleanly if the second attempt also reaches two hours. A task
 terminated by a native segmentation fault (exit 139) is retried once; FastQC and
 Kallisto also retry a native abort (exit 134) once. FastQC normally
@@ -55,13 +56,13 @@ thread setting; the proven recovery mechanism was one file in a one-thread JVM.
 This changes execution isolation only, not FastQC inputs, version, reports, or
 interpretation.
 
-The Kallisto watchdog uses an explicit task-local process monitor rather than
-Nextflow's `time` directive. Supported local-executor versions can report a
-timeout without a usable exit status, preventing the configured retry from
-running. Exit 240 is reserved for this watchdog. No userspace watchdog can reap
-a process blocked indefinitely in uninterruptible kernel I/O. On the Docker
-profile, owned-container cleanup remains the final safety mechanism for that
-operating-system failure mode.
+Kallisto uses `run_with_timeout` rather than Nextflow's `time` directive or a
+background sleep monitor. Supported local-executor versions can report a timeout
+without a usable exit status, preventing the configured retry from running.
+Exit 240 is reserved for the normalized two-hour limit. No userspace timeout
+wrapper can reap a process blocked indefinitely in uninterruptible kernel I/O.
+On the Docker profile, owned-container cleanup remains the final safety mechanism
+for that operating-system failure mode.
 
 ## Local resource containment
 

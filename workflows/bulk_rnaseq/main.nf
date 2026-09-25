@@ -223,37 +223,12 @@ process KALLISTO_QUANT {
     def read1_arg = shellQuote(read1)
     def read2_arg = shellQuote(read2)
     """
-    set +e
-    timeout_marker=.kallisto_time_limit_exceeded
-    rm -f "\$timeout_marker"
-
-    kallisto quant \
+    run_with_timeout 7200 60 kallisto quant \
       --index ${index_arg} \
       ${strand_flag} \
       --threads ${task.cpus} \
       --output-dir ${sample_id} \
-      ${read1_arg} ${read2_arg} &
-    kallisto_pid=\$!
-
-    (
-      sleep 7200
-      kill -0 "\$kallisto_pid" 2>/dev/null || exit 0
-      : > "\$timeout_marker"
-      kill -TERM "\$kallisto_pid" 2>/dev/null || true
-      sleep 60
-      kill -KILL "\$kallisto_pid" 2>/dev/null || true
-    ) &
-    watchdog_pid=\$!
-
-    wait "\$kallisto_pid"
-    kallisto_status=\$?
-    kill "\$watchdog_pid" 2>/dev/null || true
-    wait "\$watchdog_pid" 2>/dev/null || true
-
-    if [[ -f "\$timeout_marker" ]]; then
-      exit 240
-    fi
-    exit "\$kallisto_status"
+      ${read1_arg} ${read2_arg}
     """
 }
 
