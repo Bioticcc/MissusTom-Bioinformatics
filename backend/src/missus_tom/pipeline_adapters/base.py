@@ -57,8 +57,18 @@ class PipelineAdapter(ABC):
     @property
     @abstractmethod
     def workflow_directory(self) -> Path:
-        """Directory used as the controlled runner working directory."""
+        """Directory containing the installed workflow assets."""
         raise NotImplementedError
+
+    def runner_working_directory(self, project_root: Path) -> Path:
+        """Return the controlled process working directory for a project.
+
+        Adapters that need project-local engine state may override this to return
+        ``project_root``. The default preserves runners that execute beside their
+        installed workflow assets.
+        """
+        del project_root
+        return self.workflow_directory
 
     def append_run_identifier(self, command: list[str], job_identifier: str) -> list[str]:
         """Add the runner-specific job identifier without invoking a shell."""

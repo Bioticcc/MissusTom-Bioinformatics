@@ -7,6 +7,7 @@ import { RunPlanScreen } from "./screens/RunPlanScreen";
 import { Settings } from "./screens/Settings";
 import { Setup } from "./screens/Setup";
 import { apiRequest, getBackendStatus } from "./api";
+import { TitleBar } from "./components/TitleBar";
 import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
 import { loadSetupState } from "./setupState";
@@ -132,8 +133,10 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={isDesktopShell() ? "desktop-root" : undefined}>
+      <TitleBar />
+      <div className="app-shell">
+        <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-mark" aria-hidden="true">
             MT
@@ -165,9 +168,9 @@ export default function App() {
           <span className="version-chip">v0.3.0</span>
           <p>Local bioinformatics workbench</p>
         </div>
-      </aside>
+        </aside>
 
-      <main className="main-content" id="main-content">
+        <main className="main-content" id="main-content">
         {runPollError && <div className="inline-error" role="alert">{runPollError}</div>}
         {activeView === "dashboard" && (
           <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
@@ -186,7 +189,8 @@ export default function App() {
         {activeView === "jobs" && <Jobs activeRun={activeRun} />}
         {activeView === "results" && <Results activeRun={activeRun} />}
         {activeView === "settings" && <Settings />}
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

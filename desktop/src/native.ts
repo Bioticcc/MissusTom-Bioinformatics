@@ -69,3 +69,28 @@ export async function startOverlayDragging(): Promise<void> {
   if (!isDesktopShell()) return;
   await getCurrentWindow().startDragging();
 }
+
+export async function startMainWindowDragging(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await getCurrentWindow().startDragging();
+}
+
+export async function minimizeMainWindow(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await getCurrentWindow().minimize();
+}
+
+export async function toggleMaximizeMainWindow(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await getCurrentWindow().toggleMaximize();
+}
+
+export async function closeMainWindow(): Promise<void> {
+  if (!isDesktopShell()) return;
+  await getCurrentWindow().close();
+}
+
+export async function isMainWindowMaximized(): Promise<boolean> {
+  if (!isDesktopShell()) return false;
+  return getCurrentWindow().isMaximized();
+}

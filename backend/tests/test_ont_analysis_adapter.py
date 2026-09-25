@@ -89,6 +89,12 @@ def test_ont_adapter_accepts_one_contained_mouse_bam(tmp_path: Path) -> None:
     assert "--outdir" in plan.command_preview
 
 
+def test_ont_runner_working_directory_remains_its_installed_workflow(tmp_path: Path) -> None:
+    adapter = OntAnalysisAdapter()
+
+    assert adapter.runner_working_directory(tmp_path / "project") == adapter.workflow_directory
+
+
 def test_ont_adapter_uses_packaged_runner_when_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

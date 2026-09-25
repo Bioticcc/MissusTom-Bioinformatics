@@ -51,9 +51,18 @@ const TAURI_BUNDLE_CATEGORIES = new Set([
   "Weather",
 ]);
 
+const mainWindow = tauriConfig.app.windows[0];
+
 test("Tauri bundle category is a documented Tauri 2 value", () => {
   assert.ok(
     TAURI_BUNDLE_CATEGORIES.has(tauriConfig.bundle.category),
     `Unsupported Tauri bundle category: ${tauriConfig.bundle.category}`,
   );
+});
+
+test("Main window uses frameless chrome with supported minimum size", () => {
+  assert.equal(mainWindow.decorations, false);
+  assert.equal(mainWindow.minWidth, 760);
+  assert.equal(mainWindow.minHeight, 520);
+  assert.equal(mainWindow.title, "Missus Tom");
 });

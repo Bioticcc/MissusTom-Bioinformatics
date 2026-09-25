@@ -374,15 +374,25 @@ class RunManager:
                     lock_descriptors = self._locks[job_identifier].descriptors()
                     for lock_descriptor in lock_descriptors:
                         os.set_inheritable(lock_descriptor, True)
-                workflow_directory = getattr(adapter, "workflow_directory", None)
-                if workflow_directory is None:
-                    repository_root = getattr(adapter, "repository_root", None)
-                    if repository_root is None:
-                        raise ValueError("pipeline adapter has no workflow directory")
-                    workflow_directory = repository_root / "workflows" / "bulk_rnaseq"
+                working_directory_for = getattr(adapter, "runner_working_directory", None)
+                if callable(working_directory_for):
+                    project_root = Path(record.results_directory).parent.resolve(strict=True)
+                    working_directory = Path(working_directory_for(project_root)).resolve(
+                        strict=True
+                    )
+                else:
+                    workflow_directory = getattr(adapter, "workflow_directory", None)
+                    if workflow_directory is None:
+                        repository_root = getattr(adapter, "repository_root", None)
+                        if repository_root is None:
+                            raise ValueError("pipeline adapter has no workflow directory")
+                        workflow_directory = repository_root / "workflows" / "bulk_rnaseq"
+                    working_directory = Path(workflow_directory).resolve(strict=True)
+                if not working_directory.is_dir():
+                    raise ValueError("pipeline adapter working directory is not a directory")
                 process = subprocess.Popen(
                     command,
-                    cwd=workflow_directory,
+                    cwd=working_directory,
                     env=environment,
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,

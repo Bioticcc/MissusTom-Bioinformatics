@@ -21,7 +21,8 @@ test("Dashboard runs the bulk RNA-seq demo through prepare and project endpoints
 });
 
 test("Desktop dialogs use app-owned pickers and host-owned text exports", () => {
-  assert.match(source, /import \{ selectFiles \} from "\.\.\/native"/);
+  assert.match(source, /import \{ isDesktopShell, selectFiles \} from "\.\.\/native"/);
+  assert.match(source, /\{isDesktopShell\(\) && \([\s\S]*Open project[\s\S]*\)\}/);
   assert.match(source, /selectFiles\("Open saved Missus Tom project"\)/);
   assert.match(source, /openProject\(selected\[0\]\)/);
   assert.match(nativeSource, /import \{ open \} from "@tauri-apps\/plugin-dialog"/);

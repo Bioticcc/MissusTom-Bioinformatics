@@ -37,6 +37,10 @@ class BulkRnaSeqAdapter(PipelineAdapter):
     def workflow_directory(self) -> Path:
         return self.repository_root / "workflows" / "bulk_rnaseq"
 
+    def runner_working_directory(self, project_root: Path) -> Path:
+        """Keep Nextflow session state in the writable saved project directory."""
+        return project_root
+
     def expected_stages(self) -> list[PlannedStage]:
         return [
             PlannedStage(

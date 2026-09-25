@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { CheckList } from "../components/CheckList";
 import { LiveCommandLog } from "../components/LiveCommandLog";
-import { selectFiles } from "../native";
+import { isDesktopShell, selectFiles } from "../native";
 import type {
   CommandLogChunk,
   DemoPrepareJob,
@@ -174,9 +174,11 @@ export function Dashboard({
           <button type="button" className="button secondary large" onClick={onNew}>
             New project
           </button>
-          <button type="button" className="button secondary large" onClick={() => void chooseProject()} disabled={Boolean(openingPath)}>
-            Open project
-          </button>
+          {isDesktopShell() && (
+            <button type="button" className="button secondary large" onClick={() => void chooseProject()} disabled={Boolean(openingPath)}>
+              Open project
+            </button>
+          )}
         </div>
       </header>
 

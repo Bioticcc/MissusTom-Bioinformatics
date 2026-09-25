@@ -15,7 +15,9 @@ import pytest
 
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.run import RunRecord, RunStartStage, RunStatus
+from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
 from missus_tom.services import runs as runs_module
+from missus_tom.services.projects import ProjectHistoryStore, save_project
 from missus_tom.services.runs import ProcessIdentity, RunManager
 
 
@@ -796,6 +798,68 @@ def test_container_cleanup_follows_nextflow_execution_profile(
     docker_run = manager.start(ProjectManifest.model_validate(docker_payload))
     assert docker_run.container_cleanup_required is True
     assert wait_for_terminal(manager, docker_run.job_identifier).status == RunStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("pipeline_version", "project_name"),
+    [
+        ("0.4.0", "ordinary-project"),
+        ("0.3.0-full-demo", "synthetic-demo-project"),
+    ],
+)
+def test_bulk_nextflow_runs_from_project_root_when_workflow_is_packaged_read_only(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    pipeline_version: str,
+    project_name: str,
+) -> None:
+    packaged_root = tmp_path / "packaged-resources"
+    workflow = packaged_root / "workflows" / "bulk_rnaseq"
+    workflow.mkdir(parents=True)
+    main_nf = workflow / "main.nf"
+    main_nf.touch()
+    workflow.chmod(0o555)
+    packaged_root.chmod(0o555)
+    request.addfinalizer(lambda: workflow.chmod(0o755))
+    request.addfinalizer(lambda: packaged_root.chmod(0o755))
+    monkeypatch.setenv("MISSUS_TOM_RESOURCE_ROOT", str(packaged_root))
+
+    project_root = tmp_path / project_name
+    manifest_payload["pipeline_version"] = pipeline_version
+    manifest_payload["output_directory"] = str(project_root)
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    adapter = BulkRnaSeqAdapter()
+    monkeypatch.setattr(adapter, "validate_execution", lambda *_args, **_kwargs: None)
+    original_popen = subprocess.Popen
+    captured: dict[str, Any] = {}
+
+    def fake_popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        captured["command"] = command
+        captured["cwd"] = kwargs["cwd"]
+        captured["work_exists"] = Path(command[command.index("-work-dir") + 1]).is_dir()
+        create_nextflow_state = (
+            "from pathlib import Path; "
+            "state = Path('.nextflow'); "
+            "state.mkdir(); "
+            "(state / 'history.lock').touch()"
+        )
+        return original_popen([sys.executable, "-c", create_nextflow_state], **kwargs)
+
+    monkeypatch.setattr(runs_module.subprocess, "Popen", fake_popen)
+    manager = RunManager(adapter, registry_directory=tmp_path / "state")
+    started = manager.start(manifest)
+
+    assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.COMPLETED
+    command = captured["command"]
+    assert captured["cwd"] == project_root.resolve()
+    assert captured["work_exists"] is True
+    assert command[command.index("run") + 1] == str(main_nf.resolve())
+    assert command[command.index("-work-dir") + 1] == str(project_root / "work")
+    assert (project_root / ".nextflow" / "history.lock").is_file()
+    assert not (workflow / ".nextflow").exists()
 
 
 def test_docker_cleanup_failure_holds_admission_and_retry_can_finish(
