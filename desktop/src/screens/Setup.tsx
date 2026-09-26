@@ -17,7 +17,7 @@ import {
 } from "../setupState";
 
 const pipelines: Array<{ id: SetupPipelineIdentifier; name: string; detail: string }> = [
-  { id: "bulk-rnaseq", name: "Bulk RNA-seq", detail: "Human paired-end RNA-seq setup and controlled workflow checks." },
+  { id: "bulk-rnaseq", name: "Bulk RNA-seq", detail: "Paired-end RNA-seq setup, managed references, and controlled workflow checks." },
   { id: "ont-analysis", name: "Oxford Nanopore ONT", detail: "Mouse modified-base BAM setup, with ONT-specific local tools." },
 ];
 

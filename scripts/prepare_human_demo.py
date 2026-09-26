@@ -247,7 +247,6 @@ def _manifest(
     transcriptome: Path,
     kallisto_index: Path,
     annotation_gtf: Path,
-    biomart: Path,
     selected: list[tuple[str, int, FastqPair]],
     created_at: datetime,
     pair_limit: int,
@@ -269,14 +268,15 @@ def _manifest(
             }
         )
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
+        "reference_mode": "existing-index",
         "project_name": "Human bulk RNA-seq demo",
         "project_identifier": str(uuid5(NAMESPACE_URL, str(output_root.resolve()))),
         "created_at": created_at.isoformat(),
         "input_directory": str(input_directory),
         "output_directory": str(project_directory),
         "pipeline_identifier": "bulk-rnaseq",
-        "pipeline_version": "0.3.0-full-demo",
+        "pipeline_version": "0.5.0",
         "organism": "Homo sapiens",
         "reference_genome": "GRCh38",
         "annotation_source": "GENCODE v49",
@@ -284,7 +284,6 @@ def _manifest(
             "transcriptome_fasta": str(transcriptome),
             "kallisto_index": str(kallisto_index),
             "annotation_gtf": str(annotation_gtf),
-            "biomart": str(biomart),
         },
         "library_type": "large RNA",
         "read_layout": "paired-end",
@@ -299,7 +298,6 @@ def _manifest(
             }
         ],
         "parameters": {
-            "execution_mode": "human-demo",
             "read_pairs_per_sample": pair_limit,
             "adapter_r1": "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
             "adapter_r2": "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
@@ -325,7 +323,7 @@ def prepare(args: argparse.Namespace) -> None:
     transcriptome = args.transcriptome.resolve(strict=True)
     kallisto_index = args.kallisto_index.resolve(strict=True)
     annotation_gtf = args.annotation_gtf.resolve(strict=True)
-    biomart = args.biomart.resolve(strict=True)
+    biomart = args.biomart.resolve(strict=True) if args.biomart is not None else None
     output_root = args.output_root.resolve(strict=False)
 
     if output_root == fastq_root or fastq_root in output_root.parents:
@@ -434,16 +432,16 @@ def prepare(args: argparse.Namespace) -> None:
         "kallisto_index": str(kallisto_index),
         "kallisto_index_sha256": _sha256(kallisto_index),
         "annotation_gtf": str(annotation_gtf),
-        "biomart": str(biomart),
         "samples": provenance_samples,
     }
+    if biomart is not None:
+        provenance["biomart"] = str(biomart)
     _write_json(output_root / "provenance" / "source_map.json", provenance)
     manifest = _manifest(
         output_root,
         transcriptome,
         kallisto_index,
         annotation_gtf,
-        biomart,
         selected,
         created_at,
         args.pairs_per_sample,
@@ -463,7 +461,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transcriptome", type=Path, required=True)
     parser.add_argument("--kallisto-index", type=Path, required=True)
     parser.add_argument("--annotation-gtf", type=Path, required=True)
-    parser.add_argument("--biomart", type=Path, required=True)
+    parser.add_argument(
+        "--biomart",
+        type=Path,
+        default=None,
+        help="Optional legacy BioMart table path recorded in provenance only",
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--pairs-per-sample", type=int, default=1_000_000)
     parser.add_argument("--force", action="store_true")

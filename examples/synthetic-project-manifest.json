@@ -1,12 +1,13 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
+  "reference_mode": "build",
   "project_name": "Synthetic paired-end pilot",
   "project_identifier": "11111111-2222-4333-8444-555555555555",
   "created_at": "2026-01-15T12:00:00Z",
   "input_directory": "/nonexistent/example/fastq",
   "output_directory": "/nonexistent/example/missus-tom-project",
   "pipeline_identifier": "bulk-rnaseq",
-  "pipeline_version": "0.1.0-preview",
+  "pipeline_version": "0.5.0",
   "organism": "Mus musculus",
   "reference_genome": "GRCm39",
   "annotation_source": "GENCODE release to be confirmed",
@@ -16,7 +17,7 @@
   },
   "library_type": "total RNA",
   "read_layout": "paired-end",
-  "strandedness": "unknown",
+  "strandedness": "reverse",
   "samples": [
     {
       "sample_id": "synthetic_control_01",

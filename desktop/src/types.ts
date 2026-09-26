@@ -87,8 +87,12 @@ export interface Comparison {
   intervention: string | null;
 }
 
+export type ManifestSchemaVersion = "1.0.0" | "1.1.0";
+export type BulkReferenceMode = "build" | "existing-index";
+export type BulkStrandedness = "unstranded" | "forward" | "reverse";
+
 export interface ProjectManifest {
-  schema_version: "1.0.0";
+  schema_version: ManifestSchemaVersion;
   project_name: string;
   project_identifier: string;
   created_at: string;
@@ -96,13 +100,15 @@ export interface ProjectManifest {
   output_directory: string;
   pipeline_identifier: "bulk-rnaseq" | "ont-analysis";
   pipeline_version: string;
+  reference_mode?: BulkReferenceMode;
   organism: string;
   reference_genome: string;
   annotation_source: string;
   reference_resources: Record<string, string>;
+  reference_provenance?: Record<string, unknown> | null;
   library_type: string;
   read_layout: "paired-end" | "single-end";
-  strandedness: "unstranded" | "forward" | "reverse" | "unknown";
+  strandedness: BulkStrandedness | "unknown";
   samples: Array<{
     sample_id: string;
     r1_files: string[];

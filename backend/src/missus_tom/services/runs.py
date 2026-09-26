@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,7 +24,9 @@ from missus_tom.config import settings
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.run import ResultArtifact, RunLog, RunRecord, RunStartStage, RunStatus
 from missus_tom.pipeline_adapters.base import PipelineAdapter
+from missus_tom.services.bulk_references import BulkReferenceManager, ReferenceCommandRunner
 from missus_tom.services.dependencies import runtime_environment
+from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resource_monitor import CHECK_INTERVAL_SECONDS, ResourceMonitor
 
 ACTIVE_STATUSES = {
@@ -63,11 +66,19 @@ class RunLocks:
 class RunManager:
     """Launch, monitor, recover, and stop only controlled adapter commands."""
 
-    def __init__(self, adapter: object, *, registry_directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        adapter: object,
+        *,
+        registry_directory: Path | None = None,
+        reference_manager: BulkReferenceManager | None = None,
+    ) -> None:
         self.adapter = adapter
         self._using_default_registry = registry_directory is None
         self.registry_directory = registry_directory or settings.state_directory / "runs"
+        self._reference_manager = reference_manager
         self._records: dict[str, RunRecord] = {}
+        self._preparation_processes: dict[str, subprocess.Popen[str]] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._identities: dict[str, ProcessIdentity] = {}
         self._locks: dict[str, RunLocks] = {}
@@ -222,9 +233,12 @@ class RunManager:
             record.error_message = reason
             self._persist_safely(record)
             process = self._processes.get(job_identifier)
+            preparation_process = self._preparation_processes.get(job_identifier)
             identity = self._identities.get(job_identifier) or self._identity_from_record(record)
 
-        if process is not None:
+        if preparation_process is not None:
+            self._signal_process_group(preparation_process, signal.SIGTERM)
+        elif process is not None:
             self._signal_process_group(process, signal.SIGTERM)
         elif identity is not None:
             self._signal_verified_identity(identity, signal.SIGTERM)
@@ -353,11 +367,31 @@ class RunManager:
                     return
                 record.status = RunStatus.PREPARING
                 adapter = self._adapter_for_record(record)
-                record.current_stage = "Starting workflow runner"
+                record.current_stage = "Preparing workflow inputs"
                 record.started_at = datetime.now(UTC)
                 self._persist(record)
                 command = list(record.command)
                 log_path = Path(record.log_path)
+
+            try:
+                self._prepare_bulk_references_if_needed(job_identifier, adapter)
+            except ValueError as exc:
+                with self._lock:
+                    failed_record = self._records.get(job_identifier)
+                    if failed_record is not None and failed_record.status == RunStatus.CANCELLING:
+                        self._finish_cancelled_before_launch(failed_record)
+                        return
+                self._fail_before_completion(job_identifier, str(exc))
+                return
+
+            with self._lock:
+                record = self._records[job_identifier]
+                if record.status == RunStatus.CANCELLING:
+                    self._finish_cancelled_before_launch(record)
+                    return
+                command = list(record.command)
+                record.current_stage = "Starting workflow runner"
+                self._persist(record)
 
             log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(log_path.parent, 0o700)
@@ -365,7 +399,7 @@ class RunManager:
             if command and command[0] == "nextflow":
                 environment["NXF_ANSI_LOG"] = "false"
                 environment["NXF_OPTS"] = self._nxf_options(command)
-            descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as log_handle:
                 log_handle.write(f"Missus Tom {record.pipeline_identifier} workflow\n")
                 log_handle.write("Command argument array: " + json.dumps(command) + "\n")
@@ -601,6 +635,145 @@ class RunManager:
         self._persist_safely(record)
         self._append_terminal_log_marker(record)
         self._release_locks(record.job_identifier)
+
+    def _prepare_bulk_references_if_needed(
+        self, job_identifier: str, adapter: PipelineAdapter
+    ) -> None:
+        requires = getattr(adapter, "requires_run_reference_preparation", None)
+        if not callable(requires):
+            return
+        project_root = Path(self._records[job_identifier].results_directory).parent
+        manifest = read_project_manifest(project_root / "input_manifest" / "project_manifest.json")
+        if not requires(manifest):
+            return
+
+        with self._lock:
+            record = self._records[job_identifier]
+            if record.status == RunStatus.CANCELLING:
+                return
+            record.current_stage = "Preparing references"
+            self._persist(record)
+            log_path = Path(record.log_path)
+
+        prepare = getattr(adapter, "prepare_run_references", None)
+        if not callable(prepare):
+            raise ValueError(
+                "reference preparation is required but not implemented for this adapter"
+            )
+
+        def log_writer(message: str) -> None:
+            self._append_log_line_safely(
+                log_path,
+                f"{self._format_log_timestamp(datetime.now(UTC))} {message}\n",
+            )
+
+        execution_manifest, _prepared = prepare(
+            manifest,
+            job_identifier=job_identifier,
+            manager=self._reference_manager,
+            log_writer=log_writer,
+            command_runner=self._reference_command_runner(
+                job_identifier,
+                memory_gb=manifest.resource_profile.memory_gb,
+            ),
+            start_stage=self._records[job_identifier].start_stage,
+            cancellation_check=lambda: self._reference_cancel_requested(job_identifier),
+        )
+
+        with self._lock:
+            record = self._records[job_identifier]
+            if record.status == RunStatus.CANCELLING:
+                return
+            replace_manifest = getattr(adapter, "replace_command_manifest", None)
+            if callable(replace_manifest):
+                record.command = replace_manifest(record.command, execution_manifest)
+            record.execution_manifest_path = str(execution_manifest)
+            self._persist(record)
+
+    def _reference_cancel_requested(self, job_identifier: str) -> bool:
+        with self._lock:
+            record = self._records.get(job_identifier)
+            return record is None or record.status == RunStatus.CANCELLING
+
+    def _reference_command_runner(
+        self,
+        job_identifier: str,
+        *,
+        memory_gb: float,
+    ) -> ReferenceCommandRunner:
+        def run(
+            command: Sequence[str],
+            environment: Mapping[str, str] | None,
+        ) -> subprocess.CompletedProcess[str]:
+            command_list = list(command)
+            with self._lock:
+                project_root = Path(self._records[job_identifier].results_directory).parent
+            monitor = ResourceMonitor(project_root)
+            memory_limit_bytes = int(memory_gb * 1024**3)
+            process = subprocess.Popen(
+                command_list,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(environment) if environment is not None else None,
+                start_new_session=True,
+            )
+            with self._lock:
+                self._preparation_processes[job_identifier] = process
+            term_sent_at: float | None = None
+            stop_reason: str | None = None
+            next_resource_check = time.monotonic() + CHECK_INTERVAL_SECONDS
+            try:
+                while True:
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.2)
+                        if stop_reason:
+                            stderr = (
+                                stderr or ""
+                            ).rstrip() + f"\nReference preparation stopped: {stop_reason}\n"
+                        return subprocess.CompletedProcess(
+                            command_list,
+                            process.returncode,
+                            stdout,
+                            stderr,
+                        )
+                    except subprocess.TimeoutExpired:
+                        now = time.monotonic()
+                        if stop_reason is None and self._reference_cancel_requested(job_identifier):
+                            stop_reason = "cancellation requested"
+                        if stop_reason is None and now >= next_resource_check:
+                            pressure_reason = monitor.check()
+                            rss_bytes = self._linux_process_rss_bytes(process.pid)
+                            if rss_bytes is not None and rss_bytes > memory_limit_bytes:
+                                pressure_reason = (
+                                    f"Kallisto index memory use {rss_bytes / 1024**3:.1f} GiB "
+                                    f"exceeded the configured {memory_gb:.1f} GiB budget"
+                                )
+                            if pressure_reason:
+                                stop_reason = pressure_reason
+                            next_resource_check = now + CHECK_INTERVAL_SECONDS
+                        if stop_reason is None:
+                            continue
+                        if term_sent_at is None:
+                            self._signal_process_group(process, signal.SIGTERM)
+                            term_sent_at = now
+                        elif now - term_sent_at >= TERM_GRACE_SECONDS:
+                            self._signal_process_group(process, signal.SIGKILL)
+            finally:
+                with self._lock:
+                    self._preparation_processes.pop(job_identifier, None)
+
+        return run
+
+    @staticmethod
+    def _linux_process_rss_bytes(process_id: int) -> int | None:
+        try:
+            for line in Path(f"/proc/{process_id}/status").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            return None
+        return None
 
     def _fail_before_completion(self, job_identifier: str, message: str) -> None:
         with self._lock:

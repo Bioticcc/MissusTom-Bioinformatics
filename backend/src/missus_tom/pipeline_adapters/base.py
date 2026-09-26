@@ -92,3 +92,8 @@ class PipelineAdapter(ABC):
     def requires_resume(self) -> bool:
         """Whether this runner supports only restartable execution semantics."""
         return False
+
+    def requires_run_reference_preparation(self, manifest: ProjectManifest) -> bool:
+        """Whether the runner performs application-owned reference preparation before launch."""
+        del manifest
+        return False

@@ -1,10 +1,19 @@
 # Bulk RNA-seq workflow
 
-This Nextflow DSL2 workflow executes human paired-end bulk RNA-seq projects from
-a saved manifest. It accepts any number of included samples, paired FASTQ lanes,
+This Nextflow DSL2 workflow executes paired-end bulk RNA-seq projects from a
+saved manifest. It accepts any number of included samples, paired FASTQ lanes,
 and manifest-defined two-group comparisons with optional explicit intervention
-filters. A compatible kallisto index and human BioMart annotation table must be
-supplied.
+filters. Quantification requires `reference_resources.kallisto_index`. Every run
+requires `reference_resources.transcript_to_gene`, a tab-separated mapping with
+required columns `transcript_id` and `gene_id` plus optional `gene_name`,
+`gene_biotype`, and `transcript_biotype`.
+
+Users do not normally create those two workflow inputs manually. The application
+accepts matching transcriptome FASTA and GTF files, validates transcript-ID
+overlap, builds or reuses an atomic managed-Kallisto index cache, normalizes the
+GTF mapping, and writes an immutable per-run execution manifest. Advanced
+existing-index projects supply the index plus a compatible GTF or normalized
+mapping. Analysis-only projects require only the compatible mapping contract.
 
 Processes:
 
@@ -14,12 +23,23 @@ Processes:
 - `FASTQC_CLEAN`
 - `MULTIQC_CLEAN`
 - `KALLISTO_QUANT`
-- `FULL_HUMAN_ANALYSIS`
+- `BULK_RNASEQ_ANALYSIS`
 
-The analysis process imports kallisto estimates, runs separate mRNA and lncRNA
-DESeq2 analyses, and writes normalized matrices, differential-expression tables,
-PCA, heatmaps, volcano/MA plots, distribution plots, sample distances, and
-comparison summaries.
+The analysis process imports kallisto estimates with tximport using the manifest
+mapping, runs an all-gene DESeq2 model (`~condition`) for each comparison with
+positive log2 fold change toward the manifest numerator, and optionally runs
+protein-coding (mRNA) and lncRNA class analyses when `gene_biotype` is present.
+Optional lncRNA outputs include genes whose `gene_biotype` is exactly one of:
+`lncRNA`, `lincRNA`, `antisense`, `sense_intronic`, `sense_overlapping`,
+`bidirectional_promoter_lncrna`, `macro_lncrna`, or `3prime_overlapping_ncrna`.
+Optional mRNA outputs require `gene_biotype == protein_coding`. When a class
+analysis is skipped, a `skip_rationale.txt` file records why. Outputs include
+normalized matrices, differential-expression tables, PCA, heatmaps, volcano/MA
+plots, distribution plots, sample distances, comparison summaries, and
+provenance tables (sample metadata, mapping summary, analysis parameters, and
+software versions). `summary/output_contract.tsv` marks optional mRNA and lncRNA
+DE outputs as `generated` or `skipped` from class availability; all-gene DE is
+reported as `generated` when analysis completes.
 
 `local` is the normal Nextflow profile. It sets `docker.enabled = false` and
 runs these processes with managed native tools on the local executor. `docker`
@@ -96,9 +116,11 @@ audit behavior.
 
 Runs start with quantification by default, including FASTQ QC, trimming,
 kallisto, and the full downstream analysis. Analysis-only runs skip FASTQ
-processing and consume each sample's manifest-assigned Kallisto `abundance.tsv`,
-falling back to `results/counts/kallisto/<sample_id>/abundance.tsv` for projects
-previously quantified by Missus Tom.
+processing and kallisto index use; they still require
+`reference_resources.transcript_to_gene` and consume each sample's manifest-assigned
+Kallisto `abundance.tsv` under the selected input directory. The explicit input
+assignment keeps preflight, backend execution, and Nextflow on the same
+reproducible contract.
 
 The backend is the supported execution boundary. It validates the manifest,
 input containment, references, parameters, comparison group sizes, and runtime

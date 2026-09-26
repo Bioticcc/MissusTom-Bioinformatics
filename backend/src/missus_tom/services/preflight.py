@@ -9,8 +9,25 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from missus_tom.config import settings
-from missus_tom.models.manifest import ExecutionProfile, ProjectManifest, ReadLayout
+from missus_tom.models.manifest import (
+    BulkReferenceMode,
+    ExecutionProfile,
+    ProjectManifest,
+    ReadLayout,
+)
 from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
+from missus_tom.services.bulk_references import (
+    LEGACY_PIPELINE_VERSIONS,
+    PRODUCTION_PIPELINE_VERSION,
+    BulkReferenceError,
+    assess_fasta_gtf_overlap,
+    bulk_analysis_only,
+    infer_bulk_reference_mode,
+    iter_fasta_transcript_ids,
+    legacy_biomart_migration_message,
+    parse_gtf_transcript_records,
+    read_supplied_transcript_to_gene,
+)
 from missus_tom.services.dependencies import (
     _managed_root,
     dependency_installer,
@@ -225,7 +242,7 @@ def system_preflight() -> SystemPreflightResult:
             label="Bulk RNA-seq adapter",
             status=CheckStatus.PASSED if settings.execution_enabled else CheckStatus.NOT_CONFIGURED,
             message=(
-                "Human paired-end bulk RNA-seq execution is enabled"
+                "Paired-end bulk RNA-seq execution is enabled"
                 if settings.execution_enabled
                 else "Execution is disabled in this backend process"
             ),
@@ -343,6 +360,8 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     pairing_errors: list[str] = []
     assigned_fastqs: list[str] = []
     missing_or_unreadable: list[str] = []
+    outside_input: list[str] = []
+    input_root = input_path.resolve(strict=False)
     if not analysis_only:
         for sample in included:
             if manifest.read_layout == ReadLayout.PAIRED_END and (
@@ -358,15 +377,33 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             for filename in [*sample.r1_files, *sample.r2_files]:
                 assigned_fastqs.append(filename)
                 fastq_path = Path(filename)
-                if not fastq_path.is_file() or not os.access(fastq_path, os.R_OK):
+                if (
+                    fastq_path.is_symlink()
+                    or not fastq_path.is_file()
+                    or not os.access(fastq_path, os.R_OK)
+                ):
                     missing_or_unreadable.append(filename)
+                    continue
+                try:
+                    resolved = fastq_path.resolve(strict=True)
+                except OSError:
+                    missing_or_unreadable.append(filename)
+                    continue
+                if not resolved.is_relative_to(input_root):
+                    outside_input.append(filename)
 
     duplicate_assignments = sorted(
         filename for filename, count in Counter(assigned_fastqs).items() if count > 1
     )
-    assignment_failures = bool(pairing_errors or missing_or_unreadable or duplicate_assignments)
+    assignment_failures = bool(
+        pairing_errors or missing_or_unreadable or duplicate_assignments or outside_input
+    )
     if pairing_errors:
         assignment_message = f"Inconsistent mate counts: {', '.join(pairing_errors)}"
+    elif outside_input:
+        assignment_message = (
+            f"{len(outside_input)} assigned FASTQ file(s) are outside the input directory"
+        )
     elif missing_or_unreadable:
         assignment_message = (
             f"{len(missing_or_unreadable)} assigned FASTQ file(s) are missing or unreadable"
@@ -514,37 +551,41 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         )
     )
 
-    replicates: dict[str, set[str]] = defaultdict(set)
+    sample_counts: dict[str, int] = defaultdict(int)
     for sample in included:
-        replicates[sample.condition].add(sample.biological_replicate or sample.sample_id)
+        sample_counts[sample.condition] += 1
     configured_minimum = manifest.parameters.get("minimum_group_size", 2)
-    minimum_is_explicit = "minimum_group_size" in manifest.parameters
     minimum_group_size = (
         configured_minimum
         if isinstance(configured_minimum, int) and not isinstance(configured_minimum, bool)
         else 2
     )
-    comparison_replicates: dict[str, dict[str, set[str]]] = {}
+    comparison_sample_counts: dict[str, dict[str, int]] = {}
     for comparison in manifest.comparisons:
-        counts: dict[str, set[str]] = defaultdict(set)
+        counts: dict[str, int] = defaultdict(int)
         for sample in included:
             intervention = sample.covariates.get("intervention")
             if comparison.intervention and intervention != comparison.intervention:
                 continue
             if sample.condition in (comparison.numerator, comparison.denominator):
-                counts[sample.condition].add(sample.biological_replicate or sample.sample_id)
-        comparison_replicates[comparison.comparison_id] = counts
-    low_replicates = sorted(
+                counts[sample.condition] += 1
+        comparison_sample_counts[comparison.comparison_id] = counts
+    low_sample_groups = sorted(
         f"{comparison.comparison_id}:{group}"
         for comparison in manifest.comparisons
         for group in (comparison.numerator, comparison.denominator)
-        if len(comparison_replicates[comparison.comparison_id].get(group, set()))
-        < minimum_group_size
+        if comparison_sample_counts[comparison.comparison_id].get(group, 0) < minimum_group_size
     )
     if not manifest.comparisons:
-        low_replicates = sorted(
-            group for group, values in replicates.items() if len(values) < minimum_group_size
+        low_sample_groups = sorted(
+            group for group, count in sample_counts.items() if count < minimum_group_size
         )
+    two_sample_groups = sorted(
+        f"{comparison.comparison_id}:{group}"
+        for comparison in manifest.comparisons
+        for group in (comparison.numerator, comparison.denominator)
+        if comparison_sample_counts[comparison.comparison_id].get(group, 0) == 2
+    )
     design_incomplete = bool(unassigned_groups)
     checks.append(
         PreflightCheck(
@@ -555,24 +596,27 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
                 if design_incomplete
                 else (
                     CheckStatus.BLOCKING
-                    if low_replicates and minimum_is_explicit
-                    else (CheckStatus.WARNING if low_replicates else CheckStatus.PASSED)
+                    if low_sample_groups
+                    else (CheckStatus.WARNING if two_sample_groups else CheckStatus.PASSED)
                 )
             ),
             message=(
                 "Complete condition assignments first"
                 if design_incomplete
                 else (
-                    f"Fewer than {minimum_group_size} samples or replicate groups: "
-                    f"{', '.join(low_replicates)}"
+                    f"Fewer than {minimum_group_size} biological samples: "
+                    f"{', '.join(low_sample_groups)}"
                 )
             )
-            if design_incomplete or low_replicates
+            if design_incomplete or low_sample_groups
             else (
-                f"At least {minimum_group_size} sample(s) or replicate group(s) "
-                "per comparison group"
+                "Exactly two biological samples are available for "
+                f"{', '.join(two_sample_groups)}; this meets the operational minimum "
+                "but limits statistical reliability"
+                if two_sample_groups
+                else f"At least {minimum_group_size} biological samples per comparison group"
             ),
-            details={group: len(values) for group, values in sorted(replicates.items())},
+            details=dict(sorted(sample_counts.items())),
         )
     )
 
@@ -626,18 +670,26 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     project_disk = inspect_storage(output_parent)
     checks.append(_disk_preflight_check("project_disk_space", "Project disk space", project_disk))
 
-    required_references = {"biomart"} if analysis_only else {"kallisto_index", "biomart"}
-    unconfigured_references = sorted(required_references - manifest.reference_resources.keys())
-    missing_references = [
-        key for key, value in manifest.reference_resources.items() if not Path(value).is_file()
-    ]
-    if unconfigured_references or missing_references:
-        reference_status = CheckStatus.BLOCKING
-        missing = sorted({*unconfigured_references, *missing_references})
-        reference_message = f"Missing reference resources: {', '.join(missing)}"
+    if manifest.pipeline_identifier == "bulk-rnaseq" and (
+        manifest.pipeline_version == PRODUCTION_PIPELINE_VERSION
+        or manifest.reference_resources.get("annotation_gtf")
+        or manifest.reference_resources.get("transcript_to_gene")
+    ):
+        reference_status = CheckStatus.NOT_CONFIGURED
+        reference_message = "Reference validation uses the 0.5.0 bulk reference contract checks"
     else:
-        reference_status = CheckStatus.PASSED
-        reference_message = f"{len(manifest.reference_resources)} reference resource(s) found"
+        required_references = {"biomart"} if analysis_only else {"kallisto_index", "biomart"}
+        unconfigured_references = sorted(required_references - manifest.reference_resources.keys())
+        missing_references = [
+            key for key, value in manifest.reference_resources.items() if not Path(value).is_file()
+        ]
+        if unconfigured_references or missing_references:
+            reference_status = CheckStatus.BLOCKING
+            missing = sorted({*unconfigured_references, *missing_references})
+            reference_message = f"Missing reference resources: {', '.join(missing)}"
+        else:
+            reference_status = CheckStatus.PASSED
+            reference_message = f"{len(manifest.reference_resources)} reference resource(s) found"
     checks.append(
         PreflightCheck(
             check_id="references",
@@ -671,10 +723,159 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             label="Scientific execution",
             status=CheckStatus.PASSED if settings.execution_enabled else CheckStatus.NOT_CONFIGURED,
             message=(
-                "Human paired-end bulk RNA-seq execution is enabled"
+                "Paired-end bulk RNA-seq execution is enabled"
                 if settings.execution_enabled
                 else "Execution is disabled for this backend process"
             ),
+        )
+    )
+    if manifest.pipeline_identifier == "bulk-rnaseq":
+        checks.extend(_bulk_rnaseq_contract_checks(manifest, analysis_only=analysis_only))
+    return checks
+
+
+def _bulk_rnaseq_contract_checks(
+    manifest: ProjectManifest, *, analysis_only: bool
+) -> list[PreflightCheck]:
+    checks: list[PreflightCheck] = []
+    migration = legacy_biomart_migration_message(manifest)
+    if migration:
+        checks.append(
+            PreflightCheck(
+                check_id="pipeline_version",
+                label="Bulk RNA-seq pipeline version",
+                status=CheckStatus.BLOCKING,
+                message=migration,
+            )
+        )
+        return checks
+
+    if manifest.pipeline_version in LEGACY_PIPELINE_VERSIONS:
+        checks.append(
+            PreflightCheck(
+                check_id="pipeline_version",
+                label="Bulk RNA-seq pipeline version",
+                status=CheckStatus.WARNING,
+                message=(
+                    f"Pipeline version {manifest.pipeline_version} uses the legacy execution "
+                    "contract; new projects should use 0.5.0 with reference_mode."
+                ),
+            )
+        )
+    elif manifest.pipeline_version != PRODUCTION_PIPELINE_VERSION:
+        checks.append(
+            PreflightCheck(
+                check_id="pipeline_version",
+                label="Bulk RNA-seq pipeline version",
+                status=CheckStatus.BLOCKING,
+                message="Unsupported bulk RNA-seq pipeline version",
+            )
+        )
+        return checks
+
+    if manifest.read_layout != ReadLayout.PAIRED_END:
+        checks.append(
+            PreflightCheck(
+                check_id="read_layout",
+                label="Read layout",
+                status=CheckStatus.BLOCKING,
+                message="Bulk RNA-seq execution supports paired-end projects only",
+            )
+        )
+
+    mode = infer_bulk_reference_mode(
+        manifest.reference_resources,
+        explicit_mode=manifest.reference_mode,
+    )
+    if mode is None:
+        checks.append(
+            PreflightCheck(
+                check_id="reference_mode",
+                label="Reference mode",
+                status=CheckStatus.BLOCKING,
+                message="reference_mode must be set for pipeline version 0.5.0 projects",
+            )
+        )
+        return checks
+
+    resources = manifest.reference_resources
+    reference_errors: list[str] = []
+    mapping_path = resources.get("transcript_to_gene")
+    gtf_path = resources.get("annotation_gtf")
+    fasta_path = resources.get("transcriptome_fasta")
+    index_path = resources.get("kallisto_index")
+
+    if mapping_path:
+        try:
+            read_supplied_transcript_to_gene(Path(mapping_path))
+        except BulkReferenceError as exc:
+            reference_errors.append(f"transcript_to_gene: {exc}")
+    elif not gtf_path:
+        reference_errors.append("annotation_gtf or transcript_to_gene is required")
+
+    if gtf_path and not Path(gtf_path).is_file():
+        reference_errors.append("annotation_gtf is missing or unreadable")
+    elif gtf_path:
+        records = parse_gtf_transcript_records(Path(gtf_path))
+        if not records:
+            reference_errors.append(
+                "annotation_gtf does not contain transcript_id and gene_id attributes"
+            )
+        elif fasta_path and Path(fasta_path).is_file():
+            overlap = assess_fasta_gtf_overlap(
+                fasta_ids=iter_fasta_transcript_ids(Path(fasta_path)),
+                gtf_records=records,
+            )
+            if overlap.overlap_fraction < 0.95:
+                reference_errors.append(
+                    "transcriptome FASTA and annotation GTF appear incompatible "
+                    f"({overlap.overlap_fraction:.1%} identifier overlap)"
+                )
+
+    analysis_only_refs = bulk_analysis_only(manifest) or analysis_only
+    if analysis_only_refs:
+        if mode == BulkReferenceMode.BUILD and index_path:
+            reference_errors.append("analysis-only build mode must not include kallisto_index")
+    elif mode == BulkReferenceMode.BUILD:
+        for key in ("transcriptome_fasta", "annotation_gtf"):
+            if not resources.get(key) or not Path(resources[key]).is_file():
+                reference_errors.append(f"{key} is required for build reference mode")
+        if index_path:
+            reference_errors.append("build reference mode must not include kallisto_index")
+    elif mode == BulkReferenceMode.EXISTING_INDEX and (
+        not index_path or not Path(index_path).is_file()
+    ):
+        reference_errors.append("kallisto_index is required for existing-index reference mode")
+
+    compatibility_unverified = (
+        not reference_errors
+        and mode == BulkReferenceMode.EXISTING_INDEX
+        and not (fasta_path and Path(fasta_path).is_file())
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="bulk_reference_contract",
+            label="Bulk reference contract",
+            status=(
+                CheckStatus.BLOCKING
+                if reference_errors
+                else (CheckStatus.WARNING if compatibility_unverified else CheckStatus.PASSED)
+            ),
+            message=(
+                "; ".join(reference_errors)
+                if reference_errors
+                else (
+                    "Existing index compatibility is user-supplied because no transcriptome "
+                    "FASTA was provided for identifier-overlap validation"
+                    if compatibility_unverified
+                    else f"Reference mode {mode.value} is configured with required inputs"
+                )
+            ),
+            details={
+                "reference_mode": mode.value,
+                "analysis_only": analysis_only_refs,
+                "compatibility_unverified": compatibility_unverified,
+            },
         )
     )
     return checks

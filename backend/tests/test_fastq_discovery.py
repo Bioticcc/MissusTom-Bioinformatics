@@ -40,6 +40,28 @@ def test_missing_mate_is_reported(tmp_path: Path) -> None:
     assert any("Missing R2" in warning for warning in result.samples[0].warnings)
 
 
+def test_missing_r1_mate_is_reported(tmp_path: Path) -> None:
+    make_files(tmp_path, "orphan_R2.fq.gz")
+    result = discover_fastqs(str(tmp_path))
+
+    assert result.samples[0].pairing_status == PairingStatus.UNMATCHED
+    assert any("Missing R1" in warning for warning in result.samples[0].warnings)
+
+
+def test_multiple_samples_remain_separate(tmp_path: Path) -> None:
+    make_files(
+        tmp_path,
+        "alpha_R1.fastq.gz",
+        "alpha_R2.fastq.gz",
+        "beta_R1.fq.gz",
+        "beta_R2.fq.gz",
+    )
+    result = discover_fastqs(str(tmp_path))
+
+    assert [sample.sample_id for sample in result.samples] == ["alpha", "beta"]
+    assert all(sample.pairing_status == PairingStatus.PAIRED for sample in result.samples)
+
+
 def test_duplicate_matches_are_ambiguous(tmp_path: Path) -> None:
     make_files(tmp_path, "dup_R1.fastq", "dup_R1.fq", "dup_R2.fastq")
     result = discover_fastqs(str(tmp_path))

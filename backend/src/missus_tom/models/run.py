@@ -103,6 +103,7 @@ class RunRecord(BaseModel):
     holds_admission: bool = False
     container_cleanup_required: bool = False
     container_cleanup_verified_at: datetime | None = None
+    execution_manifest_path: str | None = None
 
 
 class RunLog(BaseModel):

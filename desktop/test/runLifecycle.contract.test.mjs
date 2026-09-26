@@ -23,3 +23,15 @@ test("run start remains natively busy until authoritative polling reconciles it"
     /generation !== runLifecycleGeneration\.current/,
   );
 });
+
+test("build-mode projects can quantify before a cached index exists", () => {
+  assert.match(runPlanSource, /manifest\?\.reference_mode === "build"/);
+  assert.match(runPlanSource, /reference_resources\.transcriptome_fasta/);
+  assert.match(runPlanSource, /reference_resources\.annotation_gtf/);
+  assert.match(runPlanSource, /reference_resources\.kallisto_index/);
+  assert.match(runPlanSource, /includedSamples\.length > 0/);
+  assert.doesNotMatch(
+    runPlanSource,
+    /!isOntPipeline\s*&&\s*manifest\?\.reference_resources\.kallisto_index/,
+  );
+});

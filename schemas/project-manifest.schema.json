@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://yanlab.example/schemas/missus-tom/project-manifest-1.0.0.json",
+  "$id": "https://yanlab.example/schemas/missus-tom/project-manifest.json",
   "title": "Missus Tom project manifest",
   "type": "object",
   "additionalProperties": false,
@@ -29,7 +29,8 @@
     "pipeline_status"
   ],
   "properties": {
-    "schema_version": { "const": "1.0.0" },
+    "schema_version": { "enum": ["1.0.0", "1.1.0"] },
+    "reference_mode": { "enum": ["build", "existing-index"] },
     "project_name": { "type": "string", "minLength": 1, "maxLength": 120 },
     "project_identifier": { "type": "string", "format": "uuid" },
     "created_at": { "type": "string", "format": "date-time" },
@@ -43,6 +44,10 @@
     "reference_resources": {
       "type": "object",
       "additionalProperties": { "type": "string", "pattern": "^/" }
+    },
+    "reference_provenance": {
+      "type": ["object", "null"],
+      "additionalProperties": true
     },
     "library_type": { "type": "string", "minLength": 1 },
     "read_layout": { "enum": ["paired-end", "single-end"] },
@@ -73,6 +78,80 @@
       "enum": ["draft", "validated", "planned", "queued", "preparing", "running", "completed", "failed", "cancelled"]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "pipeline_identifier": { "const": "bulk-rnaseq" },
+          "schema_version": { "const": "1.1.0" }
+        },
+        "required": ["pipeline_identifier", "schema_version"]
+      },
+      "then": { "required": ["reference_mode"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "pipeline_identifier": { "const": "bulk-rnaseq" },
+          "schema_version": { "const": "1.1.0" },
+          "parameters": {
+            "properties": { "start_stage": { "const": "analysis" } },
+            "required": ["start_stage"]
+          }
+        },
+        "required": ["pipeline_identifier", "schema_version", "parameters"]
+      },
+      "then": {
+        "properties": {
+          "reference_resources": {
+            "anyOf": [
+              { "required": ["annotation_gtf"] },
+              { "required": ["transcript_to_gene"] }
+            ]
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": {
+            "pipeline_identifier": { "const": "bulk-rnaseq" },
+            "schema_version": { "const": "1.1.0" },
+            "reference_mode": { "const": "build" }
+          },
+          "required": ["pipeline_identifier", "schema_version", "reference_mode"]
+        },
+        "then": {
+          "properties": {
+            "reference_resources": {
+              "required": ["transcriptome_fasta", "annotation_gtf"],
+              "not": { "required": ["kallisto_index"] }
+            }
+          }
+        },
+        "else": {
+          "if": {
+            "properties": {
+              "pipeline_identifier": { "const": "bulk-rnaseq" },
+              "schema_version": { "const": "1.1.0" },
+              "reference_mode": { "const": "existing-index" }
+            },
+            "required": ["pipeline_identifier", "schema_version", "reference_mode"]
+          },
+          "then": {
+            "properties": {
+              "reference_resources": {
+                "required": ["kallisto_index"],
+                "anyOf": [
+                  { "required": ["annotation_gtf"] },
+                  { "required": ["transcript_to_gene"] }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "scalar": { "type": ["string", "number", "integer", "boolean", "null"] },
     "scalarMap": {

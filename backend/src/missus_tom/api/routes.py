@@ -328,19 +328,16 @@ def get_bulk_rnaseq_demo_project() -> ApiResponse[HumanDemoProject]:
 @router.post(f"{settings.api_prefix}/runs/start", response_model=ApiResponse[RunRecord])
 def post_run_start(request: RunStartRequest) -> ApiResponse[RunRecord]:
     adapter = _adapter_for(request.manifest)
-    checks = adapter.validate_project(request.manifest)
-    analysis_only_ignored_checks = (
-        {"fastq_pairing", "references"}
-        if request.manifest.pipeline_identifier == "bulk-rnaseq"
-        and request.start_stage.value == "analysis"
-        else set()
+    validation_manifest = request.manifest.model_copy(
+        update={
+            "parameters": {
+                **request.manifest.parameters,
+                "start_stage": request.start_stage.value,
+            }
+        }
     )
-    blocking = [
-        check.message
-        for check in checks
-        if check.status.value == "blocking_failure"
-        and check.check_id not in analysis_only_ignored_checks
-    ]
+    checks = adapter.validate_project(validation_manifest)
+    blocking = [check.message for check in checks if check.status.value == "blocking_failure"]
     if blocking:
         raise HTTPException(
             status_code=409,
