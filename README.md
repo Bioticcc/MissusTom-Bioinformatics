@@ -15,16 +15,16 @@ Clean-machine GUI installation has not yet been verified.
 
 ## Available pipelines
 
-- **Human paired-end Bulk RNA-seq** prepares and runs quality checks, trimming,
-  transcript quantification, and two-group differential-expression analysis for
-  human paired-end data.
+- **Paired-end Bulk RNA-seq** prepares compatible transcriptome references and
+  runs quality checks, trimming, transcript quantification, and manifest-defined
+  two-group differential-expression analysis.
 - **One-sample mouse ONT modified-base analysis** works with existing mouse
   pass modBAM files, retaining modified-base calls for alignment, coverage, and
   descriptive 5mC/5hmC exploration.
 
 The pipelines are deliberately separate. Bulk RNA-seq does not currently
-support single-end data, non-human projects, index construction, or
-batch/covariate models. ONT currently supports one mouse GRCm38p6 sample only;
+support single-end data, batch/covariate statistical models, or automatic
+reference downloads. ONT currently supports one mouse GRCm38p6 sample only;
 it does not re-basecall reads or provide multi-sample comparisons, DMR/DhMR,
 enrichment, or human ONT analysis.
 
@@ -41,11 +41,14 @@ fixture locally (when needed) and opens it for a controlled local-profile run
 once Bulk managed dependencies are installed. The ONT synthetic fixture remains
 a non-executable UI placeholder.
 
-Bulk RNA-seq can start from raw paired reads, which require a compatible
-kallisto index, or from compatible existing per-sample `abundance.tsv`
-quantifications in analysis-only mode. Both routes require the needed
-annotation/BioMart data and host software. ONT requires locally supplied pass
-modBAM files and mouse reference resources. The application does not download
+Bulk RNA-seq normally starts from raw paired reads plus a transcriptome FASTA
+and matching GTF. Missus Tom validates transcript identifiers, creates or
+reuses a managed Kallisto index, derives transcript-to-gene metadata, and runs:
+paired FASTQ → raw QC → Cutadapt → clean QC → Kallisto → tximport/DESeq2.
+An advanced path accepts an existing compatible Kallisto index, and
+analysis-only mode accepts existing per-sample `abundance.tsv` files plus
+compatible annotation. BioMart queries and manually prepared human BioMart
+tables are not part of the normal workflow. The application does not download
 project inputs or reference genomes.
 
 The managed ONT installer downloads the reviewed official Dorado 2.1.2 archive
@@ -81,11 +84,17 @@ proceed offline when the project's reference files are already on the machine.
 
 1. Open **Setup** and prepare one or both pipeline environments.
 2. Try **Run Bulk RNA-seq Demo** on the Dashboard for a quick synthetic bulk
-   smoke path, or select **New project**, choose a pipeline, and provide its
-   inputs and required reference files.
-3. Confirm the project details, save the project, and review the run plan.
-4. Select **Run pipeline** and follow progress in **Jobs**.
-5. Open **Results** to see files produced for that project.
+   smoke path, or select **New project → Bulk RNA-seq** and scan a paired-FASTQ
+   directory.
+3. Confirm sample pairings and biological conditions, choose matching
+   transcriptome FASTA/GTF references, select strandedness and trimming
+   settings, and define numerator-versus-denominator comparisons.
+4. Validate and save the project, then review the run plan. Reference
+   preparation occurs through the same normal local run path.
+5. Select **Run pipeline** and follow preparation and workflow progress in
+   **Jobs**.
+6. Open **Results** to inspect QC, trimmed reads, Kallisto output, normalized
+   expression, differential-expression tables/figures, logs, and provenance.
 
 Use **Recent projects** to reopen a saved project. Bulk RNA-seq projects define
 the two groups to compare. ONT projects select one mouse sample and do not
@@ -134,11 +143,23 @@ overview](docs/mvp_architecture.md).
   runtime state are not included in releases.
 - Normal bulk runs use the local Nextflow profile and managed native tools.
   The Docker profile is retained for regression.
+- The generic reference/statistical path is covered with synthetic
+  transcript/gene identifiers; support for every organism or annotation
+  convention is not claimed. FASTA and GTF files must represent the same
+  transcript annotation release.
+- Differential expression is limited to independent biological samples with
+  `~ condition` and explicit pairwise contrasts. Batch, paired-patient,
+  longitudinal, and interaction designs are not modeled.
+- An existing Kallisto index cannot prove its own annotation compatibility.
+  Supply its original transcriptome FASTA when available so Missus Tom can
+  validate identifiers; otherwise compatibility remains user-supplied.
 - Synthetic fixtures validate pipeline wiring only; they do not establish
   scientific validity. The ONT synthetic bundle cannot run the ONT workflow.
-- On WSL, preflight storage checks may warn that Linux-reported free space does
-  not reflect Windows host capacity; place outputs where the host filesystem has
-  room.
+- WSL2 Ubuntu uses the normal Linux/native execution path and does not require
+  Docker Desktop. Projects under the Linux filesystem generally perform better
+  than heavy I/O under `/mnt/c`; this is guidance, not a hard block. Preflight
+  storage warnings remain authoritative because Linux-reported virtual free
+  space may not reflect Windows host capacity.
 - Clean-machine GUI installation remains unverified. Clean-machine internet
   installation of the managed tools, and scientific equivalence of native-tool
   versus Docker-profile results, have not been verified.

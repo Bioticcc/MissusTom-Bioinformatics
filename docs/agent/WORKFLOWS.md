@@ -74,7 +74,7 @@ regression inspection:
 ```bash
 nextflow config workflows/bulk_rnaseq -profile local > /tmp/missus-tom-nextflow.config
 nextflow config workflows/bulk_rnaseq -profile docker > /tmp/missus-tom-nextflow.config
-Rscript -e "parse(file='workflows/bulk_rnaseq/bin/full_human_analysis.R')"
+Rscript -e "parse(file='workflows/bulk_rnaseq/bin/bulk_rnaseq_analysis.R')"
 ```
 
 For Dockerfile or R dependency changes, build the image after syntax/config

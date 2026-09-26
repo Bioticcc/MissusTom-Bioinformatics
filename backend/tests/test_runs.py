@@ -741,7 +741,7 @@ def test_post_popen_persist_failure_stops_process_before_releasing_admission(
     def fail_running_persist(record: RunRecord) -> None:
         nonlocal calls
         calls += 1
-        if calls == 3:
+        if calls == 4:
             raise OSError("injected post-Popen persist failure")
         persist(record)
 
@@ -833,6 +833,7 @@ def test_bulk_nextflow_runs_from_project_root_when_workflow_is_packaged_read_onl
     save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
     adapter = BulkRnaSeqAdapter()
     monkeypatch.setattr(adapter, "validate_execution", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(adapter, "requires_run_reference_preparation", lambda _manifest: False)
     original_popen = subprocess.Popen
     captured: dict[str, Any] = {}
 

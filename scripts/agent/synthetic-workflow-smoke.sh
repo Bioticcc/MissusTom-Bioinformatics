@@ -95,12 +95,13 @@ reverse_complement() {
 reference_dir="$smoke_root/references"
 input_dir="$smoke_root/input"
 : > "$reference_dir/transcripts.fa"
-printf 'Gene stable ID version\tGene type\tGene name\n' > "$reference_dir/biomart.tsv"
+printf 'transcript_id\tgene_id\tgene_name\tgene_biotype\ttranscript_biotype\n' \
+  > "$reference_dir/transcript_to_gene.tsv"
 for index in $(seq 0 23); do
   sequence=$(sequence_for $((index + 17)))
   printf '%s' "$sequence" > "$reference_dir/sequence$index.txt"
-  printf -v transcript 'ENST900000%03d' $((index + 1))
-  printf -v gene 'ENSG900000%03d' $((index + 1))
+  printf -v transcript 'TX%04d' $((index + 1))
+  printf -v gene 'GENE%04d' $((index + 1))
   if (( index < 12 )); then
     gene_name=SMOKEPC$((index + 1))
     gene_type=protein_coding
@@ -108,9 +109,10 @@ for index in $(seq 0 23); do
     gene_name=SMOKELNC$((index - 11))
     gene_type=lncRNA
   fi
-  printf '>%s|%s|SMOKE|SMOKE|SMOKE|%s|SMOKE|%s\n%s\n' \
-    "$transcript" "$gene" "$gene_name" "$gene_type" "$sequence" >> "$reference_dir/transcripts.fa"
-  printf '%s\t%s\t%s\n' "$gene" "$gene_type" "$gene_name" >> "$reference_dir/biomart.tsv"
+  printf '>%s\n%s\n' "$transcript" "$sequence" >> "$reference_dir/transcripts.fa"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$transcript" "$gene" "$gene_name" "$gene_type" "$gene_type" \
+    >> "$reference_dir/transcript_to_gene.tsv"
 done
 
 for sample in H1 H2 OD1 OD2; do
@@ -169,7 +171,7 @@ manifest = {
     "comparisons": [{"comparison_id": "OD1_vs_H", "numerator": "OD1", "denominator": "H"}],
     "reference_resources": {
         "kallisto_index": f"{reference_dir}/kallisto.idx",
-        "biomart": f"{reference_dir}/biomart.tsv",
+        "transcript_to_gene": f"{reference_dir}/transcript_to_gene.tsv",
     },
     "parameters": {"minimum_group_size": 2},
     "strandedness": "unstranded",

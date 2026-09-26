@@ -256,8 +256,9 @@ def test_workflow_defaults_to_quantification_and_validates_start_stage() -> None
 
     assert "start_stage = 'quantification'" in config
     assert "start_stage in ['quantification', 'analysis']" in workflow
-    assert "sample.abundance_tsv ?: (" in workflow
-    assert '"${params.outdir}/counts/kallisto/${sample.sample_id}/abundance.tsv"' in workflow
+    assert "Analysis-only sample ${sample.sample_id} must define abundance_tsv." in workflow
+    assert "sample.abundance_tsv as String" in workflow
+    assert '"${params.outdir}/counts/kallisto/${sample.sample_id}/abundance.tsv"' not in workflow
 
 
 def test_workflow_is_not_restricted_to_demo_sample_names() -> None:
@@ -276,11 +277,26 @@ def test_workflow_passes_explicit_intervention_filters_to_analysis() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     workflow_root = repository_root / "workflows" / "bulk_rnaseq"
     workflow = (workflow_root / "main.nf").read_text(encoding="utf-8")
-    analysis = (workflow_root / "bin" / "full_human_analysis.R").read_text(encoding="utf-8")
+    analysis = (workflow_root / "bin" / "bulk_rnaseq_analysis.R").read_text(encoding="utf-8")
 
     assert "sample.covariates?.intervention" in workflow
     assert "comparison.intervention" in workflow
     assert "selected_samples$intervention == intervention_filter" in analysis
+
+
+def test_generic_analysis_uses_normalized_mapping_and_explicit_contrast() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow_root = repository_root / "workflows" / "bulk_rnaseq"
+    workflow = (workflow_root / "main.nf").read_text(encoding="utf-8")
+    analysis = (workflow_root / "bin" / "bulk_rnaseq_analysis.R").read_text(encoding="utf-8")
+
+    assert "reference_resources.transcript_to_gene" in workflow
+    assert "design = ~condition" in analysis
+    assert 'contrast <- c("condition", case_group, reference_group)' in analysis
+    assert "full_human_analysis" not in workflow
+    assert "biomart" not in analysis.lower()
+    assert "ENST" not in analysis
+    assert "ENSG" not in analysis
 
 
 def test_raw_read_lists_do_not_concatenate_single_lane_paths() -> None:

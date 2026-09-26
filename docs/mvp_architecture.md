@@ -37,15 +37,17 @@ stack.
 - **Local API (`backend/`)** — FastAPI owns path normalization, FASTQ metadata
   discovery, validation, system inspection, atomic saving, planning, controlled
   execution, cancellation, logs, and result indexing.
-- **Manifest (`schemas/`)** — JSON Schema 1.0.0 plus the matching Pydantic model.
+- **Manifest (`schemas/`)** — JSON Schema 1.1.0 plus the matching Pydantic model,
+  with deliberate loading/migration behavior for supported 1.0.0 projects.
   User-confirmed values are authoritative; filename parsing never assigns
   biology.
 - **Adapters (`pipeline_adapters/`)** — a generic interface for availability,
   validation, stage/output descriptions, plans, and argument-array commands.
 - **Workflow (`workflows/`)** — independently packageable workflow modules. The
-  human paired-end Nextflow workflow contains raw QC, paired trimming, clean QC,
-  transcript quantification, manifest-defined mRNA/lncRNA DESeq2 comparisons,
-  and reporting. Container bases are pinned
+  paired-end Bulk RNA-seq path adds application-owned reference preparation
+  (managed Kallisto index plus normalized GTF metadata) before the Nextflow raw
+  QC, paired trimming, clean QC, transcript quantification, all-gene DESeq2
+  comparisons, optional biotype subsets, and reporting. Container bases are pinned
   by registry digest and analysis package versions are recorded with outputs.
   The mouse ONT module consumes explicit pass modBAM inputs and preserves its
   five restartable alignment, coverage, methylation, and exploration stages.
@@ -58,7 +60,7 @@ stack.
 
 ```text
 React wizard
-  -> select pipeline            -> human bulk RNA-seq or mouse ONT analysis
+  -> select pipeline            -> paired-end bulk RNA-seq or mouse ONT analysis
   -> POST /fastq/discover       -> metadata-only scanner
   -> POST /metadata/csv         -> local experimental-metadata parser and matcher
   -> POST /quantifications/discover -> existing kallisto abundance tables
@@ -66,9 +68,9 @@ React wizard
   -> user edits proposals       -> biological confirmation
   -> POST /projects/validate    -> structural + project preflight
   -> POST /projects/save        -> atomic JSON + empty project layout
-  -> GET  /demos/human          -> restricted pseudonymous demo manifest
+  -> GET  /demos/bulk-rnaseq/project -> locally generated synthetic demo manifest
   -> POST /runs/plan            -> adapter stages + argument-array preview
-  -> POST /runs/start           -> controlled adapter-selected process
+  -> POST /runs/start           -> prepare/cache references, then controlled process
   -> GET  /runs/{id}            -> status, logs, and existing result files
 ```
 
@@ -94,7 +96,9 @@ validation errors use the same shape with typed `code`, `message`, optional
 - `GET /api/v1/projects`
 - `POST /api/v1/projects/open`
 - `POST /api/v1/runs/plan`
-- `GET /api/v1/demos/human`
+- `GET /api/v1/demos/{pipeline_identifier}/status`
+- `POST /api/v1/demos/{pipeline_identifier}/prepare`
+- `GET /api/v1/demos/{pipeline_identifier}/project`
 - `POST /api/v1/runs/start`
 - `GET /api/v1/runs`
 - `GET /api/v1/runs/{job_identifier}`

@@ -5,6 +5,24 @@ import { FolderPreview } from "../components/FolderPreview";
 import { PipelineDependencies } from "../components/PipelineDependencies";
 import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
 import { loadProjectDefaults } from "../preferences";
+import {
+  BULK_MANIFEST_SCHEMA_VERSION,
+  BULK_PIPELINE_VERSION,
+  buildBulkReferenceResources,
+  comparisonLabel,
+  DEFAULT_ADAPTER_R1,
+  DEFAULT_ADAPTER_R2,
+  includedConditionGroups,
+  mergeImportedBulkOptions,
+  normalizeMaxParallelTasks,
+  ONT_MANIFEST_SCHEMA_VERSION,
+  ONT_PIPELINE_VERSION,
+  resolveBulkReferenceMode,
+  STRANDEDNESS_UI_OPTIONS,
+  validateComparisonSelection,
+  type BulkReferenceMode,
+  type BulkStrandedness,
+} from "../newProjectWizardContract";
 import type {
   Comparison,
   DirectoryPreview,
@@ -55,8 +73,9 @@ interface OptionsState {
   annotationSource: string;
   transcriptomeFasta: string;
   annotationGtf: string;
+  transcriptToGene: string;
   kallistoIndex: string;
-  biomart: string;
+  referenceMode: BulkReferenceMode;
   referenceFasta: string;
   referenceFai: string;
   minimap2Index: string;
@@ -66,11 +85,11 @@ interface OptionsState {
   intergenicBed: string;
   ontInstrumentReport: string;
   libraryType: string;
-  readLayout: "paired-end" | "single-end";
-  strandedness: "unstranded" | "forward" | "reverse" | "unknown";
+  strandedness: BulkStrandedness;
   executionProfile: "local" | "docker" | "apptainer";
   cpus: number;
   memoryGb: number;
+  maxParallelTasks: number;
   minimumReadLength: number;
   trimQuality: number;
   adapterR1: string;
@@ -157,8 +176,9 @@ export function NewProjectWizard({
     annotationSource: "GENCODE",
     transcriptomeFasta: "",
     annotationGtf: "",
+    transcriptToGene: "",
     kallistoIndex: "",
-    biomart: "",
+    referenceMode: "build",
     referenceFasta: "",
     referenceFai: "",
     minimap2Index: "",
@@ -168,15 +188,15 @@ export function NewProjectWizard({
     intergenicBed: "",
     ontInstrumentReport: "",
     libraryType: "total RNA",
-    readLayout: "paired-end",
     strandedness: "reverse",
     executionProfile: "local",
     cpus: projectDefaults.cpus,
     memoryGb: projectDefaults.memoryGb,
+    maxParallelTasks: 1,
     minimumReadLength: 20,
     trimQuality: 20,
-    adapterR1: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
-    adapterR2: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+    adapterR1: DEFAULT_ADAPTER_R1,
+    adapterR2: DEFAULT_ADAPTER_R2,
     minimumGroupSize: 2,
     adjustedPValue: 0.05,
     absoluteLog2FoldChange: 0.3,
@@ -218,13 +238,7 @@ export function NewProjectWizard({
     [isOntPipeline, startStage],
   );
 
-  const groups = useMemo(
-    () =>
-      [...new Set(samples.filter((sample) => sample.included).map((sample) => sample.condition.trim()))]
-        .filter(Boolean)
-        .sort(),
-    [samples],
-  );
+  const groups = useMemo(() => includedConditionGroups(samples), [samples]);
   const interventions = useMemo(
     () => [...new Set(samples
       .filter((sample) => sample.included)
@@ -276,8 +290,6 @@ export function NewProjectWizard({
           referenceGenome: "GRCm38p6",
           annotationSource: "GENCODE",
           libraryType: "ONT long-read",
-          readLayout: "single-end",
-          strandedness: "unknown",
           executionProfile: "local",
         }
       : {
@@ -286,8 +298,8 @@ export function NewProjectWizard({
           referenceGenome: "GRCh38",
           annotationSource: "GENCODE",
           libraryType: "total RNA",
-          readLayout: "paired-end",
           strandedness: "reverse",
+          referenceMode: "build",
           executionProfile: "local",
         });
     invalidateValidation();
@@ -366,7 +378,7 @@ export function NewProjectWizard({
   };
 
   const chooseReferenceFile = async (
-    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
+    key: "kallistoIndex" | "transcriptomeFasta" | "annotationGtf" | "transcriptToGene" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
     title: string,
   ) => {
     const busyKey = `reference-${key}`;
@@ -500,7 +512,7 @@ export function NewProjectWizard({
 
   const referenceFileField = (
     label: string,
-    key: "kallistoIndex" | "biomart" | "transcriptomeFasta" | "annotationGtf" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
+    key: "kallistoIndex" | "transcriptomeFasta" | "annotationGtf" | "transcriptToGene" | "referenceFasta" | "referenceFai" | "minimap2Index" | "gencodeGff3" | "cpgIslands" | "ccreTable" | "intergenicBed" | "ontInstrumentReport",
     placeholder: string,
     required = false,
   ) => (
@@ -559,14 +571,21 @@ export function NewProjectWizard({
     }
   };
 
+  const bulkReferenceMode = resolveBulkReferenceMode(startStage, options.referenceMode);
+
   const buildManifest = (): ProjectManifest => {
     const referenceResources: Record<string, string> = {};
-    if (!isOntPipeline && startStage === "quantification") {
-      if (options.transcriptomeFasta.trim()) referenceResources.transcriptome_fasta = options.transcriptomeFasta;
-      if (options.annotationGtf.trim()) referenceResources.annotation_gtf = options.annotationGtf;
-      if (options.kallistoIndex.trim()) referenceResources.kallisto_index = options.kallistoIndex;
+    if (!isOntPipeline) {
+      Object.assign(
+        referenceResources,
+        buildBulkReferenceResources(startStage, bulkReferenceMode, {
+          transcriptomeFasta: options.transcriptomeFasta,
+          annotationGtf: options.annotationGtf,
+          kallistoIndex: options.kallistoIndex,
+          transcriptToGene: options.transcriptToGene,
+        }),
+      );
     }
-    if (!isOntPipeline && options.biomart.trim()) referenceResources.biomart = options.biomart;
     if (isOntPipeline) {
       if (options.referenceFasta.trim()) referenceResources.reference_fasta = options.referenceFasta;
       if (options.referenceFai.trim()) referenceResources.reference_fai = options.referenceFai;
@@ -579,25 +598,26 @@ export function NewProjectWizard({
     }
 
     return {
-      schema_version: "1.0.0",
+      schema_version: isOntPipeline ? ONT_MANIFEST_SCHEMA_VERSION : BULK_MANIFEST_SCHEMA_VERSION,
       project_name: details.projectName,
       project_identifier: projectId,
       created_at: createdAt,
       input_directory: details.inputDirectory,
       output_directory: details.outputDirectory,
       pipeline_identifier: pipelineIdentifier,
-      pipeline_version: isOntPipeline ? "0.1.0" : "0.4.0",
+      pipeline_version: isOntPipeline ? ONT_PIPELINE_VERSION : BULK_PIPELINE_VERSION,
+      ...(!isOntPipeline ? { reference_mode: bulkReferenceMode } : {}),
       organism: options.organism,
       reference_genome: options.referenceGenome,
       annotation_source: options.annotationSource,
       reference_resources: referenceResources,
       library_type: options.libraryType,
-      read_layout: isOntPipeline ? "single-end" : options.readLayout,
+      read_layout: isOntPipeline ? "single-end" : "paired-end",
       strandedness: isOntPipeline ? "unknown" : options.strandedness,
       samples: samples.map((sample) => ({
         sample_id: sample.sample_id,
         r1_files: sample.r1_files,
-        r2_files: isOntPipeline || options.readLayout === "single-end" ? [] : sample.r2_files,
+        r2_files: isOntPipeline ? [] : sample.r2_files,
         ont_bam_files: sample.ont_bam_files,
         abundance_tsv: isOntPipeline ? null : sample.abundance_tsv,
         condition: sample.condition,
@@ -633,7 +653,11 @@ export function NewProjectWizard({
           absolute_log2_fold_change: options.absoluteLog2FoldChange,
         } : {}),
       },
-      resource_profile: { cpus: options.cpus, memory_gb: options.memoryGb, max_parallel_tasks: 1 },
+      resource_profile: {
+        cpus: options.cpus,
+        memory_gb: options.memoryGb,
+        max_parallel_tasks: options.maxParallelTasks,
+      },
       execution_profile: options.executionProfile,
       application_version: "0.3.0",
       pipeline_status: "draft",
@@ -647,7 +671,7 @@ export function NewProjectWizard({
     try {
       const payload = {
         export_format: "missus-tom-project-debug",
-        export_version: 2,
+        export_version: 3,
         exported_at: new Date().toISOString(),
         warning: "Contains local file paths and sample identifiers. Review before sharing.",
         wizard: {
@@ -758,17 +782,11 @@ export function NewProjectWizard({
       setPipelineIdentifier(importedPipeline);
       setStartStage(imported.start_stage === "analysis" ? "analysis" : "quantification");
       setDetails(imported.details as unknown as DetailsState);
-      setOptions((current) => {
-        const importedOptions = imported.options as Partial<OptionsState>;
-        const importedProfile = importedOptions.executionProfile;
-        const executionProfile =
-          importedPipeline === "ont-analysis"
-            ? "local"
-            : importedProfile === "docker" || importedProfile === "local"
-              ? importedProfile
-              : "local";
-        return { ...current, ...importedOptions, executionProfile };
-      });
+      setOptions((current) => mergeImportedBulkOptions(
+        current as unknown as Record<string, unknown>,
+        imported.options as Record<string, unknown>,
+        importedPipeline,
+      ) as unknown as OptionsState);
       setSamples(importedSamples);
       setComparisons(importedComparisons);
       setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
@@ -915,8 +933,9 @@ export function NewProjectWizard({
   };
 
   const addComparison = () => {
-    if (!numerator || !denominator || numerator === denominator) {
-      setError("Choose two different groups for the comparison.");
+    const validationError = validateComparisonSelection(numerator, denominator, groups);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     const comparisonId = toSafeId(
@@ -932,7 +951,7 @@ export function NewProjectWizard({
         comparison_id: comparisonId,
         numerator,
         denominator,
-        label: `${numerator} (test) vs ${denominator} (reference)${comparisonIntervention ? ` within ${comparisonIntervention}` : ""}`,
+        label: comparisonLabel(numerator, denominator, comparisonIntervention || null),
         intervention: comparisonIntervention || null,
       },
     ]);
@@ -956,15 +975,15 @@ export function NewProjectWizard({
             <p className="helper-copy">Choose where this project starts before selecting its input folder.</p>
             <fieldset className="run-mode-panel setup-mode-panel">
               <legend>Pipeline</legend>
-              <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (human)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
+              <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
               <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse)</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
             </fieldset>
             <PipelineDependencies pipelineIdentifier={pipelineIdentifier} />
             {!isOntPipeline && <fieldset className="run-mode-panel setup-mode-panel">
               <legend>Starting point</legend>
-              <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "quantification"} onChange={() => updateStartStage("quantification")} /><span><strong>Start with FASTQ files</strong><small>Run raw QC, trimming, Kallisto quantification, and analysis. Select a folder containing paired R1/R2 FASTQs.</small></span></label>
-              <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "analysis"} onChange={() => updateStartStage("analysis")} /><span><strong>Skip quantification</strong><small>Run analysis from existing Kallisto results. Select a folder containing one abundance.tsv file per sample.</small></span></label>
-              {startStage === "analysis" && <p className="run-mode-note input-warning"><strong>Different inputs required:</strong> a Kallisto <code>abundance.tsv</code> for every sample, normally arranged as <code>&lt;input&gt;/&lt;sample_id&gt;/abundance.tsv</code>, plus a matching human BioMart table. The tables must come from a compatible human transcript index whose target identifiers retain Ensembl gene metadata. FASTQs and the index file itself are not required.</p>}
+              <label className={`run-mode-option${startStage === "quantification" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "quantification"} onChange={() => updateStartStage("quantification")} /><span><strong>Start with FASTQ files</strong><small>Production bulk RNA-seq is paired-end only. Run QC, trimming, Kallisto quantification, and analysis from paired R1/R2 FASTQs.</small></span></label>
+              <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}><input type="radio" name="setup-start-stage" checked={startStage === "analysis"} onChange={() => updateStartStage("analysis")} /><span><strong>Skip quantification (analysis-only)</strong><small>Run differential expression from existing Kallisto abundance tables. No FASTQs or Kallisto index are required.</small></span></label>
+              {startStage === "analysis" && <p className="run-mode-note input-warning"><strong>Analysis-only inputs:</strong> one <code>abundance.tsv</code> per included sample (commonly <code>&lt;input&gt;/&lt;sample_id&gt;/abundance.tsv</code>) plus either an annotation GTF or a transcript-to-gene mapping table. FASTQs, transcriptome FASTA, and Kallisto index paths are not used.</p>}
             </fieldset>}
             <label>Project name <span aria-hidden="true">*</span><input value={details.projectName} onChange={(event) => updateDetails("projectName", event.target.value)} placeholder="e.g. Human intervention study" /></label>
             <div className="directory-field">
@@ -995,8 +1014,11 @@ export function NewProjectWizard({
             {discovery ? (
               <>
                 <div className="summary-grid three"><article className="metric-card"><span>{startStage === "analysis" ? "Abundance tables" : "FASTQs"}</span><strong>{discovery.total_files}</strong></article><article className="metric-card"><span>Proposed samples</span><strong>{discovery.samples.length}</strong></article><article className="metric-card"><span>Total size</span><strong>{formatBytes(discovery.total_bytes)}</strong></article></div>
-                {discovery.warnings.length > 0 && <div className="warning-list"><strong>Discovery notes</strong><ul>{discovery.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
-                <div className="file-preview"><h3>Detected files</h3><div className="file-preview-list">{discovery.files.slice(0, 12).map((file) => <div key={file.path}>{"read" in file ? <span className={`read-chip read-${file.read.toLowerCase()}`}>{file.read}</span> : <span className="read-chip">Kallisto</span>}<code>{file.path}</code><small>{formatBytes(file.size_bytes)}</small></div>)}</div>{discovery.files.length > 12 && <p>+ {discovery.files.length - 12} more files</p>}</div>
+                {discovery.warnings.length > 0 && <div className="warning-list"><strong>Discovery notes</strong><ul>{discovery.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul></div>}
+                {"unassigned_files" in discovery && discovery.unassigned_files.length > 0 && (
+                  <div className="warning-list"><strong>Unassigned FASTQs</strong><ul>{discovery.unassigned_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul></div>
+                )}
+                <div className="file-preview"><h3>Detected files</h3><div className="file-preview-list">{discovery.files.map((file) => <div key={file.path}>{"read" in file ? <span className={`read-chip read-${file.read.toLowerCase()}`}>{file.read}</span> : <span className="read-chip">Kallisto</span>}<code>{file.path}</code><small>{formatBytes(file.size_bytes)}</small></div>)}</div></div>
               </>
             ) : <div className="empty-state compact"><div className="empty-orbit" aria-hidden="true">⌁</div><h3>No scan results</h3><p>Enter an input directory in step 1.</p></div>}
           </section>
@@ -1012,9 +1034,9 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card wide-card">
             <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>{startStage === "analysis" ? "Review samples and abundance tables" : "Review samples and read pairs"}</h2></div><span className="count-pill">{samples.length}</span></div>
-            <p className="helper-copy">Review file assignments and sample identifiers. Experimental settings are configured in the next step.</p>
+            <p className="helper-copy">Review inclusion, identifiers, read paths, and any design fields already known. Condition and batch are confirmed in the next step; nothing here is inferred from filenames.</p>
             {samples.length === 0 ? <p className="empty-copy">No sample proposals. Return to input discovery first.</p> : (
-              <div className="table-scroll"><table className={`sample-table${startStage === "analysis" ? " analysis-input-table" : ""}`}><thead><tr><th>Use</th><th>Sample identifier</th>{startStage === "analysis" ? <th>abundance.tsv</th> : <><th>R1 files</th><th>R2 files</th></>}<th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td>{startStage === "analysis" ? <td><div className="sample-path-editor"><textarea rows={2} value={sample.abundance_tsv ?? ""} onChange={(event) => updateSample(index, "abundance_tsv", event.target.value.trim() || null)} aria-label={`Abundance table for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "abundance_tsv")}>Browse…</button></div></td> : <><td><div className="sample-path-editor"><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r1_files")}>Browse…</button></div></td><td><div className="sample-path-editor"><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r2_files")}>Browse…</button></div></td></>}<td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning) => <small className="cell-warning" key={warning}>{warning}</small>)}</td></tr>)}</tbody></table></div>
+              <div className="table-scroll"><table className={`sample-table${startStage === "analysis" ? " analysis-input-table" : ""}`}><thead><tr><th>Use</th><th>Sample identifier</th><th>Condition</th><th>Replicate</th><th>Batch</th>{startStage === "analysis" ? <th>abundance.tsv</th> : <><th>R1 files</th><th>R2 files</th></>}<th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td><td><input value={sample.condition} onChange={(event) => updateSample(index, "condition", event.target.value)} aria-label={`Condition for ${sample.sample_id}`} /></td><td><input value={sample.biological_replicate} onChange={(event) => updateSample(index, "biological_replicate", event.target.value)} aria-label={`Biological replicate for ${sample.sample_id}`} /></td><td><input value={sample.batch ?? ""} onChange={(event) => updateSample(index, "batch", event.target.value || null)} aria-label={`Batch for ${sample.sample_id}`} /></td>{startStage === "analysis" ? <td><div className="sample-path-editor"><textarea rows={2} value={sample.abundance_tsv ?? ""} onChange={(event) => updateSample(index, "abundance_tsv", event.target.value.trim() || null)} aria-label={`Abundance table for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "abundance_tsv")}>Browse…</button></div></td> : <><td><div className="sample-path-editor"><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r1_files")}>Browse…</button></div></td><td><div className="sample-path-editor"><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r2_files")}>Browse…</button></div></td></>}<td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning, warningIndex) => <small className="cell-warning" key={`${warning}-${warningIndex}`}>{warning}</small>)}</td></tr>)}</tbody></table></div>
             )}
           </section>
         );
@@ -1043,7 +1065,7 @@ export function NewProjectWizard({
               <div><strong>Import experimental metadata</strong><p><strong>CSV requirement:</strong> the file MUST include <code>SampleID</code>, <code>Condition</code>, and <code>Batch</code> columns.</p><small><code>Patient</code> maps to biological replicate, and <code>Intervention</code> is imported for filtered comparisons. Column matching ignores letter case; legacy sample-ID separators and suffixes are normalized and reported.</small></div>
               <button className="button secondary" type="button" onClick={() => void importMetadataCsv()} disabled={busy === "metadata-csv" || samples.length === 0}>{busy === "metadata-csv" ? "Importing…" : "Select metadata CSV…"}</button>
             </div>
-            {metadataImport && <div className={metadataImport.unmatchedSamples.length || metadataImport.unusedRows.length || metadataImport.warnings.length ? "warning-list metadata-import-result" : "success-message metadata-import-result"}><strong>Imported metadata for {metadataImport.matched} sample(s)</strong><p><code>{metadataImport.path}</code></p>{metadataImport.unmatchedSamples.length > 0 && <p>No matching CSV row for: {metadataImport.unmatchedSamples.slice(0, 8).join(", ")}{metadataImport.unmatchedSamples.length > 8 ? ` (+${metadataImport.unmatchedSamples.length - 8} more)` : ""}</p>}{metadataImport.unusedRows.length > 0 && <p>Unused CSV rows, including superseded legacy duplicates: {metadataImport.unusedRows.slice(0, 8).join(", ")}{metadataImport.unusedRows.length > 8 ? ` (+${metadataImport.unusedRows.length - 8} more)` : ""}</p>}{metadataImport.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+            {metadataImport && <div className={metadataImport.unmatchedSamples.length || metadataImport.unusedRows.length || metadataImport.warnings.length ? "warning-list metadata-import-result" : "success-message metadata-import-result"}><strong>Imported metadata for {metadataImport.matched} sample(s)</strong><p><code>{metadataImport.path}</code></p>{metadataImport.unmatchedSamples.length > 0 && <div><p>No matching CSV row for:</p><ul>{metadataImport.unmatchedSamples.map((sampleId) => <li key={sampleId}><code>{sampleId}</code></li>)}</ul></div>}{metadataImport.unusedRows.length > 0 && <div><p>Unused CSV rows, including superseded legacy duplicates:</p><ul>{metadataImport.unusedRows.map((row) => <li key={row}><code>{row}</code></li>)}</ul></div>}{metadataImport.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div>}
             <div className="design-list">{samples.filter((sample) => sample.included).map((sample, index) => {
               const realIndex = samples.indexOf(sample);
               return <article className="design-row" key={`${sample.sample_id}-${index}`}><strong>{sample.sample_id}</strong><label>Condition<input value={sample.condition} onChange={(event) => updateSample(realIndex, "condition", event.target.value)} /></label><label>Biological replicate (optional)<input value={sample.biological_replicate} onChange={(event) => updateSample(realIndex, "biological_replicate", event.target.value)} /></label><label>Batch<input value={sample.batch ?? ""} onChange={(event) => updateSample(realIndex, "batch", event.target.value || null)} /></label><label>Intervention<input value={typeof sample.covariates.intervention === "string" ? sample.covariates.intervention : ""} onChange={(event) => updateSample(realIndex, "covariates", { ...sample.covariates, intervention: event.target.value || null })} /></label></article>;
@@ -1080,14 +1102,29 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Pipeline options</h2></div></div>
-            <p className="helper-copy">{startStage === "analysis" ? "Analysis-only execution requires existing Kallisto abundance tables and a human BioMart mapping." : "Full execution supports human paired-end libraries with a supplied Kallisto index and BioMart mapping."}</p>
+            <p className="helper-copy">{startStage === "analysis" ? "Analysis-only projects require annotation GTF or transcript-to-gene mapping. Production bulk RNA-seq is paired-end only." : "Quantification uses paired-end FASTQs. Choose whether Kallisto builds a new index from FASTA+GTF or uses an existing index."}</p>
             <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<select value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)}><option>total RNA</option><option>lncRNA</option><option>mRNA</option><option>other (confirm)</option></select></label></div>
-            {startStage === "quantification" && <div className="field-pair"><label>Read layout<select value={options.readLayout} onChange={(event) => updateOptions("readLayout", event.target.value as OptionsState["readLayout"])}><option value="paired-end">Paired-end</option><option value="single-end">Single-end</option></select></label><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as OptionsState["strandedness"])}><option value="unknown">Unknown (confirm)</option><option value="reverse">Reverse / RF</option><option value="forward">Forward / FR</option><option value="unstranded">Unstranded</option></select></label></div>}
-            <fieldset><legend>Reference resource paths</legend><p className="helper-copy">{startStage === "analysis" ? "The human BioMart table must match the transcript annotation used for the supplied Kallisto results." : "Kallisto index and BioMart table are required. FASTA and GTF are retained as project provenance."}</p>{startStage === "quantification" && referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}{referenceFileField("BioMart table", "biomart", "/references/biomart.tsv", true)}{startStage === "quantification" && <>{referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa")}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}</>}</fieldset>
+            <p className="helper-copy"><strong>Read layout:</strong> paired-end (production contract). Single-end libraries are not supported in this wizard.</p>
+            {startStage === "quantification" && (
+              <fieldset className="run-mode-panel setup-mode-panel"><legend>Reference mode</legend>
+                <label className={`run-mode-option${options.referenceMode === "build" ? " selected" : ""}`}><input type="radio" name="bulk-reference-mode" checked={options.referenceMode === "build"} onChange={() => updateOptions("referenceMode", "build")} /><span><strong>Build index from FASTA + GTF</strong><small>Requires transcriptome FASTA and annotation GTF. Kallisto builds the index during quantification.</small></span></label>
+                <label className={`run-mode-option${options.referenceMode === "existing-index" ? " selected" : ""}`}><input type="radio" name="bulk-reference-mode" checked={options.referenceMode === "existing-index"} onChange={() => updateOptions("referenceMode", "existing-index")} /><span><strong>Use existing Kallisto index</strong><small>Requires a Kallisto index plus annotation GTF or transcript-to-gene mapping.</small></span></label>
+              </fieldset>
+            )}
+            <fieldset><legend>Strandedness</legend><p className="helper-copy">Choose the library strandedness explicitly. Unknown is not recorded for bulk RNA-seq.</p><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as BulkStrandedness)}>{STRANDEDNESS_UI_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><p className="field-help">{STRANDEDNESS_UI_OPTIONS.find((option) => option.value === options.strandedness)?.mappingNote}</p></fieldset>
+            <fieldset><legend>Reference resource paths</legend>
+              {startStage === "analysis" && <p className="helper-copy">Provide annotation GTF or transcript-to-gene mapping. Do not supply FASTQs, transcriptome FASTA, or Kallisto index paths for analysis-only runs.</p>}
+              {startStage === "quantification" && options.referenceMode === "build" && <p className="helper-copy">Build mode requires transcriptome FASTA and annotation GTF.</p>}
+              {startStage === "quantification" && options.referenceMode === "existing-index" && <p className="helper-copy">Existing-index mode requires a Kallisto index and either annotation GTF or transcript-to-gene mapping (GTF is the usual choice).</p>}
+              {startStage === "quantification" && options.referenceMode === "build" && <>{referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa", true)}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf", true)}</>}
+              {startStage === "quantification" && options.referenceMode === "existing-index" && <>{referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}{referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}</>}
+              {startStage === "analysis" && <>{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}{referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}</>}
+            </fieldset>
             <fieldset><legend>{startStage === "analysis" ? "Analysis" : "Trimming and analysis"}</legend>{startStage === "quantification" && <><div className="field-pair"><label>R1 adapter<input value={options.adapterR1} onChange={(event) => updateOptions("adapterR1", event.target.value)} /></label><label>R2 adapter<input value={options.adapterR2} onChange={(event) => updateOptions("adapterR2", event.target.value)} /></label></div><div className="field-pair"><label>Trim quality<input type="number" min="0" max="50" value={options.trimQuality} onChange={(event) => updateOptions("trimQuality", Number(event.target.value))} /></label><label>Minimum read length<input type="number" min="1" value={options.minimumReadLength} onChange={(event) => updateOptions("minimumReadLength", Number(event.target.value))} /></label></div></>}<div className="field-triple"><label>Minimum group size<input type="number" min="2" value={options.minimumGroupSize} onChange={(event) => updateOptions("minimumGroupSize", Number(event.target.value))} /></label><label>Adjusted p-value<input type="number" min="0" max="1" step="0.01" value={options.adjustedPValue} onChange={(event) => updateOptions("adjustedPValue", Number(event.target.value))} /></label><label>Absolute log2 fold change<input type="number" min="0" step="0.05" value={options.absoluteLog2FoldChange} onChange={(event) => updateOptions("absoluteLog2FoldChange", Number(event.target.value))} /></label></div></fieldset>
             <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local tools</option><option value="docker">Docker (regression)</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
-            <p className="field-help">These limits cover the workflow as a whole. Leave CPU and RAM available for the desktop and other local work.</p>
+            <label>Maximum parallel tasks (workflow-wide)<input type="number" min="1" value={options.maxParallelTasks} onChange={(event) => updateOptions("maxParallelTasks", normalizeMaxParallelTasks(Number(event.target.value)))} /></label>
+            <p className="field-help">CPU, RAM, and parallel task limits cover the workflow as a whole. Leave headroom for the desktop and other local work.</p>
           </section>
         );
       case 6:
@@ -1112,7 +1149,7 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 8</p><h2>Review and save</h2></div></div>
-            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Existing Kallisto results" : "FASTQ quantification"}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType}{startStage === "quantification" ? ` · ${options.readLayout} · ${options.strandedness}` : ""}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
+            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Analysis-only (existing Kallisto results)" : "FASTQ quantification"}</dd><dt>Reference mode</dt><dd>{bulkReferenceMode}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType} · paired-end · {options.strandedness}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM · {options.maxParallelTasks} parallel task(s)</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
             <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save"} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>

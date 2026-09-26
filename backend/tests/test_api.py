@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import stat
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -13,7 +12,6 @@ from httpx import ASGITransport, AsyncClient
 from missus_tom.api import routes
 from missus_tom.main import app
 from missus_tom.models.demos import DemoPrepareStatus
-from missus_tom.services import demos as demos_module
 from missus_tom.services.demos import DemoService
 
 pytestmark = pytest.mark.anyio
@@ -32,31 +30,6 @@ def isolated_demo_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> De
     service = DemoService(state_directory=tmp_path / "state")
     monkeypatch.setattr(routes, "demo_service", service)
     return service
-
-
-@pytest.fixture
-def kallisto_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    script = tmp_path / "kallisto-stub"
-    script.write_text(
-        """#!/bin/sh
-if [ "$1" = "index" ] && [ "$2" = "-i" ] && [ -n "$3" ]; then
-  printf 'KALLISTO\\0stub-index' > "$3"
-  exit 0
-fi
-exit 2
-""",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-
-    def runtime_tool(name: str, pipeline_identifier: str) -> str | None:
-        if name == "kallisto" and pipeline_identifier == "bulk-rnaseq":
-            return str(script)
-        return None
-
-    monkeypatch.setattr(demos_module, "runtime_tool", runtime_tool)
-    monkeypatch.setattr(demos_module, "runtime_environment", lambda _: {"PATH": str(tmp_path)})
-    return script
 
 
 async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
@@ -126,9 +99,7 @@ async def test_demo_status_endpoint_uses_isolated_service(
 async def test_demo_prepare_endpoint_accepts_explicit_consent(
     client: AsyncClient,
     isolated_demo_service: DemoService,
-    kallisto_stub: Path,
 ) -> None:
-    del kallisto_stub
     response = await client.post("/api/v1/demos/bulk-rnaseq/prepare", json={"consent": True})
 
     assert response.status_code == 200
@@ -233,17 +204,17 @@ async def test_validate_save_and_plan_endpoints(
     plan = await client.post("/api/v1/runs/plan", json={"manifest": manifest_payload})
     assert plan.status_code == 200
     plan_data = plan.json()["data"]
-    assert plan_data["execution_enabled"] is False
+    assert plan_data["execution_enabled"] is True
     assert plan_data["command_preview"][0] == "nextflow"
     assert "run" in plan_data["command_preview"]
     assert plan_data["command_preview"][-2:] == ["--start_stage", "quantification"]
-    assert len(plan_data["stages"]) == 8
+    assert len(plan_data["stages"]) == 9
 
     start = await client.post(
         "/api/v1/runs/start", json={"manifest": manifest_payload, "resume": True}
     )
     assert start.status_code == 409
-    assert "unsupported" in start.json()["errors"][0]["message"]
+    assert start.json()["errors"][0]["message"]
 
 
 async def test_run_start_rejects_unknown_start_stage(
@@ -271,7 +242,7 @@ async def test_repeated_structural_errors_are_grouped(
         error for error in response.json()["errors"] if "letters, numbers" in error["message"]
     ]
     assert len(matching) == 1
-    assert "2 fields" in matching[0]["message"]
+    assert "4 fields" in matching[0]["message"]
 
 
 async def test_pipeline_status_allows_execution(client: AsyncClient) -> None:
