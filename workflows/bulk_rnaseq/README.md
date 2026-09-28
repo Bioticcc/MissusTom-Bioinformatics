@@ -108,6 +108,19 @@ container label `missus_tom.run_id=<UUID>`, so cleanup can identify only
 containers belonging to that job. The parameter is optional for direct
 command-line use.
 
+On the local profile, preparation and Nextflow run inside one systemd user
+scope. Missus Tom starts that scope, then moves each owned child into it by
+writing that child's PID to the scope `cgroup.procs` file. Preflight reports
+native containment only when a disposable probe can complete that migration and
+confirm the child's cgroup. Creating a scope with `systemd-run --user --scope
+true` is not treated as success on its own. Launching each owned command
+directly as the payload of a bounded `systemd-run --user --scope` invocation
+would provide the same scope limits without a later PID migration, including on
+hosts that can create a scope but cannot write `cgroup.procs`. The current
+runner does not do that: it admits separate preparation and workflow children
+into a scope that already exists, and it never signals or adopts any other
+process.
+
 Single-lane paired inputs are passed directly to Cutadapt from their staged
 paths. For multi-lane samples, each read direction is concatenated in manifest
 order before Cutadapt so all lane content is retained. The concatenated files

@@ -98,9 +98,17 @@ jobs:
             --deb "${deb_source}"
 
           debian_version=$(dpkg-deb --field "${deb_source}" Version)
-          expected_debian_version="${package_version}"
-          if [[ "${release_version}" == *-* ]]; then
-            expected_debian_version="${package_version}~${release_version#*-}"
+          # Keep this in lockstep with scripts/normalize-debian-release-version.sh.
+          # The Debian version is MAJOR.MINOR.PATCH with a '~' prerelease suffix
+          # taken from the tag, including when package.json already contains that
+          # prerelease (for example 0.3.0-rc.14 -> 0.3.0~rc.14).
+          if [[ ! "${release_version}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-([0-9A-Za-z][0-9A-Za-z.-]*))?$ ]]; then
+            echo "Release version ${release_version} is not SemVer." >&2
+            exit 1
+          fi
+          expected_debian_version="${BASH_REMATCH[1]}"
+          if [[ -n "${BASH_REMATCH[3]:-}" ]]; then
+            expected_debian_version="${expected_debian_version}~${BASH_REMATCH[3]}"
           fi
           if [[ "${debian_version}" != "${expected_debian_version}" ]]; then
             echo "Debian package Version ${debian_version} does not match ${expected_debian_version}." >&2

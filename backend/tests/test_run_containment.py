@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
@@ -50,11 +51,253 @@ def test_memory_limit_conversion() -> None:
     assert memory_limit_bytes(1.0) == 1024**3
 
 
+class _FakeProcess:
+    def __init__(self, pid: int, *, returncode: int | None = None, stderr: str = "") -> None:
+        self.pid = pid
+        self.returncode = returncode
+        self.stderr = io.StringIO(stderr)
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        if self.returncode is None:
+            self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+def _install_probe_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    scope: _FakeProcess | None = None,
+    child: _FakeProcess | None = None,
+    spawn_error: BaseException | None = None,
+    control_group: str | None = "/user.slice/missus-tom-probe.scope",
+    procs: Path | None = None,
+    assign_error: BaseException | None = None,
+    child_cgroup: Path | None = None,
+) -> dict[str, list[str]]:
+    stopped: list[str] = []
+    monkeypatch.setattr(run_containment.sys, "platform", "linux")
+    monkeypatch.setattr(run_containment, "_user_bus_available", lambda: True)
+
+    def spawn_scope(_unit: str) -> _FakeProcess:
+        if spawn_error is not None:
+            raise spawn_error
+        assert scope is not None
+        return scope
+
+    def spawn_child() -> _FakeProcess:
+        assert child is not None
+        return child
+
+    monkeypatch.setattr(run_containment, "_spawn_probe_scope", spawn_scope)
+    monkeypatch.setattr(run_containment, "_spawn_probe_child", spawn_child)
+    monkeypatch.setattr(run_containment, "_control_group_for_unit", lambda _unit: control_group)
+    if procs is not None:
+        monkeypatch.setattr(run_containment, "_cgroup_procs_file", lambda _group: procs)
+    if assign_error is not None:
+
+        def deny(_path: Path, _process_id: int) -> None:
+            assert assign_error is not None
+            raise assign_error
+
+        monkeypatch.setattr(run_containment, "_assign_pid_to_cgroup_procs", deny)
+    if child_cgroup is not None:
+        monkeypatch.setattr(run_containment, "process_cgroup_path", lambda _pid: child_cgroup)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["systemctl", "--user", "stop"]:
+            stopped.append(command[3])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(run_containment.subprocess, "run", fake_run)
+    return {"stopped": stopped}
+
+
+def test_probe_requires_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_containment.sys, "platform", "darwin")
+    result = probe_native_containment()
+    assert result.available is False
+    assert "Linux" in result.message
+    assert result.enablement
+
+
 def test_unavailable_controller_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_containment.sys, "platform", "linux")
     monkeypatch.setattr(run_containment, "_user_bus_available", lambda: False)
     result = probe_native_containment()
     assert result.available is False
+    assert "systemd user session bus" in result.message
     assert result.enablement
+
+
+def test_probe_reports_systemd_run_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = _install_probe_fakes(
+        monkeypatch,
+        spawn_error=FileNotFoundError(2, "No such file or directory", "systemd-run"),
+    )
+    result = probe_native_containment()
+    assert result.available is False
+    assert "systemd-run --user is unavailable" in result.message
+    assert result.enablement
+    assert observed["stopped"] == []
+
+
+def test_probe_reports_scope_creation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed = _install_probe_fakes(
+        monkeypatch,
+        scope=_FakeProcess(101, returncode=1, stderr="Failed to start transient scope\n"),
+    )
+    result = probe_native_containment()
+    assert result.available is False
+    assert "could not create a delegated scope" in result.message
+    assert "Failed to start transient scope" in result.message
+    assert result.enablement
+    assert observed["stopped"]
+    assert observed["stopped"][0].startswith("missus-tom-probe-")
+    assert observed["stopped"][0].endswith(".scope")
+
+
+def test_probe_reports_unavailable_when_cgroup_assignment_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("", encoding="utf-8")
+    child = _FakeProcess(303)
+    observed = _install_probe_fakes(
+        monkeypatch,
+        scope=_FakeProcess(101),
+        child=child,
+        procs=procs,
+        assign_error=PermissionError(13, "Permission denied"),
+    )
+    result = probe_native_containment()
+    assert result.available is False
+    assert "PermissionError" in result.message
+    assert "cannot assign" in result.message
+    assert result.enablement
+    assert "cgroup.procs" in (result.enablement or "")
+    assert procs.read_text(encoding="utf-8") == ""
+    assert observed["stopped"]
+    assert child.killed
+
+
+def test_probe_succeeds_when_scope_assignment_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("", encoding="utf-8")
+    child = _FakeProcess(202)
+    observed = _install_probe_fakes(
+        monkeypatch,
+        scope=_FakeProcess(101),
+        child=child,
+        procs=procs,
+        child_cgroup=Path("/sys/fs/cgroup/user.slice/missus-tom-probe.scope"),
+    )
+    monkeypatch.setattr(
+        RunContainmentSession,
+        "start",
+        Mock(side_effect=AssertionError("probe recursed into RunContainmentSession.start")),
+    )
+    result = probe_native_containment()
+    assert result.available is True
+    assert "assigned workflow processes" in result.message
+    assert result.enablement is None
+    assert procs.read_text(encoding="utf-8") == "202\n"
+    assert observed["stopped"]
+    assert child.killed
+
+
+def test_probe_cleans_up_when_verification_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("", encoding="utf-8")
+    child = _FakeProcess(404)
+    scope = _FakeProcess(101)
+    observed = _install_probe_fakes(
+        monkeypatch,
+        scope=scope,
+        child=child,
+        procs=procs,
+    )
+    monkeypatch.setattr(
+        run_containment,
+        "_process_belongs_to_cgroup",
+        Mock(side_effect=RuntimeError("membership backend failed")),
+    )
+    result = probe_native_containment()
+    assert result.available is False
+    assert "membership backend failed" in result.message
+    assert observed["stopped"]
+    assert child.killed
+    assert scope.killed
+
+
+def test_probe_requires_confirmed_cgroup_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(run_containment, "_PROBE_MEMBERSHIP_TIMEOUT_SECONDS", 0.0)
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("", encoding="utf-8")
+    child = _FakeProcess(202)
+    observed = _install_probe_fakes(
+        monkeypatch,
+        scope=_FakeProcess(101),
+        child=child,
+        procs=procs,
+        child_cgroup=Path("/sys/fs/cgroup/unrelated.slice"),
+    )
+    result = probe_native_containment()
+    assert result.available is False
+    assert "could not be confirmed" in result.message
+    assert procs.read_text(encoding="utf-8") == "202\n"
+    assert observed["stopped"]
+    assert child.killed
+
+
+def test_assign_process_appends_only_the_requested_pid(tmp_path: Path) -> None:
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("1\n", encoding="utf-8")
+    session = RunContainmentSession(
+        "missus-tom-run-test.scope",
+        keeper_process=Mock(poll=lambda: None),
+        cgroup_procs=procs,
+    )
+    session.assign_process(42)
+    assert procs.read_text(encoding="utf-8") == "1\n42\n"
+
+
+def test_assign_process_wraps_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    procs = tmp_path / "cgroup.procs"
+    procs.write_text("", encoding="utf-8")
+
+    def deny(path: Path, process_id: int) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(run_containment, "_assign_pid_to_cgroup_procs", deny)
+    session = RunContainmentSession(
+        "missus-tom-run-test.scope",
+        keeper_process=Mock(poll=lambda: None),
+        cgroup_procs=procs,
+    )
+    with pytest.raises(ValueError, match="Could not assign process 99 to containment scope"):
+        session.assign_process(99)
 
 
 def test_cancellation_stops_scope(monkeypatch: pytest.MonkeyPatch) -> None:

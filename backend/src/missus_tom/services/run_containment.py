@@ -1,4 +1,17 @@
-"""Linux-native hard resource containment for local workflow runs."""
+"""Linux-native hard resource containment for local workflow runs.
+
+Production starts one keeper scope per run and moves owned child processes into
+it by appending their PIDs to that scope's ``cgroup.procs`` file. The capability
+probe performs that same migration. A successful ``systemd-run --user --scope --
+true`` only proves that a transient scope can be created.
+
+Launching each owned command as the direct payload of ``systemd-run --user
+--scope`` would place that process in the scope without a later cgroup
+migration, including on hosts that allow scope creation but reject
+``cgroup.procs`` writes. That launch shape is not used: preparation and the
+workflow are started as separate children of an existing scope, and only those
+owned PIDs may be moved into it.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +20,19 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
 _GIB = 1024**3
 
 TASKS_MAX_PER_PARALLEL_TASK = 32
 SCOPE_UNIT_PREFIX = "missus-tom-run-"
+_PROBE_SCOPE_PREFIX = "missus-tom-probe-"
+_PROBE_READY_TIMEOUT_SECONDS = 15.0
+_PROBE_MEMBERSHIP_TIMEOUT_SECONDS = 2.0
 _BUILD_LOG_PATTERN = re.compile(r"See (\S+build\.log)")
 
 
@@ -89,10 +107,13 @@ def build_scope_command(properties: ScopeProperties) -> list[str]:
 
 def native_containment_enablement_instructions() -> str:
     return (
-        "Enable delegated cgroup controllers for your user session: ensure XDG_RUNTIME_DIR is set, "
-        "log in through a systemd user session (not a bare SSH shell without lingering), and on "
-        "WSL2 use systemd=true in /etc/wsl.conf then restart WSL. Verify with "
-        "'systemd-run --user --scope true'. Alternatively use the Docker execution profile."
+        "Enable delegated cgroup controllers for your user session so an owned child process "
+        "can be moved into a systemd user scope. Ensure XDG_RUNTIME_DIR is set, log in through "
+        "a systemd user session (not a bare SSH shell without lingering), and on WSL2 use "
+        "systemd=true in /etc/wsl.conf then restart WSL. A successful "
+        "'systemd-run --user --scope true' is not sufficient: the session must allow writing "
+        "that child's PID to the scope cgroup.procs file. Alternatively use the Docker "
+        "execution profile."
     )
 
 
@@ -103,48 +124,214 @@ def _user_bus_available() -> bool:
     return Path(runtime_dir).joinpath("bus").is_socket()
 
 
+def _containment_unavailable(message: str) -> ContainmentProbeResult:
+    return ContainmentProbeResult(
+        available=False,
+        message=message,
+        enablement=native_containment_enablement_instructions(),
+    )
+
+
+def _assign_pid_to_cgroup_procs(cgroup_procs: Path, process_id: int) -> None:
+    """Append one owned PID to a cgroup.procs file.
+
+    Callers must pass a process they started. This never signals or adopts any
+    other process.
+    """
+    with cgroup_procs.open("a", encoding="utf-8") as handle:
+        handle.write(f"{process_id}\n")
+        handle.flush()
+
+
+def _cgroup_procs_file(control_group: str) -> Path | None:
+    cgroup_root = Path("/sys/fs/cgroup").resolve()
+    procs_path = (cgroup_root / control_group.lstrip("/") / "cgroup.procs").resolve()
+    try:
+        inside_root = procs_path.is_relative_to(cgroup_root)
+    except ValueError:
+        return None
+    if not inside_root or not procs_path.is_file():
+        return None
+    return procs_path
+
+
+def _spawn_probe_scope(scope_unit: str) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            "systemd-run",
+            "--user",
+            "--scope",
+            "--collect",
+            f"--unit={scope_unit}",
+            "--",
+            "sleep",
+            "30",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        shell=False,
+    )
+
+
+def _spawn_probe_child() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        ["sleep", "30"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+        shell=False,
+    )
+
+
+def _wait_for_probe_cgroup(
+    scope_unit: str,
+    scope_process: subprocess.Popen[str],
+) -> str | ContainmentProbeResult:
+    deadline = time.monotonic() + _PROBE_READY_TIMEOUT_SECONDS
+    while True:
+        if scope_process.poll() is not None:
+            detail = ""
+            if scope_process.stderr is not None:
+                detail = scope_process.stderr.read().strip()
+            message = "systemd-run --user could not create a delegated scope"
+            if detail:
+                message = f"{message}: {detail}"
+            return _containment_unavailable(message)
+        control_group = _control_group_for_unit(scope_unit)
+        if control_group is not None:
+            return control_group
+        if time.monotonic() >= deadline:
+            return _containment_unavailable(
+                "systemd-run --user started but did not publish a scope cgroup before timing out."
+            )
+        time.sleep(0.05)
+
+
+def _process_belongs_to_cgroup(process_id: int, control_group: str) -> bool:
+    scope_path = Path("/sys/fs/cgroup") / control_group.lstrip("/")
+    deadline = time.monotonic() + _PROBE_MEMBERSHIP_TIMEOUT_SECONDS
+    while True:
+        try:
+            child_path = process_cgroup_path(process_id)
+            if child_path is not None and _path_is_within(child_path, scope_path):
+                return True
+        except OSError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _path_is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _terminate_owned_process(process: subprocess.Popen[str] | None) -> None:
+    if process is None:
+        return
+    with suppress(OSError):
+        if process.poll() is None:
+            process.kill()
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
+def _cleanup_containment_probe(
+    scope_unit: str,
+    *,
+    scope_process: subprocess.Popen[str] | None,
+    child: subprocess.Popen[str] | None,
+    stop_scope: bool,
+) -> None:
+    """Stop only the probe scope and reap only the processes this probe started."""
+    if stop_scope:
+        with suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                ["systemctl", "--user", "stop", scope_unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                shell=False,
+            )
+    _terminate_owned_process(child)
+    _terminate_owned_process(scope_process)
+
+
+def _probe_scope_assignment() -> ContainmentProbeResult:
+    """Create a disposable scope and migrate one harmless child into it.
+
+    This must not call ``RunContainmentSession.start`` or
+    ``require_native_containment``: those entry points invoke this probe.
+    """
+    scope_unit = f"{_PROBE_SCOPE_PREFIX}{uuid4().hex}.scope"
+    scope_process: subprocess.Popen[str] | None = None
+    child: subprocess.Popen[str] | None = None
+    try:
+        try:
+            scope_process = _spawn_probe_scope(scope_unit)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return _containment_unavailable(f"systemd-run --user is unavailable: {exc}")
+        ready = _wait_for_probe_cgroup(scope_unit, scope_process)
+        if isinstance(ready, ContainmentProbeResult):
+            return ready
+        procs = _cgroup_procs_file(ready)
+        if procs is None:
+            return _containment_unavailable(
+                "systemd-run --user created a scope, but its cgroup.procs file is not accessible."
+            )
+        try:
+            child = _spawn_probe_child()
+        except OSError as exc:
+            return _containment_unavailable(
+                f"Could not start a probe process for cgroup assignment: {exc}"
+            )
+        try:
+            _assign_pid_to_cgroup_procs(procs, child.pid)
+        except OSError as exc:
+            return _containment_unavailable(
+                "A systemd user scope was created, but this session cannot assign a "
+                f"process to that scope ({exc.__class__.__name__}: {exc}). Delegated "
+                "cgroup controllers are required before workflow processes can be moved "
+                "into the scope."
+            )
+        if not _process_belongs_to_cgroup(child.pid, ready):
+            return _containment_unavailable(
+                "A probe process was written to the scope cgroup.procs file, but its "
+                "cgroup membership could not be confirmed."
+            )
+        return ContainmentProbeResult(
+            available=True,
+            message=(
+                "systemd user scopes are available and can accept assigned workflow processes."
+            ),
+        )
+    except Exception as exc:
+        return _containment_unavailable(f"Native resource containment could not be verified: {exc}")
+    finally:
+        _cleanup_containment_probe(
+            scope_unit,
+            scope_process=scope_process,
+            child=child,
+            stop_scope=scope_process is not None,
+        )
+
+
 def probe_native_containment() -> ContainmentProbeResult:
     if sys.platform != "linux":
-        return ContainmentProbeResult(
-            available=False,
-            message="Native resource containment requires Linux.",
-            enablement=native_containment_enablement_instructions(),
-        )
+        return _containment_unavailable("Native resource containment requires Linux.")
     if not _user_bus_available():
-        return ContainmentProbeResult(
-            available=False,
-            message="Native resource containment requires an active systemd user session bus.",
-            enablement=native_containment_enablement_instructions(),
+        return _containment_unavailable(
+            "Native resource containment requires an active systemd user session bus."
         )
-    try:
-        completed = subprocess.run(
-            ["systemd-run", "--user", "--scope", "--", "true"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return ContainmentProbeResult(
-            available=False,
-            message=f"systemd-run --user is unavailable: {exc}",
-            enablement=native_containment_enablement_instructions(),
-        )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        return ContainmentProbeResult(
-            available=False,
-            message=(
-                "systemd-run --user could not create a delegated scope"
-                + (f": {detail}" if detail else "")
-            ),
-            enablement=native_containment_enablement_instructions(),
-        )
-    return ContainmentProbeResult(
-        available=True,
-        message="systemd user scopes are available for native resource containment.",
-    )
+    return _probe_scope_assignment()
 
 
 def require_native_containment() -> None:
@@ -312,9 +499,7 @@ class RunContainmentSession:
 
     def assign_process(self, process_id: int) -> None:
         try:
-            with self._cgroup_procs.open("a", encoding="utf-8") as handle:
-                handle.write(f"{process_id}\n")
-                handle.flush()
+            _assign_pid_to_cgroup_procs(self._cgroup_procs, process_id)
         except OSError as exc:
             raise ValueError(f"Could not assign process {process_id} to containment scope") from exc
 
