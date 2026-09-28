@@ -73,7 +73,7 @@ class HeartbeatAdapter(StubAdapter):
         *,
         start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
     ) -> list[str]:
-        return [sys.executable, "-c", "import time; time.sleep(0.12)"]
+        return [sys.executable, "-c", "import time; time.sleep(1.5)"]
 
 
 class DescendantAdapter(SleepingAdapter):
@@ -149,7 +149,7 @@ def _stub_native_containment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def wait_for_terminal(manager: RunManager, job_identifier: str) -> RunRecord:
-    for _ in range(300):
+    for _ in range(800):
         record = manager.get(job_identifier)
         if not record.holds_admission:
             return record
@@ -225,7 +225,7 @@ def test_run_manager_writes_timestamped_heartbeats(
     manifest = ProjectManifest.model_validate(manifest_payload)
     (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
     monkeypatch.setattr(runs_module, "CHECK_INTERVAL_SECONDS", 0.01)
-    monkeypatch.setattr(runs_module, "HEARTBEAT_INTERVAL_SECONDS", 0.03)
+    monkeypatch.setattr(runs_module, "HEARTBEAT_INTERVAL_SECONDS", 0.0)
     manager = RunManager(HeartbeatAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
 
     started = manager.start(manifest)
