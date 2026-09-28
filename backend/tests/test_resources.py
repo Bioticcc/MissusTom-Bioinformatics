@@ -8,8 +8,20 @@ import pytest
 from pydantic import ValidationError
 
 from missus_tom.models.manifest import ProjectManifest, ResourceProfile
+from missus_tom.models.preflight import CheckStatus
 from missus_tom.services import resources
 from missus_tom.services.resources import GIB, HostResources
+
+
+@pytest.fixture(autouse=True)
+def _containment_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    from missus_tom.services.run_containment import ContainmentProbeResult
+
+    monkeypatch.setattr(
+        resources,
+        "probe_native_containment",
+        lambda: ContainmentProbeResult(True, "available"),
+    )
 
 
 @pytest.fixture
@@ -22,6 +34,27 @@ def capacity(monkeypatch: pytest.MonkeyPatch) -> None:
         "disk_usage",
         lambda _: SimpleNamespace(free=1000 * GIB, total=2000 * GIB),
     )
+
+
+def test_native_containment_unavailable_blocks_strict_launch(
+    capacity: None, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from missus_tom.services.run_containment import ContainmentProbeResult
+
+    monkeypatch.setattr(
+        resources,
+        "probe_native_containment",
+        lambda: ContainmentProbeResult(False, "missing bus", "enable systemd user session"),
+    )
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    containment = next(
+        check
+        for check in resources.execution_resource_checks(manifest, strict=True)
+        if check.check_id == "native_resource_containment"
+    )
+    assert containment.status == CheckStatus.BLOCKING
+    with pytest.raises(ValueError, match="Insufficient resources"):
+        resources.validate_execution_resources(manifest, analysis_only=False)
 
 
 def test_headroom_is_reserved() -> None:

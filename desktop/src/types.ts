@@ -1,3 +1,20 @@
+export interface HealthCapabilities {
+  bulk_fasta_gtf_reference_preparation: boolean;
+  bulk_managed_kallisto_index: boolean;
+  bulk_legacy_biomart_execution: boolean;
+}
+
+export interface HealthStatus {
+  name: string;
+  version: string;
+  status: string;
+  execution_enabled: boolean;
+  build_revision?: string;
+  manifest_schema_versions?: string[];
+  bulk_pipeline_versions?: string[];
+  capabilities?: Partial<HealthCapabilities>;
+}
+
 export type ViewId = "dashboard" | "setup" | "wizard" | "run-plan" | "jobs" | "results" | "settings";
 
 export interface ErrorDetail {

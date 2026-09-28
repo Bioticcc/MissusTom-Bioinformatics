@@ -25,6 +25,7 @@ from missus_tom.models.discovery import (
     QuantificationDiscoveryRequest,
     QuantificationDiscoveryResult,
 )
+from missus_tom.models.errors import UNSUPPORTED_PIPELINE, ApiCodedError
 from missus_tom.models.manifest import (
     ProjectManifest,
     ProjectSaveResult,
@@ -80,6 +81,10 @@ def health() -> ApiResponse[dict[str, Any]]:
             "version": settings.app_version,
             "status": "ok",
             "execution_enabled": settings.execution_enabled,
+            "build_revision": settings.build_revision,
+            "manifest_schema_versions": list(settings.manifest_schema_versions),
+            "bulk_pipeline_versions": list(settings.bulk_pipeline_versions),
+            "capabilities": settings.capabilities,
         }
     )
 
@@ -426,7 +431,7 @@ def get_pipeline_status(pipeline_identifier: str) -> ApiResponse[PipelineStatusR
     try:
         return ApiResponse(data=pipeline_registry.get(pipeline_identifier).inspect_availability())
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise ApiCodedError(404, UNSUPPORTED_PIPELINE, str(exc)) from exc
 
 
 @router.get(
@@ -439,7 +444,7 @@ def get_pipeline_dependencies(pipeline_identifier: str) -> ApiResponse[Dependenc
         pipeline_registry.get(pipeline_identifier)
         return ApiResponse(data=dependency_installer.status(pipeline_identifier))
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise ApiCodedError(404, UNSUPPORTED_PIPELINE, str(exc)) from exc
 
 
 @router.post(
@@ -457,7 +462,7 @@ def post_pipeline_dependencies_install(
     except ValueError as exc:
         message = str(exc)
         if message.startswith("unsupported pipeline identifier"):
-            raise HTTPException(status_code=404, detail=message) from exc
+            raise ApiCodedError(404, UNSUPPORTED_PIPELINE, message) from exc
         raise HTTPException(status_code=409, detail=message) from exc
 
 

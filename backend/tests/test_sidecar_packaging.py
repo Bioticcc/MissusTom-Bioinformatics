@@ -113,6 +113,9 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
     (repository_root / "workflows").mkdir()
     resource_script = repository_root / "scripts" / "build-analysis-image.sh"
     resource_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    lock_dir = repository_root / "backend" / "src" / "missus_tom" / "resources" / "locks"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "bulk-rnaseq-linux-64.lock").write_text("@EXPLICIT\n", encoding="utf-8")
 
     result = _run_script(
         script,

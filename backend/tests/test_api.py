@@ -40,6 +40,13 @@ async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
     assert body["success"] is True
     assert body["data"]["status"] == "ok"
     assert body["data"]["execution_enabled"] is True
+    assert body["data"]["version"]
+    assert body["data"]["build_revision"]
+    assert "1.1.0" in body["data"]["manifest_schema_versions"]
+    assert "0.5.0" in body["data"]["bulk_pipeline_versions"]
+    assert body["data"]["capabilities"]["bulk_fasta_gtf_reference_preparation"] is True
+    assert body["data"]["capabilities"]["bulk_managed_kallisto_index"] is True
+    assert body["data"]["capabilities"]["bulk_legacy_biomart_execution"] is False
 
 
 @pytest.mark.parametrize("origin", ("tauri://localhost", "http://tauri.localhost"))

@@ -8,6 +8,14 @@ export const ONT_PIPELINE_VERSION = "0.1.0" as const;
 export type BulkReferenceMode = "build" | "existing-index";
 export type BulkStrandedness = "unstranded" | "forward" | "reverse";
 
+export function projectActionsBlockedByBackend(
+  pipeline: "bulk-rnaseq" | "ont-analysis",
+  healthReady: boolean,
+  compatibilityError: string | null,
+): boolean {
+  return pipeline === "bulk-rnaseq" && (!healthReady || compatibilityError !== null);
+}
+
 export const DEFAULT_ADAPTER_R1 = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA";
 export const DEFAULT_ADAPTER_R2 = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT";
 
@@ -19,19 +27,22 @@ export const STRANDEDNESS_UI_OPTIONS: ReadonlyArray<{
   {
     value: "unstranded",
     label: "Unstranded",
-    mappingNote: "Recorded as unstranded; Kallisto runs without a strandedness flag.",
+    mappingNote: "No strandedness flag.",
   },
   {
     value: "forward",
-    label: "Forward (FR / first-strand)",
-    mappingNote: "Recorded as forward; Kallisto uses --fr-stranded.",
+    label: "Forward / FR",
+    mappingNote: "Read 1 maps in transcript orientation; Kallisto uses --fr-stranded.",
   },
   {
     value: "reverse",
-    label: "Reverse (RF / second-strand)",
-    mappingNote: "Recorded as reverse; Kallisto uses --rf-stranded.",
+    label: "Reverse / RF",
+    mappingNote: "Read 1 maps antisense to the transcript; Kallisto uses --rf-stranded.",
   },
 ];
+
+export const STRANDEDNESS_KIT_HELP =
+  "Common first-strand protocols are usually RF and common second-strand protocols are usually FR. Confirm the strandedness specified by your library kit.";
 
 export interface BulkReferenceInputs {
   transcriptomeFasta: string;
@@ -67,9 +78,11 @@ export function buildBulkReferenceResources(
     const index = inputs.kallistoIndex.trim();
     const gtf = inputs.annotationGtf.trim();
     const t2g = inputs.transcriptToGene.trim();
+    const fasta = inputs.transcriptomeFasta.trim();
     if (index) resources.kallisto_index = index;
     if (gtf) resources.annotation_gtf = gtf;
     else if (t2g) resources.transcript_to_gene = t2g;
+    if (fasta) resources.transcriptome_fasta = fasta;
     return resources;
   }
   if (startStage === "analysis") {

@@ -77,6 +77,14 @@ class RunStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class RunExecutionPhase(StrEnum):
+    QUEUED = "queued"
+    REFERENCE_PREPARATION = "reference_preparation"
+    REFERENCE_PREPARED = "reference_prepared"
+    WORKFLOW_LAUNCH = "workflow_launch"
+    WORKFLOW = "workflow"
+
+
 class RunRecord(BaseModel):
     job_identifier: str
     project_identifier: str
@@ -100,6 +108,9 @@ class RunRecord(BaseModel):
     process_group_id: int | None = None
     process_start_ticks: int | None = None
     process_boot_id: str | None = None
+    execution_phase: RunExecutionPhase = RunExecutionPhase.QUEUED
+    containment_scope_id: str | None = None
+    containment_cleanup_attempts: int = 0
     holds_admission: bool = False
     container_cleanup_required: bool = False
     container_cleanup_verified_at: datetime | None = None

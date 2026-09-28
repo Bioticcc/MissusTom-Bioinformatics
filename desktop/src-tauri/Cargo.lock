@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "missus-tom"
-version = "0.3.0"
+version = "0.3.0-rc.13"
 dependencies = [
  "serde",
  "serde_json",

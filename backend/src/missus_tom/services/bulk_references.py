@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import gzip
 import hashlib
 import json
+import os
 import subprocess
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, TextIO
+from typing import Final, Literal, TextIO, TypedDict, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -49,10 +52,45 @@ ReferenceCommandRunner = Callable[
     subprocess.CompletedProcess[str],
 ]
 CancellationCheck = Callable[[], bool]
+StatusCallback = Callable[[str], None]
+T = TypeVar("T")
+
+
+class _CacheLockKwargs(TypedDict):
+    cancellation_check: CancellationCheck | None
+    status_callback: StatusCallback | None
+    lock_timeout_seconds: float
 
 
 class BulkReferenceError(Exception):
     """Predictable reference preparation or validation failure."""
+
+
+def safe_reference_read(label: str, operation: Callable[[], T]) -> T:
+    """Run reference I/O and translate common failures into BulkReferenceError."""
+    try:
+        return operation()
+    except BulkReferenceError:
+        raise
+    except UnicodeError as exc:
+        raise BulkReferenceError(f"{label}: invalid UTF-8 text encoding.") from exc
+    except gzip.BadGzipFile as exc:
+        raise BulkReferenceError(f"{label}: invalid gzip compression.") from exc
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+            raise BulkReferenceError(f"{label}: file is missing or unavailable.") from exc
+        if exc.errno in {errno.EACCES, errno.EPERM}:
+            raise BulkReferenceError(f"{label}: file is not readable.") from exc
+        raise BulkReferenceError(f"{label}: could not read file ({exc}).") from exc
+
+
+def read_build_log_excerpt(log_path: Path, *, max_bytes: int = 4096) -> str:
+    if not log_path.is_file():
+        return ""
+    data = log_path.read_bytes()
+    if len(data) > max_bytes:
+        data = data[-max_bytes:]
+    return data.decode("utf-8", errors="replace")
 
 
 class GtfTranscriptRecord(BaseModel):
@@ -204,14 +242,17 @@ def parse_gtf_transcript_records(
     feature_rows: dict[str, GtfTranscriptRecord] = {}
     gff3_attributes_seen = False
     with _open_reference_text(gtf_path) as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
             if cancellation_check and cancellation_check():
                 raise BulkReferenceError("Reference preparation was cancelled.")
             if not line.strip() or line.startswith("#"):
                 continue
             fields = line.rstrip("\n").split("\t")
-            if len(fields) < 9:
-                continue
+            if len(fields) != 9:
+                raise BulkReferenceError(
+                    "Annotation GTF has a malformed feature row "
+                    f"at line {line_number}: expected 9 tab-separated fields."
+                )
             feature = fields[2]
             if "=" in fields[8] and '"' not in fields[8]:
                 gff3_attributes_seen = True
@@ -385,38 +426,93 @@ def write_transcript_to_gene_table(path: Path, records: Sequence[GtfTranscriptRe
                 record.transcript_biotype,
             )
             handle.write("\t".join(row) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     temp_path.replace(path)
 
 
-def read_supplied_transcript_to_gene(path: Path) -> set[str]:
-    with _open_reference_text(path) as handle:
-        header = handle.readline().strip().split("\t")
-        missing = [column for column in ("transcript_id", "gene_id") if column not in header]
-        if missing:
-            raise BulkReferenceError(
-                "Supplied transcript_to_gene table is missing required columns: "
-                + ", ".join(missing)
-            )
-        transcript_index = header.index("transcript_id")
-        gene_index = header.index("gene_id")
-        transcript_ids: set[str] = set()
-        for line_number, line in enumerate(handle, start=2):
-            fields = line.rstrip("\n").split("\t")
-            if len(fields) <= max(transcript_index, gene_index):
+def _optional_column_index(header: list[str], column: str) -> int | None:
+    return header.index(column) if column in header else None
+
+
+def read_supplied_transcript_to_gene(path: Path) -> list[GtfTranscriptRecord]:
+    label = f"Supplied transcript_to_gene table ({path})"
+
+    def _read() -> list[GtfTranscriptRecord]:
+        with _open_reference_text(path) as handle:
+            header = handle.readline().strip().split("\t")
+            missing = [column for column in ("transcript_id", "gene_id") if column not in header]
+            if missing:
                 raise BulkReferenceError(
-                    f"Supplied transcript_to_gene table has a malformed row at line {line_number}"
+                    "Supplied transcript_to_gene table is missing required columns: "
+                    + ", ".join(missing)
                 )
-            transcript_id = fields[transcript_index].strip()
-            gene_id = fields[gene_index].strip()
-            if not transcript_id or not gene_id:
-                raise BulkReferenceError(
-                    "Supplied transcript_to_gene table has an empty identifier "
-                    f"at line {line_number}"
+            transcript_index = header.index("transcript_id")
+            gene_index = header.index("gene_id")
+            gene_name_index = _optional_column_index(header, "gene_name")
+            gene_biotype_index = _optional_column_index(header, "gene_biotype")
+            transcript_biotype_index = _optional_column_index(header, "transcript_biotype")
+            by_transcript: dict[str, GtfTranscriptRecord] = {}
+            for line_number, line in enumerate(handle, start=2):
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) <= max(transcript_index, gene_index):
+                    raise BulkReferenceError(
+                        "Supplied transcript_to_gene table has a malformed row "
+                        f"at line {line_number}"
+                    )
+                transcript_id = fields[transcript_index].strip()
+                gene_id = fields[gene_index].strip()
+                if not transcript_id or not gene_id:
+                    raise BulkReferenceError(
+                        "Supplied transcript_to_gene table has an empty identifier "
+                        f"at line {line_number}"
+                    )
+
+                def _field(index: int | None, row: list[str]) -> str:
+                    if index is None or len(row) <= index:
+                        return ""
+                    return row[index].strip()
+
+                record = GtfTranscriptRecord(
+                    transcript_id=transcript_id,
+                    gene_id=gene_id,
+                    gene_name=_field(gene_name_index, fields),
+                    gene_biotype=_field(gene_biotype_index, fields),
+                    transcript_biotype=_field(transcript_biotype_index, fields),
                 )
-            transcript_ids.add(transcript_id)
-    if not transcript_ids:
-        raise BulkReferenceError("Supplied transcript_to_gene table contains no mapping rows")
-    return transcript_ids
+                existing = by_transcript.get(transcript_id)
+                if existing is not None:
+                    if existing == record:
+                        continue
+                    if existing.gene_id != record.gene_id:
+                        raise BulkReferenceError(
+                            "Supplied transcript_to_gene table maps transcript "
+                            f"{transcript_id!r} to conflicting gene_id values "
+                            f"({existing.gene_id!r} and {record.gene_id!r})."
+                        )
+                    if existing.gene_name != record.gene_name:
+                        raise BulkReferenceError(
+                            "Supplied transcript_to_gene table maps transcript "
+                            f"{transcript_id!r} to conflicting gene_name values."
+                        )
+                    if existing.gene_biotype != record.gene_biotype:
+                        raise BulkReferenceError(
+                            "Supplied transcript_to_gene table maps transcript "
+                            f"{transcript_id!r} to conflicting gene_biotype values."
+                        )
+                    if existing.transcript_biotype != record.transcript_biotype:
+                        raise BulkReferenceError(
+                            "Supplied transcript_to_gene table maps transcript "
+                            f"{transcript_id!r} to conflicting transcript_biotype values."
+                        )
+                by_transcript[transcript_id] = record
+        if not by_transcript:
+            raise BulkReferenceError("Supplied transcript_to_gene table contains no mapping rows")
+        return sorted(by_transcript.values(), key=lambda item: item.transcript_id)
+
+    result = safe_reference_read(label, _read)
+    assert isinstance(result, list)
+    return result
 
 
 def validate_mapping_fasta_overlap(
@@ -425,7 +521,8 @@ def validate_mapping_fasta_overlap(
     *,
     cancellation_check: CancellationCheck | None = None,
 ) -> float:
-    mapping_ids = read_supplied_transcript_to_gene(mapping_path)
+    supplied_records = read_supplied_transcript_to_gene(mapping_path)
+    mapping_ids = {record.transcript_id for record in supplied_records}
     fasta_ids = iter_fasta_transcript_ids(
         fasta_path,
         cancellation_check=cancellation_check,
@@ -446,7 +543,8 @@ def validate_mapping_abundance_overlap(
     mapping_path: Path,
     abundance_paths: Sequence[tuple[str, Path]],
 ) -> None:
-    mapping_ids = read_supplied_transcript_to_gene(mapping_path)
+    supplied_records = read_supplied_transcript_to_gene(mapping_path)
+    mapping_ids = {record.transcript_id for record in supplied_records}
     for sample_id, abundance_path in abundance_paths:
         abundance_path = _require_file(abundance_path, f"abundance_tsv for sample {sample_id}")
         with abundance_path.open(encoding="utf-8") as handle:
@@ -506,25 +604,54 @@ def _read_complete_marker(directory: Path) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _write_build_log(log_path: Path, text: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _mark_failed(directory: Path, message: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     payload = {"message": message}
     failed_path = directory / _FAILED_MARKER
     failed_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    for name in (_INDEX_FILENAME, _MAPPING_FILENAME, _BUILD_LOG, _COMPLETE_MARKER):
+    for name in (_INDEX_FILENAME, _MAPPING_FILENAME, _COMPLETE_MARKER):
         candidate = directory / name
         if candidate.exists():
             candidate.unlink()
+    for pattern in (f"*{_MAPPING_FILENAME}.tmp", f".*{_INDEX_FILENAME}.tmp"):
+        for candidate in directory.glob(pattern):
+            if candidate.is_file():
+                candidate.unlink()
 
 
-def _cache_is_usable(directory: Path, *, artifact_name: str, identity: str) -> bool:
+def _cache_is_usable(
+    directory: Path,
+    *,
+    artifact_name: str,
+    identity: str,
+    expected_metadata: Mapping[str, object] | None = None,
+) -> bool:
     if (directory / _FAILED_MARKER).is_file():
         return False
     marker = _read_complete_marker(directory)
     if marker is None or marker.get("identity") != identity:
         return False
     artifact = directory / artifact_name
-    return artifact.is_file() and artifact.stat().st_size > 0
+    if not artifact.is_file() or artifact.stat().st_size == 0:
+        return False
+    if expected_metadata:
+        marker_metadata = marker.get("metadata")
+        if not isinstance(marker_metadata, dict):
+            return False
+        for key, expected in expected_metadata.items():
+            if expected is None:
+                continue
+            if marker_metadata.get(key) != expected:
+                return False
+    return True
 
 
 def _cached_overlap(directory: Path) -> OverlapAssessment | None:
@@ -539,12 +666,40 @@ def _cached_overlap(directory: Path) -> OverlapAssessment | None:
         return None
 
 
+_DEFAULT_LOCK_TIMEOUT_SECONDS: Final = 900.0
+_LOCK_INITIAL_BACKOFF_SECONDS: Final = 0.05
+_LOCK_MAX_BACKOFF_SECONDS: Final = 2.0
+
+
 @contextmanager
-def _cache_lock(directory: Path) -> Iterator[None]:
+def _cache_lock(
+    directory: Path,
+    *,
+    cancellation_check: CancellationCheck | None = None,
+    status_callback: Callable[[str], None] | None = None,
+    lock_timeout_seconds: float = _DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
     directory.mkdir(parents=True, exist_ok=True)
     lock_path = directory / ".prepare.lock"
+    deadline = time.monotonic() + lock_timeout_seconds
+    backoff = _LOCK_INITIAL_BACKOFF_SECONDS
     with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        while True:
+            if cancellation_check and cancellation_check():
+                raise BulkReferenceError("Reference preparation was cancelled.")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if status_callback:
+                    status_callback("Waiting for reference cache")
+                if time.monotonic() >= deadline:
+                    raise BulkReferenceError(
+                        "Timed out waiting for the reference cache lock. "
+                        "Another run may still be preparing references; retry later."
+                    ) from None
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _LOCK_MAX_BACKOFF_SECONDS)
         try:
             yield
         finally:
@@ -563,6 +718,8 @@ class BulkReferenceManager:
         command_runner: ReferenceCommandRunner | None = None,
         environment: Mapping[str, str] | None = None,
         cancellation_check: CancellationCheck | None = None,
+        status_callback: StatusCallback | None = None,
+        lock_timeout_seconds: float = _DEFAULT_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self._cache_root = cache_root.resolve()
         self._kallisto = kallisto
@@ -570,6 +727,15 @@ class BulkReferenceManager:
         self._command_runner = command_runner or self._run_command
         self._environment = environment
         self._cancellation_check = cancellation_check
+        self._status_callback = status_callback
+        self._lock_timeout_seconds = lock_timeout_seconds
+
+    def _lock_kwargs(self) -> _CacheLockKwargs:
+        return {
+            "cancellation_check": self._cancellation_check,
+            "status_callback": self._status_callback,
+            "lock_timeout_seconds": self._lock_timeout_seconds,
+        }
 
     def _sha256_file(self, path: Path) -> str:
         return sha256_file(path, cancellation_check=self._cancellation_check)
@@ -691,11 +857,17 @@ class BulkReferenceManager:
         )
         cache_dir = self._cache_root / "transcript_to_gene" / identity
         artifact = cache_dir / _MAPPING_FILENAME
-        with _cache_lock(cache_dir):
+        with _cache_lock(cache_dir, **self._lock_kwargs()):
+            mapping_metadata = {
+                "normalization_version": NORMALIZATION_VERSION,
+                "gtf_sha256": gtf_sha,
+                "fasta_sha256": fasta_sha,
+            }
             if _cache_is_usable(
                 cache_dir,
                 artifact_name=_MAPPING_FILENAME,
                 identity=identity,
+                expected_metadata=mapping_metadata,
             ):
                 overlap = _cached_overlap(cache_dir)
                 return PreparedBulkReferences(
@@ -762,11 +934,17 @@ class BulkReferenceManager:
         )
         mapping_dir = self._cache_root / "transcript_to_gene" / annotation_identity
         mapping_path = mapping_dir / _MAPPING_FILENAME
-        with _cache_lock(mapping_dir):
+        mapping_metadata = {
+            "normalization_version": NORMALIZATION_VERSION,
+            "gtf_sha256": gtf_sha,
+            "fasta_sha256": fasta_sha,
+        }
+        with _cache_lock(mapping_dir, **self._lock_kwargs()):
             if not _cache_is_usable(
                 mapping_dir,
                 artifact_name=_MAPPING_FILENAME,
                 identity=annotation_identity,
+                expected_metadata=mapping_metadata,
             ):
                 write_transcript_to_gene_table(mapping_path, records)
                 _write_complete_marker(
@@ -791,11 +969,16 @@ class BulkReferenceManager:
             )
             index_dir = self._cache_root / "kallisto_index" / index_identity
             index_path = index_dir / _INDEX_FILENAME
-            with _cache_lock(index_dir):
+            with _cache_lock(index_dir, **self._lock_kwargs()):
+                index_metadata = {
+                    "kallisto_version": self._kallisto.version,
+                    "fasta_sha256": fasta_sha,
+                }
                 if not _cache_is_usable(
                     index_dir,
                     artifact_name=_INDEX_FILENAME,
                     identity=index_identity,
+                    expected_metadata=index_metadata,
                 ):
                     self._build_kallisto_index(
                         index_dir,
@@ -867,11 +1050,17 @@ class BulkReferenceManager:
         mapping_dir = self._cache_root / "transcript_to_gene" / annotation_identity
         mapping_path = mapping_dir / _MAPPING_FILENAME
         overlap: OverlapAssessment | None = None
-        with _cache_lock(mapping_dir):
+        mapping_metadata = {
+            "normalization_version": NORMALIZATION_VERSION,
+            "gtf_sha256": gtf_sha,
+            "fasta_sha256": fasta_sha,
+        }
+        with _cache_lock(mapping_dir, **self._lock_kwargs()):
             if not _cache_is_usable(
                 mapping_dir,
                 artifact_name=_MAPPING_FILENAME,
                 identity=annotation_identity,
+                expected_metadata=mapping_metadata,
             ):
                 if fasta_path and fasta_path.is_file():
                     overlap, records = self._normalize_with_fasta(fasta_path, gtf_path)
@@ -973,19 +1162,25 @@ class BulkReferenceManager:
             raise BulkReferenceError("Kallisto runtime is not configured for index construction.")
 
         index_dir.mkdir(parents=True, exist_ok=True)
+        log_path = index_dir / _BUILD_LOG
+        index_metadata = {
+            "kallisto_version": self._kallisto.version,
+            "fasta_sha256": fasta_sha256,
+        }
         if (index_dir / _FAILED_MARKER).is_file() or not _cache_is_usable(
             index_dir,
             artifact_name=_INDEX_FILENAME,
             identity=identity,
+            expected_metadata=index_metadata,
         ):
-            for name in (_INDEX_FILENAME, _BUILD_LOG, _COMPLETE_MARKER, _FAILED_MARKER):
+            for name in (_INDEX_FILENAME, _COMPLETE_MARKER, _FAILED_MARKER):
                 candidate = index_dir / name
                 if candidate.exists():
                     candidate.unlink()
+            log_path.write_text("", encoding="utf-8")
 
         destination = index_dir / _INDEX_FILENAME
         temp_destination = index_dir / f".{_INDEX_FILENAME}.tmp"
-        log_path = index_dir / _BUILD_LOG
         command = [
             str(self._kallisto.executable),
             "index",
@@ -997,27 +1192,33 @@ class BulkReferenceManager:
         try:
             completed = self._command_runner(command, self._environment)
         except OSError as exc:
+            _write_build_log(log_path, str(exc))
             _mark_failed(index_dir, str(exc))
             raise BulkReferenceError(
-                "Kallisto index construction failed. See the reference-preparation log."
+                f"Kallisto index construction failed. See {log_path}."
             ) from exc
 
         log_text = (completed.stdout or "") + (completed.stderr or "")
-        log_path.write_text(log_text, encoding="utf-8")
-        if completed.returncode != 0 or not temp_destination.is_file():
-            _mark_failed(index_dir, f"kallisto exited with status {completed.returncode}")
+        _write_build_log(log_path, log_text)
+        if (
+            completed.returncode != 0
+            or not temp_destination.is_file()
+            or temp_destination.stat().st_size == 0
+        ):
+            failure = (
+                f"kallisto exited with status {completed.returncode}"
+                if completed.returncode != 0
+                else "kallisto completed without producing a nonempty index"
+            )
+            _mark_failed(index_dir, failure)
             stop_details = [
                 line.strip()
                 for line in log_text.splitlines()
                 if line.startswith("Reference preparation stopped:")
             ]
             if stop_details:
-                raise BulkReferenceError(
-                    f"{stop_details[-1]} See the reference-preparation log for command output."
-                )
-            raise BulkReferenceError(
-                "Kallisto index construction failed. See the reference-preparation log."
-            )
+                raise BulkReferenceError(f"{stop_details[-1]} See {log_path} for command output.")
+            raise BulkReferenceError(f"Kallisto index construction failed. See {log_path}.")
 
         temp_destination.replace(destination)
         _write_complete_marker(

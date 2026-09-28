@@ -77,11 +77,49 @@ read_transcript_to_gene <- function(path) {
   if (!all(required %in% colnames(mapping))) {
     stop("Transcript-to-gene mapping must contain transcript_id and gene_id columns")
   }
-  mapping <- mapping[!is.na(mapping$transcript_id) & nzchar(mapping$transcript_id), , drop = FALSE]
-  mapping <- mapping[!is.na(mapping$gene_id) & nzchar(mapping$gene_id), , drop = FALSE]
+  mapping$transcript_id <- trimws(as.character(mapping$transcript_id))
+  mapping$gene_id <- trimws(as.character(mapping$gene_id))
+  if (any(is.na(mapping$transcript_id) | !nzchar(mapping$transcript_id))) {
+    stop("Transcript-to-gene mapping contains an empty transcript_id")
+  }
+  if (any(is.na(mapping$gene_id) | !nzchar(mapping$gene_id))) {
+    stop("Transcript-to-gene mapping contains an empty gene_id")
+  }
   if (nrow(mapping) == 0) stop("Transcript-to-gene mapping contains no usable rows")
+  mapping <- mapping[order(mapping$transcript_id, mapping$gene_id), , drop = FALSE]
+  mapping <- mapping[!duplicated(mapping), , drop = FALSE]
+  optional_meta <- intersect(c("gene_name", "gene_biotype", "transcript_biotype"), colnames(mapping))
+  for (tx in unique(mapping$transcript_id)) {
+    rows <- mapping[mapping$transcript_id == tx, , drop = FALSE]
+    gene_ids <- unique(rows$gene_id)
+    if (length(gene_ids) != 1) {
+      stop(
+        paste(
+          "Transcript",
+          tx,
+          "maps to multiple gene_id values:",
+          paste(gene_ids, collapse = ", ")
+        )
+      )
+    }
+    for (column in optional_meta) {
+      values <- unique(ifelse(is.na(rows[[column]]), "", as.character(rows[[column]])))
+      if (length(values) > 1) {
+        stop(
+          paste(
+            "Transcript",
+            tx,
+            "has conflicting",
+            column,
+            "values:",
+            paste(values, collapse = ", ")
+          )
+        )
+      }
+    }
+  }
   mapping <- mapping[!duplicated(mapping$transcript_id), , drop = FALSE]
-  mapping
+  mapping[order(mapping$transcript_id), , drop = FALSE]
 }
 
 mapping_table <- read_transcript_to_gene(mapping_path)
@@ -199,6 +237,9 @@ html_escape <- function(value) {
 }
 
 write_pca_html <- function(pca_df, percent_var, filename, title, case_group) {
+  if (!all(c("PC1", "PC2", "PC3") %in% colnames(pca_df))) {
+    stop("3D PCA HTML requires PC1, PC2, and PC3 columns")
+  }
   project <- function(values, low, high) {
     span <- diff(range(values))
     if (!is.finite(span) || span == 0) return(rep((low + high) / 2, length(values)))
@@ -267,6 +308,114 @@ all_statuses <- list()
 status_index <- 0
 optional_skip_log <- list()
 optional_de_generated <- c(mRNA = FALSE, lncRNA = FALSE)
+output_contract_rows <- list()
+
+analysis_class_label <- function(analysis_name) {
+  if (analysis_name == "all_genes") "all-gene" else analysis_name
+}
+
+artifact_path_nonempty <- function(path) {
+  isTRUE(file.exists(path)) && isTRUE(file.info(path)$size > 0)
+}
+
+relative_output_path <- function(path) {
+  root <- normalizePath(output_root, winslash = "/", mustWork = FALSE)
+  normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  pattern <- paste0("^", gsub("([.|()[\\^{}+$*?]|])", "\\\\\\1", root), "/?")
+  sub(pattern, "", normalized)
+}
+
+record_output_contract <- function(
+  comparison_id,
+  analysis_class,
+  artifact,
+  status,
+  relative_path = "",
+  rationale = ""
+) {
+  output_contract_rows <<- c(
+    output_contract_rows,
+    list(
+      data.frame(
+        comparison_id = comparison_id,
+        analysis_class = analysis_class,
+        artifact = artifact,
+        status = status,
+        relative_path = relative_path,
+        rationale = rationale,
+        stringsAsFactors = FALSE
+      )
+    )
+  )
+}
+
+record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_path, rationale = "") {
+  rel <- relative_output_path(abs_path)
+  if (artifact_path_nonempty(abs_path)) {
+    record_output_contract(comparison_id, analysis_class, artifact, "generated", rel, rationale)
+  } else {
+    record_output_contract(
+      comparison_id,
+      analysis_class,
+      artifact,
+      "failed",
+      rel,
+      if (nzchar(rationale)) rationale else "Expected output file missing or empty"
+    )
+  }
+}
+
+record_artifact_skipped <- function(comparison_id, analysis_class, artifact, rationale) {
+  record_output_contract(comparison_id, analysis_class, artifact, "skipped", "", rationale)
+}
+
+analysis_artifacts <- c(
+  "differential expression full results",
+  "differential expression significant genes",
+  "differential expression upregulated genes",
+  "differential expression downregulated genes",
+  "library-size normalized matrix",
+  "rlog normalized matrix",
+  "2D PCA plot",
+  "scree plot",
+  "3D PCA plot",
+  "3D PCA HTML",
+  "top-gene heatmap",
+  "volcano plot",
+  "MA plot",
+  "p-value histogram",
+  "adjusted p-value histogram",
+  "fold-change density",
+  "sample-distance heatmap",
+  "DE counts by comparison plot",
+  "DE totals by comparison plot",
+  "comparison status table"
+)
+
+record_class_skipped <- function(comparison_id, analysis_class, rationale) {
+  for (artifact in analysis_artifacts) {
+    record_artifact_skipped(comparison_id, analysis_class, artifact, rationale)
+  }
+}
+
+run_deseq_robust <- function(dds) {
+  tryCatch(
+    DESeq(dds, quiet = TRUE),
+    error = function(error) {
+      message_text <- conditionMessage(error)
+      if (!grepl("standard curve fitting techniques will not work", message_text, fixed = TRUE)) {
+        stop(error)
+      }
+      # Very small valid gene sets cannot support a fitted dispersion trend.
+      # DESeq2 explicitly recommends using their gene-wise estimates in this case.
+      dds <- estimateSizeFactors(dds)
+      dds <- estimateDispersionsGeneEst(dds, quiet = TRUE)
+      dispersions(dds) <- mcols(dds)$dispGeneEst
+      mcols(dds)$dispFit <- mcols(dds)$dispGeneEst
+      nbinomWaldTest(dds, quiet = TRUE)
+    }
+  )
+}
 
 for (comparison_index in seq_len(nrow(comparisons))) {
   comparison_id <- comparisons$comparison_id[[comparison_index]]
@@ -317,11 +466,13 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       rationale = class_plan$skips[[optional_name]],
       stringsAsFactors = FALSE
     )
+    record_class_skipped(comparison_id, optional_name, class_plan$skips[[optional_name]])
   }
 
   analysis_results <- list()
 
   for (analysis_name in names(analysis_classes)) {
+    class_label <- analysis_class_label(analysis_name)
     selected_genes <- intersect(rownames(comparison_txi$counts), analysis_classes[[analysis_name]])
     if (length(selected_genes) < 2) {
       if (analysis_name == "all_genes") {
@@ -331,6 +482,11 @@ for (comparison_index in seq_len(nrow(comparisons))) {
         output_root,
         analysis_name,
         comparison_id,
+        paste("Fewer than two genes available after filtering (found", length(selected_genes), ")")
+      )
+      record_class_skipped(
+        comparison_id,
+        class_label,
         paste("Fewer than two genes available after filtering (found", length(selected_genes), ")")
       )
       next
@@ -363,9 +519,14 @@ for (comparison_index in seq_len(nrow(comparisons))) {
         comparison_id,
         paste("Fewer than two genes passed expression filtering (found", nrow(dds), ")")
       )
+      record_class_skipped(
+        comparison_id,
+        class_label,
+        paste("Fewer than two genes passed expression filtering (found", nrow(dds), ")")
+      )
       next
     }
-    dds <- DESeq(dds, quiet = TRUE)
+    dds <- run_deseq_robust(dds)
     raw_result <- results(dds, contrast = contrast, alpha = q_value)
     result <- lfcShrink(dds, contrast = contrast, res = raw_result, type = "normal")
     result_df <- as.data.frame(result)
@@ -409,6 +570,30 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       quote = FALSE,
       row.names = FALSE
     )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "differential expression full results",
+      file.path(de_dir, "full_results.tsv")
+    )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "differential expression significant genes",
+      file.path(de_dir, paste0("significant_", threshold_suffix, ".tsv"))
+    )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "differential expression upregulated genes",
+      file.path(de_dir, paste0("upregulated_", threshold_suffix, ".tsv"))
+    )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "differential expression downregulated genes",
+      file.path(de_dir, paste0("downregulated_", threshold_suffix, ".tsv"))
+    )
     write.table(
       as.data.frame(counts(dds, normalized = TRUE)),
       file.path(table_dir, "library_size_normalized_counts.tsv"),
@@ -417,7 +602,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       col.names = NA
     )
 
-    rld <- rlog(dds, blind = FALSE)
+    rld <- rlog(dds, blind = FALSE, fitType = "mean")
     rlog_matrix <- assay(rld)
     write.table(
       as.data.frame(rlog_matrix),
@@ -426,30 +611,59 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       quote = FALSE,
       col.names = NA
     )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "library-size normalized matrix",
+      file.path(table_dir, "library_size_normalized_counts.tsv")
+    )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "rlog normalized matrix",
+      file.path(table_dir, "rlog_normalized_expression.tsv")
+    )
 
     pca <- prcomp(t(rlog_matrix), scale. = FALSE)
     variance <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+    n_pc <- ncol(pca$x)
     pca_df <- data.frame(
       sample_id = rownames(pca$x),
       condition = col_data[rownames(pca$x), "condition"],
-      PC1 = pca$x[, 1],
-      PC2 = pca$x[, 2],
-      PC3 = pca$x[, 3],
       stringsAsFactors = FALSE
     )
-    pca_plot <- ggplot(pca_df, aes(PC1, PC2, color = condition, label = sample_id)) +
-      geom_point(size = 4) +
-      geom_text(hjust = 1.08, vjust = -0.55, size = 3, show.legend = FALSE) +
-      scale_color_manual(values = setNames(c("#1e655d", "#a15d14"), c(reference_group, case_group))) +
-      scale_x_continuous(expand = expansion(mult = c(0.20, 0.12))) +
-      labs(
-        title = paste("2D PCA -", analysis_name, comparison_label),
-        x = sprintf("PC1: %.1f%% variance", variance[[1]]),
-        y = sprintf("PC2: %.1f%% variance", variance[[2]])
-      ) +
-      theme_bw(base_size = 12) +
-      theme(legend.position = "bottom")
-    save_ggplot(pca_plot, file.path(figure_dir, "2D_PCA_plot"), 9, 6)
+    if (n_pc >= 1) pca_df$PC1 <- pca$x[, 1]
+    if (n_pc >= 2) pca_df$PC2 <- pca$x[, 2]
+    if (n_pc >= 3) pca_df$PC3 <- pca$x[, 3]
+
+    if (n_pc >= 2) {
+      pca_plot <- ggplot(pca_df, aes(PC1, PC2, color = condition, label = sample_id)) +
+        geom_point(size = 4) +
+        geom_text(hjust = 1.08, vjust = -0.55, size = 3, show.legend = FALSE) +
+        scale_color_manual(values = setNames(c("#1e655d", "#a15d14"), c(reference_group, case_group))) +
+        scale_x_continuous(expand = expansion(mult = c(0.20, 0.12))) +
+        labs(
+          title = paste("2D PCA -", analysis_name, comparison_label),
+          x = sprintf("PC1: %.1f%% variance", variance[[1]]),
+          y = sprintf("PC2: %.1f%% variance", variance[[2]])
+        ) +
+        theme_bw(base_size = 12) +
+        theme(legend.position = "bottom")
+      save_ggplot(pca_plot, file.path(figure_dir, "2D_PCA_plot"), 9, 6)
+      record_artifact_file(
+        comparison_id,
+        class_label,
+        "2D PCA plot",
+        file.path(figure_dir, "2D_PCA_plot.png")
+      )
+    } else {
+      record_artifact_skipped(
+        comparison_id,
+        class_label,
+        "2D PCA plot",
+        paste("Fewer than two principal components available (found", n_pc, ")")
+      )
+    }
 
     scree_df <- data.frame(
       component = factor(paste0("PC", seq_along(variance)), levels = paste0("PC", seq_along(variance))),
@@ -460,40 +674,72 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       labs(title = "Scree plot", x = "Principal component", y = "Variance explained (%)") +
       theme_minimal(base_size = 12) +
       theme(axis.text.x = element_text(angle = 60, hjust = 1))
-    ggsave(file.path(figure_dir, "Scree_plot.png"), scree_plot, width = 8, height = 5, dpi = 160)
+    scree_path <- file.path(figure_dir, "Scree_plot.png")
+    ggsave(scree_path, scree_plot, width = 8, height = 5, dpi = 160)
+    record_artifact_file(comparison_id, class_label, "scree plot", scree_path)
 
-    projected <- transform(pca_df, projected_x = PC1 - 0.45 * PC3, projected_y = PC2 + 0.35 * PC3)
-    pca_3d <- ggplot(projected, aes(projected_x, projected_y, color = condition, label = sample_id)) +
-      geom_point(size = 4) +
-      geom_text(hjust = 1.08, vjust = -0.55, size = 3, show.legend = FALSE) +
-      scale_color_manual(values = setNames(c("#1e655d", "#a15d14"), c(reference_group, case_group))) +
-      scale_x_continuous(expand = expansion(mult = c(0.20, 0.12))) +
-      labs(
-        title = paste("3D PCA projection -", analysis_name, comparison_label),
-        x = "PC1 with PC3 projection",
-        y = "PC2 with PC3 projection"
-      ) +
-      theme_bw(base_size = 12) +
-      theme(legend.position = "bottom")
-    save_ggplot(pca_3d, file.path(figure_dir, "3D_PCA_plot"), 9, 6)
-    write_pca_html(
-      pca_df,
-      round(variance, 1),
-      file.path(figure_dir, "3D_PCA_plot.html"),
-      paste("3D PCA -", analysis_name, comparison_label),
-      case_group
-    )
+    if (n_pc >= 3) {
+      projected <- transform(pca_df, projected_x = PC1 - 0.45 * PC3, projected_y = PC2 + 0.35 * PC3)
+      pca_3d <- ggplot(projected, aes(projected_x, projected_y, color = condition, label = sample_id)) +
+        geom_point(size = 4) +
+        geom_text(hjust = 1.08, vjust = -0.55, size = 3, show.legend = FALSE) +
+        scale_color_manual(values = setNames(c("#1e655d", "#a15d14"), c(reference_group, case_group))) +
+        scale_x_continuous(expand = expansion(mult = c(0.20, 0.12))) +
+        labs(
+          title = paste("3D PCA projection -", analysis_name, comparison_label),
+          x = "PC1 with PC3 projection",
+          y = "PC2 with PC3 projection"
+        ) +
+        theme_bw(base_size = 12) +
+        theme(legend.position = "bottom")
+      save_ggplot(pca_3d, file.path(figure_dir, "3D_PCA_plot"), 9, 6)
+      write_pca_html(
+        pca_df,
+        round(variance, 1),
+        file.path(figure_dir, "3D_PCA_plot.html"),
+        paste("3D PCA -", analysis_name, comparison_label),
+        case_group
+      )
+      record_artifact_file(
+        comparison_id,
+        class_label,
+        "3D PCA plot",
+        file.path(figure_dir, "3D_PCA_plot.png")
+      )
+      record_artifact_file(
+        comparison_id,
+        class_label,
+        "3D PCA HTML",
+        file.path(figure_dir, "3D_PCA_plot.html")
+      )
+    } else {
+      pc3_rationale <- paste(
+        "Fewer than three principal components available (found",
+        n_pc,
+        "); PC3 is required for 3D PCA artifacts"
+      )
+      record_artifact_skipped(comparison_id, class_label, "3D PCA plot", pc3_rationale)
+      record_artifact_skipped(comparison_id, class_label, "3D PCA HTML", pc3_rationale)
+    }
 
-    ranked <- result_df[!is.na(result_df$pvalue), ]
-    heatmap_genes <- if (nrow(significant) >= 2) head(significant$gene_id, 50) else head(ranked$gene_id, 50)
+    heatmap_genes <- head(significant$gene_id, 50)
     heatmap_matrix <- rlog_matrix[intersect(heatmap_genes, rownames(rlog_matrix)), , drop = FALSE]
+    heatmap_path <- file.path(figure_dir, "Heatmap_topDEG_rlog.png")
     if (nrow(heatmap_matrix) >= 2) {
       plot_heatmap(
         heatmap_matrix,
         selected_samples$condition,
         case_group,
-        file.path(figure_dir, "Heatmap_topDEG_rlog.png"),
+        heatmap_path,
         paste("Top differential", analysis_name, "genes")
+      )
+      record_artifact_file(comparison_id, class_label, "top-gene heatmap", heatmap_path)
+    } else {
+      record_artifact_skipped(
+        comparison_id,
+        class_label,
+        "top-gene heatmap",
+        paste("Fewer than two genes available for heatmap (found", nrow(heatmap_matrix), ")")
       )
     }
 
@@ -524,6 +770,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       theme_bw(base_size = 12) +
       theme(legend.position = "bottom")
     save_ggplot(volcano, file.path(figure_dir, "Volcano_plot"))
+    record_artifact_file(comparison_id, class_label, "volcano plot", file.path(figure_dir, "Volcano_plot.png"))
 
     ma_data <- result_df[is.finite(result_df$baseMean) & is.finite(result_df$log2FoldChange), ]
     ma_plot <- ggplot(ma_data, aes(log10(baseMean + 1), log2FoldChange, color = category)) +
@@ -539,26 +786,41 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       theme_bw(base_size = 12) +
       theme(legend.position = "bottom")
     save_ggplot(ma_plot, file.path(figure_dir, "MA_plot"))
+    record_artifact_file(comparison_id, class_label, "MA plot", file.path(figure_dir, "MA_plot.png"))
 
     p_hist <- ggplot(result_df[is.finite(result_df$pvalue), ], aes(pvalue)) +
       geom_histogram(bins = 40, fill = "#1e655d", color = "white") +
       labs(title = paste("P-value distribution -", analysis_name), x = "P-value", y = "Genes") +
       theme_bw(base_size = 12)
     save_ggplot(p_hist, file.path(figure_dir, "Pvalue_histogram"))
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "p-value histogram",
+      file.path(figure_dir, "Pvalue_histogram.png")
+    )
     padj_hist <- ggplot(result_df[is.finite(result_df$padj), ], aes(padj)) +
       geom_histogram(bins = 40, fill = "#336b89", color = "white") +
       labs(title = paste("Adjusted p-value distribution -", analysis_name), x = "Adjusted p-value", y = "Genes") +
       theme_bw(base_size = 12)
     save_ggplot(padj_hist, file.path(figure_dir, "Padj_histogram"))
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "adjusted p-value histogram",
+      file.path(figure_dir, "Padj_histogram.png")
+    )
     lfc_density <- ggplot(result_df[is.finite(result_df$log2FoldChange), ], aes(log2FoldChange)) +
       geom_density(fill = "#dcece6", color = "#1e655d") +
       geom_vline(xintercept = c(-lfc_threshold, lfc_threshold), linetype = 2) +
       labs(title = paste("Fold-change density -", analysis_name), x = "Shrunken log2 fold change", y = "Density") +
       theme_bw(base_size = 12)
     save_ggplot(lfc_density, file.path(figure_dir, "LFC_density"))
+    record_artifact_file(comparison_id, class_label, "fold-change density", file.path(figure_dir, "LFC_density.png"))
 
     sample_distances <- as.matrix(dist(t(rlog_matrix)))
-    png(file.path(figure_dir, "Sample_distance_heatmap.png"), width = 1000, height = 900, res = 130)
+    sample_distance_path <- file.path(figure_dir, "Sample_distance_heatmap.png")
+    png(sample_distance_path, width = 1000, height = 900, res = 130)
     tryCatch(
       heatmap(
         sample_distances,
@@ -569,6 +831,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       ),
       finally = dev.off()
     )
+    record_artifact_file(comparison_id, class_label, "sample-distance heatmap", sample_distance_path)
 
     counts_df <- data.frame(
       direction = factor(c("Up", "Down"), levels = c("Up", "Down")),
@@ -585,6 +848,18 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       labs(title = paste("Total differential genes -", analysis_name), x = NULL, y = "Genes") +
       theme_bw(base_size = 12)
     save_ggplot(total_plot, file.path(figure_dir, "DE_totals_by_comparison"), 7, 5)
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "DE counts by comparison plot",
+      file.path(figure_dir, "DE_counts_by_comparison.png")
+    )
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "DE totals by comparison plot",
+      file.path(figure_dir, "DE_totals_by_comparison.png")
+    )
 
     status <- data.frame(
       analysis = analysis_name,
@@ -602,6 +877,12 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       stringsAsFactors = FALSE
     )
     write.table(status, file.path(table_dir, "comparison_status.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+    record_artifact_file(
+      comparison_id,
+      class_label,
+      "comparison status table",
+      file.path(table_dir, "comparison_status.tsv")
+    )
     analysis_results[[analysis_name]] <- list(status = status, significant = significant)
     if (analysis_name %in% names(optional_de_generated)) {
       optional_de_generated[[analysis_name]] <- TRUE
@@ -706,37 +987,31 @@ versions <- data.frame(
 )
 write.table(versions, file.path(provenance_dir, "software_versions.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
 write.table(versions, file.path(summary_root, "software_versions.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
-optional_output_status <- function(name) {
-  if (isTRUE(optional_de_generated[[name]])) "generated" else "skipped"
+
+provenance_artifacts <- list(
+  list(name = "sample metadata table", path = file.path(provenance_dir, "sample_metadata.tsv")),
+  list(name = "reference mapping summary table", path = file.path(provenance_dir, "reference_mapping_summary.tsv")),
+  list(name = "analysis parameters table", path = file.path(provenance_dir, "analysis_parameters.tsv")),
+  list(name = "software versions table", path = file.path(provenance_dir, "software_versions.tsv"))
+)
+for (entry in provenance_artifacts) {
+  record_artifact_file("", "provenance", entry$name, entry$path)
+}
+if (length(all_statuses) > 0) {
+  summary_path <- file.path(summary_root, "differential_expression_summary.tsv")
+  record_artifact_file("", "summary", "differential expression summary table", summary_path)
+}
+if (length(optional_skip_log) > 0) {
+  skip_path <- file.path(summary_root, "optional_gene_class_skips.tsv")
+  record_artifact_file("", "summary", "optional gene class skip log", skip_path)
+}
+record_artifact_file("", "summary", "software versions table", file.path(summary_root, "software_versions.tsv"))
+
+if (length(output_contract_rows) == 0) {
+  stop("No output contract rows were recorded")
 }
 write.table(
-  data.frame(
-    output = c(
-      "all-gene DE tables",
-      "optional mRNA DE tables",
-      "optional lncRNA DE tables",
-      "3D PCA",
-      "2D PCA",
-      "scree plot",
-      "top-gene heatmap",
-      "volcano plot",
-      "MA plot",
-      "p-value histogram",
-      "adjusted p-value histogram",
-      "fold-change density",
-      "sample-distance heatmap",
-      "DE count plots",
-      "normalized matrices",
-      "provenance tables"
-    ),
-    status = c(
-      "generated",
-      optional_output_status("mRNA"),
-      optional_output_status("lncRNA"),
-      rep("generated", 13)
-    ),
-    stringsAsFactors = FALSE
-  ),
+  do.call(rbind, output_contract_rows),
   file.path(summary_root, "output_contract.tsv"),
   sep = "\t",
   quote = FALSE,

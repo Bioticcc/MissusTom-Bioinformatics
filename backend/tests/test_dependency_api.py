@@ -91,7 +91,32 @@ async def test_dependency_unknown_pipeline_is_404(
     response = await client.get("/api/v1/pipelines/nope/dependencies")
 
     assert response.status_code == 404
-    assert response.json()["success"] is False
+    body = response.json()
+    assert body["success"] is False
+    assert body["errors"][0]["code"] == "unsupported_pipeline"
+
+
+async def test_dependency_install_conflict_uses_typed_code(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from missus_tom.models.errors import DEPENDENCY_INSTALL_IN_PROGRESS, ApiCodedError
+
+    class _BusyInstaller:
+        def install(self, pipeline_identifier: str) -> None:
+            raise ApiCodedError(
+                409,
+                DEPENDENCY_INSTALL_IN_PROGRESS,
+                "another dependency installation is already running",
+            )
+
+    monkeypatch.setattr(routes, "pipeline_registry", _Registry())
+    monkeypatch.setattr(routes, "dependency_installer", _BusyInstaller())
+    response = await client.post(
+        "/api/v1/pipelines/ont-analysis/dependencies/install", json={"consent": True}
+    )
+    assert response.status_code == 409
+    body = response.json()
+    assert body["errors"][0]["code"] == "dependency_install_in_progress"
 
 
 @pytest.mark.parametrize("payload", ({}, {"consent": False}))

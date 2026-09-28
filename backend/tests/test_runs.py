@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,10 +16,11 @@ from uuid import uuid4
 import pytest
 
 from missus_tom.models.manifest import ProjectManifest
-from missus_tom.models.run import RunRecord, RunStartStage, RunStatus
+from missus_tom.models.run import RunExecutionPhase, RunRecord, RunStartStage, RunStatus
 from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
 from missus_tom.services import runs as runs_module
 from missus_tom.services.projects import ProjectHistoryStore, save_project
+from missus_tom.services.run_containment import ScopeState, ScopeStatus
 from missus_tom.services.runs import ProcessIdentity, RunManager
 
 
@@ -120,6 +123,29 @@ class StageReportingAdapter(StubAdapter):
             "import time; print('RUN: bash /runner/stages/01_align_modbam.sh', flush=True); "
             "time.sleep(0.2)",
         ]
+
+
+@pytest.fixture(autouse=True)
+def _stub_native_containment(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _StubContainmentSession:
+        scope_id = "missus-tom-run-test.scope"
+
+        def assign_process(self, _process_id: int) -> None:
+            return None
+
+        def stop(self, *, grace_seconds: float = 10.0) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        runs_module.RunContainmentSession,
+        "start",
+        classmethod(lambda cls, *args, **kwargs: _StubContainmentSession()),
+    )
+    monkeypatch.setattr(
+        runs_module.RunManager,
+        "_start_native_containment_if_needed",
+        lambda self, job_identifier: None,
+    )
 
 
 def wait_for_terminal(manager: RunManager, job_identifier: str) -> RunRecord:
@@ -736,12 +762,9 @@ def test_post_popen_persist_failure_stops_process_before_releasing_admission(
     monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.1)
     manager = RunManager(SleepingAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
     persist = manager._persist
-    calls = 0
 
     def fail_running_persist(record: RunRecord) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 4:
+        if record.status == RunStatus.RUNNING and record.process_id is not None:
             raise OSError("injected post-Popen persist failure")
         persist(record)
 
@@ -752,6 +775,121 @@ def test_post_popen_persist_failure_stops_process_before_releasing_admission(
     assert record.status == RunStatus.CANCELLED
     assert record.holds_admission is False
     assert manager._processes == {}
+
+
+@pytest.mark.parametrize("reference_preparation", [False, True])
+def test_containment_assignment_failure_reaps_term_ignoring_child(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    reference_preparation: bool,
+) -> None:
+    class FailingContainment:
+        scope_id = "missus-tom-run-assignment.scope"
+
+        def __init__(self) -> None:
+            self.process_ids: list[int] = []
+
+        def assign_process(self, process_id: int) -> None:
+            self.process_ids.append(process_id)
+            raise ValueError("injected cgroup assignment failure")
+
+        def stop(self, *, grace_seconds: float = 10.0) -> bool:
+            return True
+
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    if reference_preparation:
+        save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
+    )
+    adapter = SlowReferenceAdapter(tmp_path) if reference_preparation else SleepingAdapter(tmp_path)
+    manager = RunManager(adapter, registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    containment = FailingContainment()
+
+    def start_containment(job_identifier: str) -> None:
+        with manager._lock:
+            manager._containment_sessions[job_identifier] = containment  # type: ignore[assignment]
+            record = manager._records[job_identifier]
+            record.containment_scope_id = containment.scope_id
+            manager._persist(record)
+
+    monkeypatch.setattr(manager, "_start_native_containment_if_needed", start_containment)
+    started = manager.start(manifest)
+    failed = wait_for_terminal(manager, started.job_identifier)
+
+    assert failed.status == RunStatus.FAILED
+    assert failed.holds_admission is False
+    assert failed.containment_scope_id is None
+    assert containment.process_ids
+    assert manager._process_group_exists(containment.process_ids[0]) is False
+
+
+@pytest.mark.parametrize("reference_preparation", [False, True])
+def test_unreaped_assignment_failure_keeps_identity_and_admission(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    reference_preparation: bool,
+) -> None:
+    class FailingContainment:
+        scope_id = "missus-tom-run-orphan.scope"
+
+        def assign_process(self, process_id: int) -> None:
+            raise ValueError("injected cgroup assignment failure")
+
+        def stop(self, *, grace_seconds: float = 10.0) -> bool:
+            return True
+
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    if reference_preparation:
+        save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
+    )
+    adapter = SlowReferenceAdapter(tmp_path) if reference_preparation else SleepingAdapter(tmp_path)
+    manager = RunManager(adapter, registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    containment = FailingContainment()
+
+    def start_containment(job_identifier: str) -> None:
+        with manager._lock:
+            manager._containment_sessions[job_identifier] = containment  # type: ignore[assignment]
+            record = manager._records[job_identifier]
+            record.containment_scope_id = containment.scope_id
+            manager._persist(record)
+
+    monkeypatch.setattr(manager, "_start_native_containment_if_needed", start_containment)
+    monkeypatch.setattr(manager, "_terminate_and_reap_process_group", lambda _process: False)
+    monkeypatch.setattr(manager, "_stop_containment", lambda _job_identifier: True)
+    started = manager.start(manifest)
+    process_id: int | None = None
+    try:
+        interrupted = wait_for_status(manager, started.job_identifier, RunStatus.INTERRUPTED)
+        process_id = interrupted.process_id
+        assert interrupted.holds_admission is True
+        assert interrupted.containment_scope_id == containment.scope_id
+        assert process_id is not None
+        assert "did not exit" in (interrupted.error_message or "")
+        with pytest.raises(ValueError, match="another workflow job is active"):
+            manager.start(manifest)
+    finally:
+        if process_id is None:
+            with manager._lock:
+                record = manager._records.get(started.job_identifier)
+                process_id = record.process_id if record is not None else None
+        if process_id is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(process_id, signal.SIGKILL)
 
 
 def test_sigkill_escalation_stops_stubborn_descendant_group(
@@ -911,6 +1049,143 @@ def test_stale_process_identity_never_signals_group(
     kill_process_group.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("state", "holds_admission"),
+    [
+        (ScopeState.ACTIVE, True),
+        (ScopeState.INACTIVE, False),
+        (ScopeState.UNQUERYABLE, True),
+    ],
+)
+def test_recovery_uses_persisted_containment_scope_without_leader_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: ScopeState,
+    holds_admission: bool,
+) -> None:
+    registry = tmp_path / "state"
+    registry.mkdir()
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="Scope recovery",
+        status=RunStatus.RUNNING,
+        command=[sys.executable, "-c", "print('unused')"],
+        log_path=str(tmp_path / "project" / "logs" / "run-recovered.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        execution_phase=RunExecutionPhase.WORKFLOW,
+        containment_scope_id="missus-tom-run-survivor.scope",
+        holds_admission=True,
+    )
+    (registry / f"{record.job_identifier}.json").write_text(
+        record.model_dump_json(), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(state, state.value),
+    )
+
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=registry)  # type: ignore[arg-type]
+    recovered = manager.get(record.job_identifier)
+
+    assert recovered.status == RunStatus.INTERRUPTED
+    assert recovered.holds_admission is holds_admission
+    if state == ScopeState.INACTIVE:
+        assert recovered.containment_scope_id is None
+    else:
+        assert recovered.containment_scope_id == record.containment_scope_id
+
+
+def test_recovered_scope_without_leader_can_be_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "state"
+    registry.mkdir()
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="Scope cancellation",
+        status=RunStatus.INTERRUPTED,
+        command=[sys.executable, "-c", "print('unused')"],
+        log_path=str(tmp_path / "project" / "logs" / "run-recovered.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        execution_phase=RunExecutionPhase.WORKFLOW,
+        containment_scope_id="missus-tom-run-survivor.scope",
+        holds_admission=True,
+    )
+    (registry / f"{record.job_identifier}.json").write_text(
+        record.model_dump_json(), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(ScopeState.ACTIVE, "active"),
+    )
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=registry)  # type: ignore[arg-type]
+    monkeypatch.setattr(manager, "_start_cancellation_watchdog", Mock())
+    monkeypatch.setattr(runs_module, "stop_scope_unit", Mock(return_value=True))
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
+    )
+
+    manager.cancel(record.job_identifier)
+    manager._enforce_cancellation(record.job_identifier)
+
+    cancelled = manager.get(record.job_identifier)
+    assert cancelled.status == RunStatus.CANCELLED
+    assert cancelled.holds_admission is False
+    assert cancelled.containment_scope_id is None
+
+
+def test_stop_containment_preserves_scope_and_admission_until_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RetryingContainment:
+        scope_id = "missus-tom-run-retry.scope"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stop(self, *, grace_seconds: float = 10.0) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="Retry containment cleanup",
+        status=RunStatus.CANCELLING,
+        command=[sys.executable, "-c", "print('unused')"],
+        log_path=str(tmp_path / "project" / "logs" / "run-retry.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        containment_scope_id="missus-tom-run-retry.scope",
+        holds_admission=True,
+    )
+    containment = RetryingContainment()
+    manager._records[record.job_identifier] = record
+    manager._containment_sessions[record.job_identifier] = containment  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runs_module,
+        "scope_status",
+        lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
+    )
+
+    assert manager._stop_containment(record.job_identifier) is False
+    assert record.containment_scope_id == containment.scope_id
+    assert record.holds_admission is True
+    assert record.containment_cleanup_attempts == 1
+    assert manager._stop_containment(record.job_identifier) is True
+    assert record.containment_scope_id is None
+    assert record.containment_cleanup_attempts == 2
+
+
 def test_recovered_dead_leader_allows_only_labelled_container_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -957,6 +1232,166 @@ def test_recovered_dead_leader_allows_only_labelled_container_cleanup(
     assert cancelled.status == RunStatus.CANCELLED
     assert manager.read_log(record.job_identifier).text.count("Cancelled at ") == 1
     kill_process_group.assert_not_called()
+
+
+class SlowReferenceAdapter(StubAdapter):
+    prep_sleep_seconds = 60
+
+    def requires_run_reference_preparation(self, _manifest: ProjectManifest) -> bool:
+        return True
+
+    def prepare_run_references(
+        self,
+        manifest: ProjectManifest,
+        *,
+        job_identifier: str,
+        manager: object | None = None,
+        log_writer: object | None = None,
+        command_runner: object | None = None,
+        start_stage: RunStartStage | None = None,
+        cancellation_check: object | None = None,
+        status_callback: object | None = None,
+    ) -> tuple[Path, object]:
+        del manager, log_writer, start_stage, status_callback
+        if command_runner is None:
+            raise ValueError("missing command runner")
+        script = (
+            "import signal, time; "
+            f"signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep({self.prep_sleep_seconds})"
+        )
+        command_runner([sys.executable, "-c", script], None)
+        manifest_path = (
+            Path(manifest.output_directory) / "input_manifest" / f"execution-{job_identifier}.json"
+        )
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text("{}", encoding="utf-8")
+        return manifest_path, object()
+
+    def replace_command_manifest(self, command: list[str], manifest_path: Path) -> list[str]:
+        return [*command, "--manifest", str(manifest_path)]
+
+
+class ShortReferenceAdapter(SlowReferenceAdapter):
+    prep_sleep_seconds = 0.2
+
+
+def test_restart_while_reference_preparation_is_alive(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "state"
+    registry.mkdir()
+    project_root = tmp_path / "project"
+    manifest_payload["output_directory"] = str(project_root)
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.5)
+
+    sleep_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        start_new_session=True,
+    )
+    identity = RunManager._read_process_identity(sleep_process.pid)
+    assert identity is not None
+    job_identifier = str(uuid4())
+    record = RunRecord(
+        job_identifier=job_identifier,
+        project_identifier=str(manifest.project_identifier),
+        project_name=manifest.project_name,
+        status=RunStatus.PREPARING,
+        command=[sys.executable, "-c", "print('ok')"],
+        log_path=str(project_root / "logs" / f"run-{job_identifier}.log"),
+        results_directory=str(project_root / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+        execution_phase=RunExecutionPhase.REFERENCE_PREPARATION,
+        process_id=identity.process_id,
+        process_group_id=identity.process_group_id,
+        process_start_ticks=identity.start_ticks,
+        process_boot_id=identity.boot_id,
+    )
+    (registry / f"{job_identifier}.json").write_text(record.model_dump_json(), encoding="utf-8")
+
+    manager = RunManager(SlowReferenceAdapter(tmp_path), registry_directory=registry)  # type: ignore[arg-type]
+    recovered = manager.get(job_identifier)
+    assert recovered.status == RunStatus.INTERRUPTED
+    assert recovered.holds_admission is True
+
+    manager.cancel(job_identifier)
+    assert manager.get(job_identifier).status == RunStatus.CANCELLING
+    sleep_process.kill()
+    sleep_process.wait(timeout=5)
+    manager._enforce_cancellation(job_identifier)
+    cancelled = wait_for_terminal(manager, job_identifier)
+    assert cancelled.status == RunStatus.CANCELLED
+
+
+def test_crash_after_reference_preparation_does_not_hold_admission(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+) -> None:
+    registry = tmp_path / "state"
+    registry.mkdir()
+    job_identifier = str(uuid4())
+    project_root = tmp_path / "project"
+    manifest_payload["output_directory"] = str(project_root)
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    execution_manifest = project_root / "input_manifest" / "execution.json"
+    execution_manifest.write_text("{}", encoding="utf-8")
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    record = RunRecord(
+        job_identifier=job_identifier,
+        project_identifier=str(manifest.project_identifier),
+        project_name=manifest.project_name,
+        status=RunStatus.PREPARING,
+        command=[sys.executable, "-c", "print('ok')"],
+        log_path=str(project_root / "logs" / f"run-{job_identifier}.log"),
+        results_directory=str(project_root / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+        execution_phase=RunExecutionPhase.REFERENCE_PREPARED,
+        execution_manifest_path=str(execution_manifest),
+    )
+    (registry / f"{job_identifier}.json").write_text(record.model_dump_json(), encoding="utf-8")
+
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=registry)  # type: ignore[arg-type]
+    resumed = wait_for_terminal(manager, job_identifier)
+    assert resumed.status == RunStatus.COMPLETED
+
+
+def test_reference_preparation_passes_admission_lock_fds(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    manifest_payload["output_directory"] = str(project_root)
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    captured: dict[str, object] = {}
+    original_popen = subprocess.Popen
+
+    def spy_popen(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        if (
+            command
+            and command[0] == sys.executable
+            and "time.sleep" in command[-1]
+            and kwargs.get("pass_fds")
+        ):
+            captured["pass_fds"] = kwargs.get("pass_fds")
+        return original_popen(command, **kwargs)
+
+    monkeypatch.setattr(runs_module.subprocess, "Popen", spy_popen)
+    manager = RunManager(ShortReferenceAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    started = manager.start(manifest)
+    wait_for_terminal(manager, started.job_identifier)
+    assert captured.get("pass_fds") is not None
+    assert len(captured["pass_fds"]) == 2  # type: ignore[arg-type]
 
 
 def test_monitor_reason_is_retained_on_controlled_cancellation(

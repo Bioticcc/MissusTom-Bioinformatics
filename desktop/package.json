@@ -1,7 +1,7 @@
 {
   "name": "missus-tom-desktop",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.0-rc.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,7 @@
     "test:demo-assets": "node test/pipelineDemoAssets.contract.test.mjs",
     "test:overlay": "node test/runOverlayState.test.mjs",
     "test:run-lifecycle": "node test/runLifecycle.contract.test.mjs",
+    "test:bundle": "node test/builtBundle.contract.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "tauri": "tauri",
     "tauri:release": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-unknown-linux-gnu"

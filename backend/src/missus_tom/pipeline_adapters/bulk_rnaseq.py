@@ -33,7 +33,7 @@ from missus_tom.services.bulk_references import (
     parse_gtf_transcript_records,
     read_supplied_transcript_to_gene,
 )
-from missus_tom.services.dependencies import runtime_environment, runtime_tool
+from missus_tom.services.dependencies import bulk_lock_provenance, runtime_environment, runtime_tool
 from missus_tom.services.preflight import project_preflight
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resources import execution_resource_checks, validate_execution_resources
@@ -107,6 +107,7 @@ def build_execution_manifest_payload(
         "overlap": prepared.overlap.model_dump(mode="json") if prepared.overlap else None,
         "transcriptome_fasta": prepared.transcriptome_fasta,
         "annotation_gtf": prepared.annotation_gtf,
+        "dependency_lock": bulk_lock_provenance(),
     }
     return payload
 
@@ -659,6 +660,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
         command_runner: ReferenceCommandRunner | None = None,
         start_stage: RunStartStage | None = None,
         cancellation_check: CancellationCheck | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> tuple[Path, PreparedBulkReferences]:
         if not self.requires_run_reference_preparation(manifest):
             raise ValueError(
@@ -674,6 +676,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             command_runner=command_runner,
             environment=runtime_environment("bulk-rnaseq"),
             cancellation_check=cancellation_check,
+            status_callback=status_callback,
         )
         try:
             effective_start_stage = start_stage or RunStartStage(

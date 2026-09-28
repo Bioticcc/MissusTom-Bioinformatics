@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,13 +21,33 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from missus_tom.config import settings
-from missus_tom.models.manifest import ProjectManifest
-from missus_tom.models.run import ResultArtifact, RunLog, RunRecord, RunStartStage, RunStatus
+from missus_tom.models.manifest import ExecutionProfile, ProjectManifest
+from missus_tom.models.run import (
+    ResultArtifact,
+    RunExecutionPhase,
+    RunLog,
+    RunRecord,
+    RunStartStage,
+    RunStatus,
+)
 from missus_tom.pipeline_adapters.base import PipelineAdapter
-from missus_tom.services.bulk_references import BulkReferenceManager, ReferenceCommandRunner
+from missus_tom.services.bulk_references import (
+    BulkReferenceError,
+    BulkReferenceManager,
+    ReferenceCommandRunner,
+    read_build_log_excerpt,
+)
 from missus_tom.services.dependencies import runtime_environment
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resource_monitor import CHECK_INTERVAL_SECONDS, ResourceMonitor
+from missus_tom.services.run_containment import (
+    RunContainmentSession,
+    ScopeState,
+    parse_build_log_path,
+    probe_native_containment,
+    scope_status,
+    stop_scope_unit,
+)
 
 ACTIVE_STATUSES = {
     RunStatus.QUEUED,
@@ -63,6 +83,10 @@ class RunLocks:
                 os.close(descriptor)
 
 
+class UnconfirmedCleanup(Exception):
+    """A launched child could not be reaped, so admission must stay held."""
+
+
 class RunManager:
     """Launch, monitor, recover, and stop only controlled adapter commands."""
 
@@ -79,6 +103,7 @@ class RunManager:
         self._reference_manager = reference_manager
         self._records: dict[str, RunRecord] = {}
         self._preparation_processes: dict[str, subprocess.Popen[str]] = {}
+        self._containment_sessions: dict[str, RunContainmentSession] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._identities: dict[str, ProcessIdentity] = {}
         self._locks: dict[str, RunLocks] = {}
@@ -235,22 +260,43 @@ class RunManager:
             process = self._processes.get(job_identifier)
             preparation_process = self._preparation_processes.get(job_identifier)
             identity = self._identities.get(job_identifier) or self._identity_from_record(record)
+            phase = record.execution_phase
+            containment_scope_id = record.containment_scope_id
 
         if preparation_process is not None:
             self._signal_process_group(preparation_process, signal.SIGTERM)
         elif process is not None:
             self._signal_process_group(process, signal.SIGTERM)
         elif identity is not None:
+            stage = (
+                "Stopping reference preparation"
+                if phase == RunExecutionPhase.REFERENCE_PREPARATION
+                else "Stopping controlled workflow process"
+            )
+            with self._lock:
+                record = self._records.get(job_identifier)
+                if record is not None:
+                    record.current_stage = stage
+                    self._persist_safely(record)
             self._signal_verified_identity(identity, signal.SIGTERM)
-        elif was_interrupted:
+        elif was_interrupted and containment_scope_id is None:
             self._mark_cleanup_unconfirmed(
                 job_identifier,
-                "No verified process identity was persisted; manual recovery is required.",
+                "No verified process or containment identity was persisted; "
+                "manual recovery is required.",
             )
             return self.get(job_identifier)
 
-        if process is not None or identity is not None:
-            self._start_cancellation_watchdog(job_identifier, process)
+        if (
+            process is not None
+            or preparation_process is not None
+            or identity is not None
+            or containment_scope_id is not None
+        ):
+            self._start_cancellation_watchdog(
+                job_identifier,
+                process or preparation_process,
+            )
         with self._lock:
             return self._records[job_identifier].model_copy(deep=True)
 
@@ -367,98 +413,56 @@ class RunManager:
                     return
                 record.status = RunStatus.PREPARING
                 adapter = self._adapter_for_record(record)
-                record.current_stage = "Preparing workflow inputs"
-                record.started_at = datetime.now(UTC)
+                skip_reference_preparation = (
+                    record.execution_phase == RunExecutionPhase.REFERENCE_PREPARED
+                    and record.execution_manifest_path is not None
+                )
+                if skip_reference_preparation:
+                    record.current_stage = "Resuming workflow after recovery"
+                else:
+                    record.current_stage = "Preparing workflow inputs"
+                record.started_at = record.started_at or datetime.now(UTC)
                 self._persist(record)
-                command = list(record.command)
-                log_path = Path(record.log_path)
 
             try:
-                self._prepare_bulk_references_if_needed(job_identifier, adapter)
+                self._start_native_containment_if_needed(job_identifier)
             except ValueError as exc:
-                with self._lock:
-                    failed_record = self._records.get(job_identifier)
-                    if failed_record is not None and failed_record.status == RunStatus.CANCELLING:
-                        self._finish_cancelled_before_launch(failed_record)
-                        return
                 self._fail_before_completion(job_identifier, str(exc))
                 return
 
+            if not skip_reference_preparation:
+                try:
+                    self._prepare_bulk_references_if_needed(job_identifier, adapter)
+                except (ValueError, BulkReferenceError) as exc:
+                    with self._lock:
+                        failed_record = self._records.get(job_identifier)
+                        if (
+                            failed_record is not None
+                            and failed_record.status == RunStatus.CANCELLING
+                        ):
+                            self._finish_cancelled_before_launch(failed_record)
+                            return
+                    message = str(exc)
+                    self._append_build_log_excerpt(job_identifier, message)
+                    self._fail_before_completion(job_identifier, message)
+                    return
+
             with self._lock:
                 record = self._records[job_identifier]
+                adapter = self._adapter_for_record(record)
                 if record.status == RunStatus.CANCELLING:
                     self._finish_cancelled_before_launch(record)
                     return
-                command = list(record.command)
-                record.current_stage = "Starting workflow runner"
-                self._persist(record)
 
-            log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(log_path.parent, 0o700)
-            environment = runtime_environment(record.pipeline_identifier)
-            if command and command[0] == "nextflow":
-                environment["NXF_ANSI_LOG"] = "false"
-                environment["NXF_OPTS"] = self._nxf_options(command)
-            descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as log_handle:
-                log_handle.write(f"Missus Tom {record.pipeline_identifier} workflow\n")
-                log_handle.write("Command argument array: " + json.dumps(command) + "\n")
-                log_handle.flush()
-                with self._lock:
-                    lock_descriptors = self._locks[job_identifier].descriptors()
-                    for lock_descriptor in lock_descriptors:
-                        os.set_inheritable(lock_descriptor, True)
-                working_directory_for = getattr(adapter, "runner_working_directory", None)
-                if callable(working_directory_for):
-                    project_root = Path(record.results_directory).parent.resolve(strict=True)
-                    working_directory = Path(working_directory_for(project_root)).resolve(
-                        strict=True
-                    )
-                else:
-                    workflow_directory = getattr(adapter, "workflow_directory", None)
-                    if workflow_directory is None:
-                        repository_root = getattr(adapter, "repository_root", None)
-                        if repository_root is None:
-                            raise ValueError("pipeline adapter has no workflow directory")
-                        workflow_directory = repository_root / "workflows" / "bulk_rnaseq"
-                    working_directory = Path(workflow_directory).resolve(strict=True)
-                if not working_directory.is_dir():
-                    raise ValueError("pipeline adapter working directory is not a directory")
-                process = subprocess.Popen(
-                    command,
-                    cwd=working_directory,
-                    env=environment,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    start_new_session=True,
-                    pass_fds=lock_descriptors,
-                )
-                identity = self._read_process_identity(process.pid)
-                with self._lock:
-                    self._processes[job_identifier] = process
-                    record = self._records[job_identifier]
-                    record.process_id = process.pid
-                    record.process_group_id = process.pid
-                    if identity is not None:
-                        self._identities[job_identifier] = identity
-                        record.process_group_id = identity.process_group_id
-                        record.process_start_ticks = identity.start_ticks
-                        record.process_boot_id = identity.boot_id
-                    record = self._records[job_identifier]
-                    if record.status == RunStatus.CANCELLING:
-                        self._persist(record)
-                        self._signal_process_group(process, signal.SIGTERM)
-                        self._start_cancellation_watchdog(job_identifier, process)
-                    else:
-                        record.status = RunStatus.RUNNING
-                        record.current_stage = "Workflow runner"
-                        self._persist(record)
-                exit_code = self._wait_for_process_with_monitor(job_identifier, process, log_handle)
+            exit_code = self._launch_workflow_runner(job_identifier, adapter)
             self._finish_process(job_identifier, exit_code)
+        except UnconfirmedCleanup:
+            return
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             with self._lock:
-                launched_process = self._processes.get(job_identifier)
+                launched_process = self._processes.get(
+                    job_identifier
+                ) or self._preparation_processes.get(job_identifier)
                 launched_record = self._records.get(job_identifier)
                 if launched_process is not None and launched_record is not None:
                     launched_record.status = RunStatus.CANCELLING
@@ -478,6 +482,84 @@ class RunManager:
             with self._lock:
                 self._processes.pop(job_identifier, None)
                 self._threads.pop(job_identifier, None)
+
+    def _launch_workflow_runner(self, job_identifier: str, adapter: PipelineAdapter) -> int:
+        with self._lock:
+            record = self._records[job_identifier]
+            command = list(record.command)
+            record.execution_phase = RunExecutionPhase.WORKFLOW_LAUNCH
+            record.current_stage = "Starting workflow runner"
+            self._persist(record)
+            log_path = Path(record.log_path)
+
+        log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(log_path.parent, 0o700)
+        environment = runtime_environment(record.pipeline_identifier)
+        if command and command[0] == "nextflow":
+            environment["NXF_ANSI_LOG"] = "false"
+            environment["NXF_OPTS"] = self._nxf_options(command)
+        descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as log_handle:
+            log_handle.write(f"Missus Tom {record.pipeline_identifier} workflow\n")
+            log_handle.write("Command argument array: " + json.dumps(command) + "\n")
+            log_handle.flush()
+            with self._lock:
+                lock_descriptors = self._locks[job_identifier].descriptors()
+                for lock_descriptor in lock_descriptors:
+                    os.set_inheritable(lock_descriptor, True)
+            working_directory_for = getattr(adapter, "runner_working_directory", None)
+            if callable(working_directory_for):
+                project_root = Path(record.results_directory).parent.resolve(strict=True)
+                working_directory = Path(working_directory_for(project_root)).resolve(strict=True)
+            else:
+                workflow_directory = getattr(adapter, "workflow_directory", None)
+                if workflow_directory is None:
+                    repository_root = getattr(adapter, "repository_root", None)
+                    if repository_root is None:
+                        raise ValueError("pipeline adapter has no workflow directory")
+                    workflow_directory = repository_root / "workflows" / "bulk_rnaseq"
+                working_directory = Path(workflow_directory).resolve(strict=True)
+            if not working_directory.is_dir():
+                raise ValueError("pipeline adapter working directory is not a directory")
+            process = subprocess.Popen(
+                command,
+                cwd=working_directory,
+                env=environment,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                pass_fds=lock_descriptors,
+            )
+            with self._lock:
+                self._processes[job_identifier] = process
+                record = self._records[job_identifier]
+                self._persist_process_identity(job_identifier, record, process.pid)
+            try:
+                self._assign_containment_process(job_identifier, process.pid)
+            except ValueError as exc:
+                reaped = self._terminate_and_reap_process_group(process)
+                with self._lock:
+                    self._processes.pop(job_identifier, None)
+                if not reaped:
+                    self._mark_cleanup_unconfirmed(
+                        job_identifier,
+                        "workflow runner could not be assigned to resource containment "
+                        "and did not exit",
+                    )
+                    raise UnconfirmedCleanup(str(exc)) from exc
+                raise
+            with self._lock:
+                record.execution_phase = RunExecutionPhase.WORKFLOW
+                if record.status == RunStatus.CANCELLING:
+                    self._persist(record)
+                    self._signal_process_group(process, signal.SIGTERM)
+                    self._start_cancellation_watchdog(job_identifier, process)
+                else:
+                    record.status = RunStatus.RUNNING
+                    record.current_stage = "Workflow runner"
+                    self._persist(record)
+            return self._wait_for_process_with_monitor(job_identifier, process, log_handle)
 
     def _finish_process(self, job_identifier: str, exit_code: int) -> None:
         # The wait thread and cancellation watchdog can reap the same process.
@@ -515,10 +597,17 @@ class RunManager:
         if not self._cleanup_owned_containers(job_identifier):
             self._mark_cleanup_unconfirmed(job_identifier)
             return
+        if not self._stop_containment(job_identifier):
+            self._mark_cleanup_unconfirmed(
+                job_identifier, "resource containment scope did not become inactive"
+            )
+            return
         with self._lock:
             record = self._records[job_identifier]
             if not record.holds_admission:
                 return
+            self._clear_persisted_process_identity(record)
+            record.execution_phase = RunExecutionPhase.QUEUED
             finished_at = datetime.now(UTC)
             record.finished_at = finished_at
             record.container_cleanup_verified_at = datetime.now(UTC)
@@ -628,13 +717,21 @@ class RunManager:
         )
 
     def _finish_cancelled_before_launch(self, record: RunRecord) -> None:
+        job_identifier = record.job_identifier
+        if not self._stop_containment(job_identifier):
+            self._mark_cleanup_unconfirmed(
+                job_identifier, "resource containment scope did not become inactive"
+            )
+            return
         record.status = RunStatus.CANCELLED
         record.current_stage = "Cancelled before launch"
         record.finished_at = datetime.now(UTC)
         record.holds_admission = False
+        self._clear_persisted_process_identity(record)
+        record.execution_phase = RunExecutionPhase.QUEUED
         self._persist_safely(record)
         self._append_terminal_log_marker(record)
-        self._release_locks(record.job_identifier)
+        self._release_locks(job_identifier)
 
     def _prepare_bulk_references_if_needed(
         self, job_identifier: str, adapter: PipelineAdapter
@@ -678,6 +775,7 @@ class RunManager:
             ),
             start_stage=self._records[job_identifier].start_stage,
             cancellation_check=lambda: self._reference_cancel_requested(job_identifier),
+            status_callback=self._reference_status_callback(job_identifier),
         )
 
         with self._lock:
@@ -688,7 +786,37 @@ class RunManager:
             if callable(replace_manifest):
                 record.command = replace_manifest(record.command, execution_manifest)
             record.execution_manifest_path = str(execution_manifest)
+            record.execution_phase = RunExecutionPhase.REFERENCE_PREPARED
             self._persist(record)
+
+    def _reference_status_callback(self, job_identifier: str) -> Callable[[str], None]:
+        def report(stage: str) -> None:
+            with self._lock:
+                record = self._records.get(job_identifier)
+                if record is None:
+                    return
+                record.current_stage = stage
+                self._persist_safely(record)
+
+        return report
+
+    def _append_build_log_excerpt(self, job_identifier: str, message: str) -> None:
+        log_path = parse_build_log_path(message)
+        if log_path is None:
+            return
+        excerpt = read_build_log_excerpt(log_path)
+        if not excerpt:
+            return
+        with self._lock:
+            record = self._records.get(job_identifier)
+            if record is None:
+                return
+            run_log = Path(record.log_path)
+        self._append_log_line_safely(
+            run_log,
+            f"{self._format_log_timestamp(datetime.now(UTC))} Reference build log excerpt:\n"
+            f"{excerpt}\n",
+        )
 
     def _reference_cancel_requested(self, job_identifier: str) -> bool:
         with self._lock:
@@ -708,6 +836,12 @@ class RunManager:
             command_list = list(command)
             with self._lock:
                 project_root = Path(self._records[job_identifier].results_directory).parent
+                lock_descriptors = self._locks[job_identifier].descriptors()
+                for lock_descriptor in lock_descriptors:
+                    os.set_inheritable(lock_descriptor, True)
+                record = self._records[job_identifier]
+                record.execution_phase = RunExecutionPhase.REFERENCE_PREPARATION
+                self._persist(record)
             monitor = ResourceMonitor(project_root)
             memory_limit_bytes = int(memory_gb * 1024**3)
             process = subprocess.Popen(
@@ -717,9 +851,26 @@ class RunManager:
                 text=True,
                 env=dict(environment) if environment is not None else None,
                 start_new_session=True,
+                pass_fds=lock_descriptors,
             )
             with self._lock:
                 self._preparation_processes[job_identifier] = process
+                record = self._records[job_identifier]
+                self._persist_process_identity(job_identifier, record, process.pid)
+            try:
+                self._assign_containment_process(job_identifier, process.pid)
+            except ValueError as exc:
+                reaped = self._terminate_and_reap_process_group(process)
+                with self._lock:
+                    self._preparation_processes.pop(job_identifier, None)
+                if not reaped:
+                    self._mark_cleanup_unconfirmed(
+                        job_identifier,
+                        "reference preparation could not be assigned to resource containment "
+                        "and did not exit",
+                    )
+                    raise UnconfirmedCleanup(str(exc)) from exc
+                raise
             term_sent_at: float | None = None
             stop_reason: str | None = None
             next_resource_check = time.monotonic() + CHECK_INTERVAL_SECONDS
@@ -760,8 +911,19 @@ class RunManager:
                         elif now - term_sent_at >= TERM_GRACE_SECONDS:
                             self._signal_process_group(process, signal.SIGKILL)
             finally:
+                child_still_alive = process.poll() is None
                 with self._lock:
                     self._preparation_processes.pop(job_identifier, None)
+                    prepared_record = self._records.get(job_identifier)
+                    if prepared_record is None:
+                        pass
+                    elif child_still_alive or prepared_record.status == RunStatus.INTERRUPTED:
+                        self._persist_safely(prepared_record)
+                    else:
+                        self._clear_persisted_process_identity(prepared_record)
+                        if prepared_record.status != RunStatus.CANCELLING:
+                            prepared_record.execution_phase = RunExecutionPhase.REFERENCE_PREPARED
+                            self._persist_safely(prepared_record)
 
         return run
 
@@ -776,6 +938,11 @@ class RunManager:
         return None
 
     def _fail_before_completion(self, job_identifier: str, message: str) -> None:
+        if not self._stop_containment(job_identifier):
+            self._mark_cleanup_unconfirmed(
+                job_identifier, "resource containment scope did not become inactive"
+            )
+            return
         with self._lock:
             record = self._records.get(job_identifier)
             if record is None:
@@ -789,6 +956,8 @@ class RunManager:
                 record.error_message = message
             record.finished_at = datetime.now(UTC)
             record.holds_admission = False
+            self._clear_persisted_process_identity(record)
+            record.execution_phase = RunExecutionPhase.QUEUED
             self._persist_safely(record)
             self._append_terminal_log_marker(record)
             self._release_locks(job_identifier)
@@ -800,7 +969,11 @@ class RunManager:
             record = self._records.get(job_identifier)
             if record is None or record.status != RunStatus.CANCELLING:
                 return
-            process = known_process or self._processes.get(job_identifier)
+            process = (
+                known_process
+                or self._processes.get(job_identifier)
+                or self._preparation_processes.get(job_identifier)
+            )
             identity = self._identities.get(job_identifier) or self._identity_from_record(record)
         if process is not None:
             try:
@@ -818,6 +991,9 @@ class RunManager:
                         job_identifier, "process group did not exit after SIGKILL"
                     )
                     return
+        if identity is None and record.containment_scope_id is not None:
+            self._finish_recovered_cancellation(job_identifier)
+            return
         if identity is None:
             self._mark_cleanup_unconfirmed(
                 job_identifier, "no verified process identity is available"
@@ -826,11 +1002,21 @@ class RunManager:
         if self._identity_matches(identity):
             self._signal_verified_identity(identity, signal.SIGTERM)
             if self._wait_for_identity_exit(identity, TERM_GRACE_SECONDS):
+                self._clear_identity_after_verified_exit(job_identifier)
+                self._finish_recovered_cancellation(job_identifier)
+                return
+            if not self._identity_matches(identity):
+                self._clear_identity_after_verified_exit(job_identifier)
                 self._finish_recovered_cancellation(job_identifier)
                 return
             if self._identity_matches(identity):
                 self._signal_verified_identity(identity, signal.SIGKILL)
             if self._wait_for_identity_exit(identity, KILL_GRACE_SECONDS):
+                self._clear_identity_after_verified_exit(job_identifier)
+                self._finish_recovered_cancellation(job_identifier)
+                return
+            if not self._identity_matches(identity):
+                self._clear_identity_after_verified_exit(job_identifier)
                 self._finish_recovered_cancellation(job_identifier)
                 return
             self._mark_cleanup_unconfirmed(
@@ -865,10 +1051,25 @@ class RunManager:
         with self._lock:
             record = self._records.get(job_identifier)
             process_group_id = record.process_group_id if record is not None else None
+            identity = self._identities.get(job_identifier) or (
+                self._identity_from_record(record) if record is not None else None
+            )
+        if (
+            identity is not None
+            and not self._identity_matches(identity)
+            and process_group_id is not None
+            and self._process_group_exists(process_group_id)
+        ):
+            process_group_id = None
         if process_group_id is not None and self._process_group_exists(process_group_id):
             self._mark_cleanup_unconfirmed(
                 job_identifier,
                 "The recovered process group remains active after its leader exited.",
+            )
+            return
+        if not self._stop_containment(job_identifier):
+            self._mark_cleanup_unconfirmed(
+                job_identifier, "resource containment scope did not become inactive"
             )
             return
         if self._cleanup_owned_containers(job_identifier):
@@ -880,6 +1081,8 @@ class RunManager:
                 record.current_stage = "Cancelled after recovery"
                 record.finished_at = datetime.now(UTC)
                 record.holds_admission = False
+                self._clear_persisted_process_identity(record)
+                record.execution_phase = RunExecutionPhase.QUEUED
                 record.container_cleanup_verified_at = datetime.now(UTC)
                 self._persist_safely(record)
                 self._append_terminal_log_marker(record)
@@ -1065,6 +1268,182 @@ class RunManager:
             cpus = max(1, int(command[command.index("--max_cpus") + 1]))
         return f"-Xms128m -Xmx1g -XX:ActiveProcessorCount={cpus}"
 
+    def _persist_process_identity(
+        self, job_identifier: str, record: RunRecord, process_id: int
+    ) -> None:
+        identity = self._read_process_identity(process_id)
+        record.process_id = process_id
+        record.process_group_id = process_id
+        if identity is not None:
+            self._identities[job_identifier] = identity
+            record.process_group_id = identity.process_group_id
+            record.process_start_ticks = identity.start_ticks
+            record.process_boot_id = identity.boot_id
+        self._persist_safely(record)
+
+    def _clear_persisted_process_identity(self, record: RunRecord) -> None:
+        self._identities.pop(record.job_identifier, None)
+        record.process_id = None
+        record.process_group_id = None
+        record.process_start_ticks = None
+        record.process_boot_id = None
+
+    def _clear_identity_after_verified_exit(self, job_identifier: str) -> None:
+        with self._lock:
+            record = self._records.get(job_identifier)
+            if record is None:
+                return
+            self._clear_persisted_process_identity(record)
+            self._persist_safely(record)
+
+    def _manifest_for_record(self, record: RunRecord) -> ProjectManifest:
+        project_root = Path(record.results_directory).parent
+        return read_project_manifest(project_root / "input_manifest" / "project_manifest.json")
+
+    def _local_containment_required(self, manifest: ProjectManifest) -> bool:
+        return manifest.execution_profile == ExecutionProfile.LOCAL
+
+    def _start_native_containment_if_needed(self, job_identifier: str) -> None:
+        with self._lock:
+            record = self._records[job_identifier]
+            if record.containment_scope_id is not None:
+                return
+            manifest = self._manifest_for_record(record)
+        if not self._local_containment_required(manifest):
+            return
+        probe = probe_native_containment()
+        if not probe.available:
+            raise ValueError(
+                "Native resource containment is required for local execution but is unavailable: "
+                f"{probe.message} {probe.enablement or ''}".strip()
+            )
+        session = RunContainmentSession.start(
+            job_identifier,
+            memory_gb=manifest.resource_profile.memory_gb,
+            cpus=manifest.resource_profile.cpus,
+            max_parallel_tasks=manifest.resource_profile.max_parallel_tasks,
+        )
+        with self._lock:
+            self._containment_sessions[job_identifier] = session
+            record = self._records[job_identifier]
+            record.containment_scope_id = session.scope_id
+            self._persist_safely(record)
+
+    def _assign_containment_process(self, job_identifier: str, process_id: int) -> None:
+        with self._lock:
+            session = self._containment_sessions.get(job_identifier)
+        if session is None:
+            return
+        session.assign_process(process_id)
+
+    def _stop_containment(self, job_identifier: str) -> bool:
+        with self._lock:
+            session = self._containment_sessions.get(job_identifier)
+            record = self._records.get(job_identifier)
+            scope_id = record.containment_scope_id if record is not None else None
+            if record is not None and scope_id is not None:
+                record.containment_cleanup_attempts += 1
+                self._persist_safely(record)
+        if session is not None:
+            stopped = session.stop(grace_seconds=TERM_GRACE_SECONDS + KILL_GRACE_SECONDS)
+        elif scope_id:
+            stopped = stop_scope_unit(
+                scope_id, grace_seconds=TERM_GRACE_SECONDS + KILL_GRACE_SECONDS
+            )
+        else:
+            return True
+        target_scope = scope_id or (session.scope_id if session is not None else None)
+        if (
+            not stopped
+            or target_scope is None
+            or scope_status(target_scope).state != ScopeState.INACTIVE
+        ):
+            return False
+        with self._lock:
+            self._containment_sessions.pop(job_identifier, None)
+            record = self._records.get(job_identifier)
+            if record is not None:
+                record.containment_scope_id = None
+                self._persist_safely(record)
+        return True
+
+    def _recovery_holds_admission(
+        self,
+        record: RunRecord,
+        identity: ProcessIdentity | None,
+        containers: list[str] | None,
+    ) -> bool:
+        if (
+            record.containment_scope_id is not None
+            and scope_status(record.containment_scope_id).state != ScopeState.INACTIVE
+        ):
+            return True
+        if containers is None:
+            return True
+        if containers:
+            return True
+        if identity is not None:
+            return self._identity_matches(identity) or self._process_group_exists(
+                identity.process_group_id
+            )
+        if record.execution_phase in {
+            RunExecutionPhase.REFERENCE_PREPARED,
+            RunExecutionPhase.WORKFLOW_LAUNCH,
+            RunExecutionPhase.REFERENCE_PREPARATION,
+            RunExecutionPhase.WORKFLOW,
+        }:
+            return False
+        return record.status == RunStatus.RUNNING
+
+    def _terminate_and_reap_process_group(self, process: subprocess.Popen[str]) -> bool:
+        """Close the post-Popen assignment window before admission can be released.
+
+        A killed leader remains visible to ``killpg`` until this parent reaps it.
+        Reap first, then require the rest of the process group to be gone.
+        """
+        self._signal_process_group(process, signal.SIGTERM)
+        if process.poll() is None and not self._wait_for_process_group_exit(
+            process.pid, TERM_GRACE_SECONDS
+        ):
+            self._signal_process_group(process, signal.SIGKILL)
+            self._wait_for_process_group_exit(process.pid, KILL_GRACE_SECONDS)
+        try:
+            if process.poll() is None:
+                process.wait(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return not self._process_group_exists(process.pid)
+
+    def _schedule_recovered_workflow_resume(self, record: RunRecord) -> None:
+        job_identifier = record.job_identifier
+        project_root = Path(record.results_directory).parent
+        with self._lock:
+            if job_identifier in self._threads:
+                return
+            if self._has_active_admission():
+                return
+        try:
+            locks = self._acquire_locks(project_root, job_identifier)
+        except ValueError:
+            return
+        with self._lock:
+            if job_identifier in self._threads:
+                locks.close()
+                return
+            self._locks[job_identifier] = locks
+            record.holds_admission = True
+            record.status = RunStatus.PREPARING
+            record.current_stage = "Resuming after reference preparation"
+            self._persist_safely(record)
+            thread = threading.Thread(
+                target=self._run,
+                args=(job_identifier,),
+                name=f"missus-tom-run-{job_identifier}",
+                daemon=False,
+            )
+            self._threads[job_identifier] = thread
+            thread.start()
+
     @staticmethod
     def _read_process_identity(process_id: int) -> ProcessIdentity | None:
         try:
@@ -1083,6 +1462,12 @@ class RunManager:
 
     @classmethod
     def _identity_matches(cls, identity: ProcessIdentity) -> bool:
+        try:
+            os.kill(identity.process_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
         current = cls._read_process_identity(identity.process_id)
         return (
             current is not None
@@ -1122,7 +1507,7 @@ class RunManager:
         while time.monotonic() < deadline:
             if not self._identity_matches(identity):
                 return True
-            time.sleep(0.1)
+            time.sleep(min(0.05, max(0.01, deadline - time.monotonic())))
         return not self._identity_matches(identity)
 
     def _wait_for_process_group_exit(self, process_group_id: int, timeout: float) -> bool:
@@ -1220,14 +1605,20 @@ class RunManager:
                     and boot_started_at is not None
                     and created_at < boot_started_at
                     and containers == []
+                    and (
+                        record.containment_scope_id is None
+                        or scope_status(record.containment_scope_id).state == ScopeState.INACTIVE
+                    )
                 )
-                holds_admission = not predates_current_boot and (
-                    identity is None
-                    or containers is None
-                    or bool(containers)
-                    or self._identity_matches(identity)
-                    or self._process_group_exists(identity.process_group_id)
+                holds_admission = not predates_current_boot and self._recovery_holds_admission(
+                    record, identity, containers
                 )
+                if (
+                    record.containment_scope_id is not None
+                    and scope_status(record.containment_scope_id).state == ScopeState.INACTIVE
+                ):
+                    # This is the recovery equivalent of stop plus empty verification.
+                    record.containment_scope_id = None
                 record.status = RunStatus.INTERRUPTED
                 record.current_stage = (
                     "Interrupted before current host boot"
@@ -1258,6 +1649,13 @@ class RunManager:
                 self._records[record.job_identifier] = record
                 with suppress(OSError):
                     self._persist(record)
+                if (
+                    not holds_admission
+                    and record.execution_phase == RunExecutionPhase.REFERENCE_PREPARED
+                    and record.execution_manifest_path
+                    and not active_owner_exists
+                ):
+                    self._schedule_recovered_workflow_resume(record)
             else:
                 self._records[record.job_identifier] = record
 

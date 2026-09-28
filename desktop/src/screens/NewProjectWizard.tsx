@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { apiRequest } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { apiRequest, bulkProductionBackendError } from "../api";
+import { APP_VERSION } from "../appVersion";
 import { CheckList } from "../components/CheckList";
 import { FolderPreview } from "../components/FolderPreview";
 import { PipelineDependencies } from "../components/PipelineDependencies";
@@ -17,7 +18,9 @@ import {
   normalizeMaxParallelTasks,
   ONT_MANIFEST_SCHEMA_VERSION,
   ONT_PIPELINE_VERSION,
+  projectActionsBlockedByBackend,
   resolveBulkReferenceMode,
+  STRANDEDNESS_KIT_HELP,
   STRANDEDNESS_UI_OPTIONS,
   validateComparisonSelection,
   type BulkReferenceMode,
@@ -27,6 +30,7 @@ import type {
   Comparison,
   DirectoryPreview,
   FastqDiscoveryResult,
+  HealthStatus,
   MetadataCsvResult,
   ProjectManifest,
   ProjectValidation,
@@ -221,6 +225,8 @@ export function NewProjectWizard({
   const [validatedManifest, setValidatedManifest] = useState<ProjectManifest | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [backendHealth, setBackendHealth] = useState<HealthStatus | null>(null);
+  const [healthReady, setHealthReady] = useState(false);
   const [savedPath, setSavedPath] = useState("");
   const [exportPath, setExportPath] = useState("");
   const [importPath, setImportPath] = useState("");
@@ -231,6 +237,31 @@ export function NewProjectWizard({
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
+  const bulkCompatError = !isOntPipeline && healthReady
+    ? bulkProductionBackendError(backendHealth)
+    : null;
+  const bulkHealthPending = !isOntPipeline && !healthReady;
+  const backendBlocksProjectActions = projectActionsBlockedByBackend(
+    pipelineIdentifier,
+    healthReady,
+    bulkCompatError,
+  );
+
+  useEffect(() => {
+    let live = true;
+    void apiRequest<HealthStatus>("/health")
+      .then((payload) => {
+        if (!live) return;
+        setBackendHealth(payload);
+        setHealthReady(true);
+      })
+      .catch(() => {
+        if (!live) return;
+        setBackendHealth(null);
+        setHealthReady(true);
+      });
+    return () => { live = false; };
+  }, []);
   const steps = useMemo(
     () => (isOntPipeline ? ontSteps : bulkSteps).map((label, index) => (
       !isOntPipeline && index === 1 ? (startStage === "analysis" ? "Kallisto discovery" : "FASTQ discovery") : label
@@ -659,7 +690,7 @@ export function NewProjectWizard({
         max_parallel_tasks: options.maxParallelTasks,
       },
       execution_profile: options.executionProfile,
-      application_version: "0.3.0",
+      application_version: backendHealth?.version ?? APP_VERSION,
       pipeline_status: "draft",
     };
   };
@@ -825,6 +856,14 @@ export function NewProjectWizard({
   };
 
   const validate = async () => {
+    if (bulkHealthPending) {
+      setError("Checking the local backend compatibility. Wait for this check to finish before validating the project.");
+      return;
+    }
+    if (bulkCompatError) {
+      setError(bulkCompatError);
+      return;
+    }
     setBusy("validate");
     setError("");
     try {
@@ -843,6 +882,14 @@ export function NewProjectWizard({
 
   const saveAndPlan = async () => {
     if (!validatedManifest) return;
+    if (bulkHealthPending) {
+      setError("Checking the local backend compatibility. Wait for this check to finish before saving the project.");
+      return;
+    }
+    if (bulkCompatError) {
+      setError(bulkCompatError);
+      return;
+    }
     setBusy("save");
     setError("");
     try {
@@ -1093,7 +1140,7 @@ export function NewProjectWizard({
       case 5:
         if (isOntPipeline) return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate"}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
+            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
             <CheckList checks={validation?.checks ?? []} />
@@ -1102,23 +1149,39 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Pipeline options</h2></div></div>
-            <p className="helper-copy">{startStage === "analysis" ? "Analysis-only projects require annotation GTF or transcript-to-gene mapping. Production bulk RNA-seq is paired-end only." : "Quantification uses paired-end FASTQs. Choose whether Kallisto builds a new index from FASTA+GTF or uses an existing index."}</p>
+            <p className="helper-copy">{startStage === "analysis" ? "Analysis-only projects require annotation GTF or transcript-to-gene mapping. Production bulk RNA-seq is paired-end only." : "Quantification uses paired-end FASTQs. Missus Tom validates FASTA and GTF, derives the transcript-to-gene mapping, and builds or reuses a managed Kallisto index when the run starts."}</p>
             <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<select value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)}><option>total RNA</option><option>lncRNA</option><option>mRNA</option><option>other (confirm)</option></select></label></div>
             <p className="helper-copy"><strong>Read layout:</strong> paired-end (production contract). Single-end libraries are not supported in this wizard.</p>
-            {startStage === "quantification" && (
-              <fieldset className="run-mode-panel setup-mode-panel"><legend>Reference mode</legend>
-                <label className={`run-mode-option${options.referenceMode === "build" ? " selected" : ""}`}><input type="radio" name="bulk-reference-mode" checked={options.referenceMode === "build"} onChange={() => updateOptions("referenceMode", "build")} /><span><strong>Build index from FASTA + GTF</strong><small>Requires transcriptome FASTA and annotation GTF. Kallisto builds the index during quantification.</small></span></label>
-                <label className={`run-mode-option${options.referenceMode === "existing-index" ? " selected" : ""}`}><input type="radio" name="bulk-reference-mode" checked={options.referenceMode === "existing-index"} onChange={() => updateOptions("referenceMode", "existing-index")} /><span><strong>Use existing Kallisto index</strong><small>Requires a Kallisto index plus annotation GTF or transcript-to-gene mapping.</small></span></label>
-              </fieldset>
-            )}
-            <fieldset><legend>Strandedness</legend><p className="helper-copy">Choose the library strandedness explicitly. Unknown is not recorded for bulk RNA-seq.</p><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as BulkStrandedness)}>{STRANDEDNESS_UI_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><p className="field-help">{STRANDEDNESS_UI_OPTIONS.find((option) => option.value === options.strandedness)?.mappingNote}</p></fieldset>
+            <fieldset><legend>Strandedness</legend><p className="helper-copy">Choose the library strandedness explicitly. Unknown is not recorded for bulk RNA-seq.</p><label>Strandedness<select value={options.strandedness} onChange={(event) => updateOptions("strandedness", event.target.value as BulkStrandedness)}>{STRANDEDNESS_UI_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><p className="field-help">{STRANDEDNESS_UI_OPTIONS.find((option) => option.value === options.strandedness)?.mappingNote}</p><p className="field-help">{STRANDEDNESS_KIT_HELP}</p></fieldset>
             <fieldset><legend>Reference resource paths</legend>
               {startStage === "analysis" && <p className="helper-copy">Provide annotation GTF or transcript-to-gene mapping. Do not supply FASTQs, transcriptome FASTA, or Kallisto index paths for analysis-only runs.</p>}
-              {startStage === "quantification" && options.referenceMode === "build" && <p className="helper-copy">Build mode requires transcriptome FASTA and annotation GTF.</p>}
-              {startStage === "quantification" && options.referenceMode === "existing-index" && <p className="helper-copy">Existing-index mode requires a Kallisto index and either annotation GTF or transcript-to-gene mapping (GTF is the usual choice).</p>}
-              {startStage === "quantification" && options.referenceMode === "build" && <>{referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa", true)}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf", true)}</>}
-              {startStage === "quantification" && options.referenceMode === "existing-index" && <>{referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}{referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}</>}
+              {startStage === "quantification" && options.referenceMode === "build" && (
+                <>
+                  <p className="helper-copy">Missus Tom will validate the FASTA and GTF, derive the transcript-to-gene mapping, and build or reuse a managed Kallisto index when the run starts.</p>
+                  <ul className="helper-copy">
+                    <li>The FASTA must contain transcript sequences, not a genomic FASTA.</li>
+                    <li>The GTF must come from the same annotation release.</li>
+                    <li>Preflight validates identifier compatibility.</li>
+                    <li>Index construction happens after Run pipeline is selected, not when the project is saved.</li>
+                    <li>Reuse occurs only when FASTA content and Kallisto version match.</li>
+                  </ul>
+                  {referenceFileField("Transcriptome FASTA", "transcriptomeFasta", "/references/transcripts.fa", true)}
+                  {referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf", true)}
+                  <p className="helper-copy"><button className="text-button" type="button" onClick={() => updateOptions("referenceMode", "existing-index")}>Advanced: use an existing Kallisto index</button></p>
+                </>
+              )}
+              {startStage === "quantification" && options.referenceMode === "existing-index" && (
+                <>
+                  <p className="helper-copy"><strong>Advanced: use an existing Kallisto index</strong> Missus Tom never rebuilds an explicitly supplied index. Provide the index plus annotation GTF or a normalized transcript-to-gene mapping.</p>
+                  {referenceFileField("Kallisto index", "kallistoIndex", "/references/transcripts.idx", true)}
+                  {referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}
+                  {referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}
+                  {referenceFileField("Original transcriptome FASTA used to build this index", "transcriptomeFasta", "/references/transcripts.fa")}
+                  {options.transcriptomeFasta.trim() ? null : <p className="input-warning">A Kallisto index cannot prove its own annotation compatibility. Supply the original transcriptome FASTA so preflight can compare identifiers.</p>}
+                  <p className="helper-copy"><button className="text-button" type="button" onClick={() => updateOptions("referenceMode", "build")}>Use FASTA + GTF instead</button></p>
+                </>
+              )}
               {startStage === "analysis" && <>{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}{referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}</>}
             </fieldset>
             <fieldset><legend>{startStage === "analysis" ? "Analysis" : "Trimming and analysis"}</legend>{startStage === "quantification" && <><div className="field-pair"><label>R1 adapter<input value={options.adapterR1} onChange={(event) => updateOptions("adapterR1", event.target.value)} /></label><label>R2 adapter<input value={options.adapterR2} onChange={(event) => updateOptions("adapterR2", event.target.value)} /></label></div><div className="field-pair"><label>Trim quality<input type="number" min="0" max="50" value={options.trimQuality} onChange={(event) => updateOptions("trimQuality", Number(event.target.value))} /></label><label>Minimum read length<input type="number" min="1" value={options.minimumReadLength} onChange={(event) => updateOptions("minimumReadLength", Number(event.target.value))} /></label></div></>}<div className="field-triple"><label>Minimum group size<input type="number" min="2" value={options.minimumGroupSize} onChange={(event) => updateOptions("minimumGroupSize", Number(event.target.value))} /></label><label>Adjusted p-value<input type="number" min="0" max="1" step="0.01" value={options.adjustedPValue} onChange={(event) => updateOptions("adjustedPValue", Number(event.target.value))} /></label><label>Absolute log2 fold change<input type="number" min="0" step="0.05" value={options.absoluteLog2FoldChange} onChange={(event) => updateOptions("absoluteLog2FoldChange", Number(event.target.value))} /></label></div></fieldset>
@@ -1134,12 +1197,12 @@ export function NewProjectWizard({
             <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
-            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save"} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
+            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
           </section>
         );
         return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate"}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
+            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
             <CheckList checks={validation?.checks ?? []} />
@@ -1152,7 +1215,7 @@ export function NewProjectWizard({
             <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Analysis-only (existing Kallisto results)" : "FASTQ quantification"}</dd><dt>Reference mode</dt><dd>{bulkReferenceMode}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType} · paired-end · {options.strandedness}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM · {options.maxParallelTasks} parallel task(s)</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
-            <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save"} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
+            <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
           </section>
         );
     }
@@ -1172,16 +1235,19 @@ export function NewProjectWizard({
         <ol className="wizard-steps" aria-label="Project setup steps">
           {steps.map((label, index) => (
             <li key={label} className={index === step ? "current" : index < step ? "complete" : ""}>
-              <button type="button" onClick={() => setStep(index)} aria-current={index === step ? "step" : undefined}>
+              <button type="button" onClick={() => setStep(index)} disabled={backendBlocksProjectActions && index > step} aria-current={index === step ? "step" : undefined}>
                 <span>{index < step ? "✓" : index + 1}</span><strong>{label}</strong>
               </button>
             </li>
           ))}
         </ol>
         <div>
+          {bulkHealthPending && <div className="info-banner" role="status"><strong>Checking backend compatibility…</strong><span>Bulk project validation and saving will become available after the local backend reports its capabilities and matching build revision.</span></div>}
+          {!isOntPipeline && healthReady && !bulkCompatError && <div className="success-message" role="status">Compatible Bulk backend connected.</div>}
+          {bulkCompatError && <div className="inline-error" role="alert"><strong>Incompatible or unavailable backend</strong><span>{bulkCompatError}</span></div>}
           {error && <div className="inline-error" role="alert"><strong>Error</strong><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
           {renderStep()}
-          <div className="wizard-actions"><button className="button secondary" type="button" onClick={() => setStep((current) => Math.max(0, current - 1))} disabled={step === 0}>Back</button><span>Unsaved changes are temporary.</span><button className="button primary" type="button" onClick={() => setStep((current) => Math.min(steps.length - 1, current + 1))} disabled={step === steps.length - 1}>Continue</button></div>
+          <div className="wizard-actions"><button className="button secondary" type="button" onClick={() => setStep((current) => Math.max(0, current - 1))} disabled={step === 0}>Back</button><span>Unsaved changes are temporary.</span><button className="button primary" type="button" onClick={() => setStep((current) => Math.min(steps.length - 1, current + 1))} disabled={step === steps.length - 1 || backendBlocksProjectActions}>Continue</button></div>
         </div>
       </div>
     </div>

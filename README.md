@@ -87,8 +87,9 @@ proceed offline when the project's reference files are already on the machine.
    smoke path, or select **New project → Bulk RNA-seq** and scan a paired-FASTQ
    directory.
 3. Confirm sample pairings and biological conditions, choose matching
-   transcriptome FASTA/GTF references, select strandedness and trimming
-   settings, and define numerator-versus-denominator comparisons.
+   transcriptome FASTA/GTF references, select strandedness (Forward/FR, Reverse/RF,
+   or unstranded; confirm your library kit), and define numerator-versus-denominator
+   comparisons.
 4. Validate and save the project, then review the run plan. Reference
    preparation occurs through the same normal local run path.
 5. Select **Run pipeline** and follow preparation and workflow progress in

@@ -11,7 +11,8 @@ import { TitleBar } from "./components/TitleBar";
 import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
 import { loadSetupState } from "./setupState";
-import type { ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
+import type { HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
+import { APP_VERSION, formatBuildLabel } from "./appVersion";
 
 const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
   { id: "dashboard", label: "Dashboard", glyph: "⌂" },
@@ -29,8 +30,21 @@ export default function App() {
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
   const [runPollError, setRunPollError] = useState("");
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const runLifecycleGeneration = useRef(0);
   const runStartPending = useRef(false);
+
+  useEffect(() => {
+    let live = true;
+    void apiRequest<HealthStatus>("/health")
+      .then((payload) => {
+        if (live) setHealth(payload);
+      })
+      .catch(() => {
+        if (live) setHealth(null);
+      });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -165,7 +179,7 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <span className="version-chip">v0.3.0</span>
+          <span className="version-chip">{formatBuildLabel(health?.version ?? APP_VERSION, health?.build_revision)}</span>
           <p>Local bioinformatics workbench</p>
         </div>
         </aside>

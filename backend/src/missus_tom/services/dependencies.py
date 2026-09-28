@@ -36,6 +36,14 @@ from missus_tom.models.dependencies import (
     DependencyRequirement,
     DependencyStatus,
 )
+from missus_tom.models.errors import (
+    DEPENDENCY_INSTALL_IN_PROGRESS,
+    DEPENDENCY_PREREQUISITE_FAILED,
+    DEPENDENCY_VERIFICATION_FAILED,
+    UNSUPPORTED_PIPELINE,
+    WORKFLOW_ADMISSION_LOCKED,
+    ApiCodedError,
+)
 from missus_tom.services.resources import admission_free_bytes, inspect_storage
 
 ONT_R_PACKAGES: Final[tuple[str, ...]] = (
@@ -132,6 +140,84 @@ _DOCKER_IMAGES: Final[tuple[str, ...]] = (
     "quay.io/biocontainers/kallisto@sha256:7615f563aa2948fd087f7e4a666e252f275c60b2070729bc9a3804c8873527e5",
 )
 _ACTIVE = {DependencyInstallStatus.RUNNING}
+_BULK_LOCK_PACKAGES: Final[tuple[str, ...]] = (
+    "nextflow",
+    "openjdk",
+    "fastqc",
+    "multiqc",
+    "cutadapt",
+    "kallisto",
+    "r-base",
+    "bioconductor-deseq2",
+    "bioconductor-tximport",
+    "r-ggplot2",
+)
+
+
+def bulk_conda_lock_path() -> Path:
+    source_path = (
+        Path(__file__).resolve().parents[1] / "resources" / "locks" / "bulk-rnaseq-linux-64.lock"
+    )
+    if source_path.is_file():
+        return source_path
+    return settings.resource_root / "locks" / "bulk-rnaseq-linux-64.lock"
+
+
+def _lock_package_versions(lock_path: Path) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    if not lock_path.is_file():
+        return versions
+    for raw in lock_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line.startswith("http"):
+            continue
+        filename = line.rsplit("/", 1)[-1]
+        for suffix in (".tar.bz2", ".conda"):
+            if filename.endswith(suffix):
+                filename = filename[: -len(suffix)]
+                break
+        for name in _BULK_LOCK_PACKAGES:
+            token = f"{name}-"
+            if filename.startswith(token):
+                versions[name] = filename[len(token) :].rsplit("-", 1)[0]
+    return versions
+
+
+def _prefix_package_versions(prefix: Path) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    meta = prefix / "conda-meta"
+    if not meta.is_dir():
+        return versions
+    for path in meta.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        name = payload.get("name")
+        version = payload.get("version")
+        if isinstance(name, str) and isinstance(version, str):
+            versions[name] = version
+    return versions
+
+
+def bulk_lock_provenance(prefix: Path | None = None) -> dict[str, object]:
+    lock_path = bulk_conda_lock_path()
+    digest = ""
+    if lock_path.is_file():
+        digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    installed = _prefix_package_versions(prefix) if prefix is not None else {}
+    if prefix is None:
+        try:
+            installed = _prefix_package_versions(_managed_bin("bulk-rnaseq").parent)
+        except (OSError, ValueError):
+            installed = {}
+    return {
+        "lock_path": str(lock_path),
+        "lock_sha256": digest,
+        "resolved_versions": {
+            name: installed[name] for name in _BULK_LOCK_PACKAGES if name in installed
+        },
+    }
 
 
 def _managed_root(pipeline_identifier: str) -> Path:
@@ -263,20 +349,32 @@ class DependencyInstaller:
     def install(self, pipeline_identifier: str) -> DependencyInstallJob:
         self._validate_pipeline(pipeline_identifier)
         if not self._supported_platform():
-            raise ValueError(
-                "automated dependency installation currently supports Linux x86_64 only"
+            raise ApiCodedError(
+                400,
+                DEPENDENCY_PREREQUISITE_FAILED,
+                "automated dependency installation currently supports Linux x86_64 only",
             )
         if pipeline_identifier == "ont-analysis" and _DORADO_ARCHIVE_SHA256 is None:
-            raise ValueError(
+            raise ApiCodedError(
+                400,
+                DEPENDENCY_PREREQUISITE_FAILED,
                 "managed ONT installation is disabled until the Dorado archive "
-                "has an authoritative pinned SHA-256 digest"
+                "has an authoritative pinned SHA-256 digest",
             )
         with self._lock:
             active = self._job_for_pipeline(pipeline_identifier)
             if active and active.status in _ACTIVE:
-                raise ValueError("dependency installation is already running for this pipeline")
+                raise ApiCodedError(
+                    409,
+                    DEPENDENCY_INSTALL_IN_PROGRESS,
+                    "dependency installation is already running for this pipeline",
+                )
             if any(job.status in _ACTIVE for job in self._jobs.values()):
-                raise ValueError("another dependency installation is already running")
+                raise ApiCodedError(
+                    409,
+                    DEPENDENCY_INSTALL_IN_PROGRESS,
+                    "another dependency installation is already running",
+                )
             job = DependencyInstallJob(
                 job_identifier=str(uuid4()),
                 pipeline_identifier=pipeline_identifier,
@@ -304,7 +402,11 @@ class DependencyInstaller:
 
     def _validate_pipeline(self, pipeline_identifier: str) -> None:
         if pipeline_identifier not in _PIPELINES:
-            raise ValueError(f"unsupported pipeline identifier: {pipeline_identifier}")
+            raise ApiCodedError(
+                404,
+                UNSUPPORTED_PIPELINE,
+                f"unsupported pipeline identifier: {pipeline_identifier}",
+            )
 
     @staticmethod
     def _supported_platform() -> bool:
@@ -512,6 +614,9 @@ class DependencyInstaller:
         except Exception as exc:
             job.status = DependencyInstallStatus.FAILED
             job.message = str(exc)
+            job.error_code = (
+                exc.code if isinstance(exc, ApiCodedError) else DEPENDENCY_VERIFICATION_FAILED
+            )
             self._log(job, f"Installation failed: {exc}")
         finally:
             job.finished_at = datetime.now(UTC)
@@ -531,6 +636,7 @@ class DependencyInstaller:
         staging = Path(mkdtemp(prefix=f".{job.pipeline_identifier}-", dir=root / "staging"))
         environment = root / "environments" / job.job_identifier / "environment"
         try:
+            activated = False
             # Native Bulk now includes R/Bioconductor as well as the scientific CLI tools.
             minimum_free = (
                 20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 15 * 1024**3
@@ -551,36 +657,59 @@ class DependencyInstaller:
                 )
             mamba = self._ensure_micromamba(staging, job)
             self._safe_directory(environment.parent)
-            packages = self._packages_for(job.pipeline_identifier)
-            self._run(
-                job,
-                [
-                    str(mamba),
-                    "create",
-                    "--yes",
-                    "--no-rc",
-                    "--strict-channel-priority",
-                    "--prefix",
-                    str(environment),
-                    "--override-channels",
-                    "--channel",
-                    "conda-forge",
-                    "--channel",
-                    "bioconda",
-                    *packages,
-                ],
-                environment=self._mamba_environment(job.pipeline_identifier),
-            )
+            if job.pipeline_identifier == "bulk-rnaseq":
+                lock_path = bulk_conda_lock_path()
+                if not lock_path.is_file():
+                    raise RuntimeError(
+                        "Bulk RNA-seq conda lock is missing. Generate it with "
+                        "scripts/generate-bulk-conda-lock.sh before Setup."
+                    )
+                self._run(
+                    job,
+                    [
+                        str(mamba),
+                        "create",
+                        "--yes",
+                        "--no-rc",
+                        "--prefix",
+                        str(environment),
+                        "--file",
+                        str(lock_path),
+                    ],
+                    environment=self._mamba_environment(job.pipeline_identifier),
+                )
+            else:
+                packages = self._packages_for(job.pipeline_identifier)
+                self._run(
+                    job,
+                    [
+                        str(mamba),
+                        "create",
+                        "--yes",
+                        "--no-rc",
+                        "--strict-channel-priority",
+                        "--prefix",
+                        str(environment),
+                        "--override-channels",
+                        "--channel",
+                        "conda-forge",
+                        "--channel",
+                        "bioconda",
+                        *packages,
+                    ],
+                    environment=self._mamba_environment(job.pipeline_identifier),
+                )
             if job.pipeline_identifier == "ont-analysis":
                 self._install_r_packages(job, mamba, environment)
                 self._install_dorado(job, environment.parent)
-            elif job.pipeline_identifier == "bulk-rnaseq":
-                self._install_bulk_r_packages(job, mamba, environment)
             self._verify_environment(job, environment)
             self._activate(root, environment)
+            activated = True
             shutil.rmtree(staging, ignore_errors=True)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
+            if not activated:
+                self._remove_failed_candidate(job, environment)
             raise
 
     def _verify_environment(self, job: DependencyInstallJob, prefix: Path) -> None:
@@ -624,10 +753,56 @@ class DependencyInstaller:
                 [str(prefix / "bin" / "Rscript"), "--vanilla", "-e", expression],
                 environment=environment,
             )
+        if job.pipeline_identifier == "bulk-rnaseq":
+            self._verify_bulk_lock_versions(job, prefix)
 
     @staticmethod
     def _packages_for(pipeline_identifier: str) -> list[str]:
         return list(_PACKAGE_CATALOG[pipeline_identifier])
+
+    def _verify_bulk_lock_versions(self, job: DependencyInstallJob, prefix: Path) -> None:
+        lock_path = bulk_conda_lock_path()
+        expected = _lock_package_versions(lock_path)
+        installed = _prefix_package_versions(prefix)
+        missing = [name for name in _BULK_LOCK_PACKAGES if name not in installed]
+        if missing:
+            raise RuntimeError(
+                "new environment is missing locked Bulk packages: " + ", ".join(missing)
+            )
+        mismatches = [
+            f"{name} expected {expected[name]} installed {installed[name]}"
+            for name in _BULK_LOCK_PACKAGES
+            if name in expected and installed.get(name) != expected[name]
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "installed Bulk package versions do not match the conda lock: "
+                + "; ".join(mismatches)
+            )
+        self._log(
+            job,
+            "Verified locked Bulk versions: "
+            + ", ".join(f"{name}={installed[name]}" for name in _BULK_LOCK_PACKAGES),
+        )
+
+    def _remove_failed_candidate(self, job: DependencyInstallJob, environment: Path) -> None:
+        root = _managed_root(job.pipeline_identifier).resolve()
+        candidate = (root / "environments" / job.job_identifier).resolve()
+        try:
+            resolved_environment = environment.resolve()
+        except OSError:
+            return
+        if environment.is_symlink() or candidate.is_symlink() or resolved_environment.is_symlink():
+            raise RuntimeError("refusing to delete a symlink candidate environment")
+        expected_environment = (candidate / "environment").resolve()
+        if resolved_environment != expected_environment:
+            raise RuntimeError(
+                "refusing to delete a candidate outside the managed environment root"
+            )
+        if not candidate.is_relative_to(root / "environments"):
+            raise RuntimeError("refusing to delete a candidate that escapes the managed root")
+        if candidate.exists():
+            shutil.rmtree(candidate)
 
     def _install_r_packages(
         self, job: DependencyInstallJob, mamba: Path, environment: Path
@@ -1000,7 +1175,11 @@ class DependencyInstaller:
         except OSError as exc:
             os.close(descriptor)
             if exc.errno in {11, 35}:
-                raise ValueError("a workflow run is active or requires recovery") from exc
+                raise ApiCodedError(
+                    409,
+                    WORKFLOW_ADMISSION_LOCKED,
+                    "a workflow run is active or requires recovery",
+                ) from exc
             raise
 
     def _release_run_lock(self, job_identifier: str) -> None:

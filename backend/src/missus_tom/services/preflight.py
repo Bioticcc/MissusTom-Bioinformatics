@@ -6,6 +6,7 @@ import platform
 import re
 import subprocess
 from collections import Counter, defaultdict
+from functools import partial
 from pathlib import Path
 
 from missus_tom.config import settings
@@ -18,8 +19,10 @@ from missus_tom.models.manifest import (
 from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
 from missus_tom.services.bulk_references import (
     LEGACY_PIPELINE_VERSIONS,
+    MIN_ACCEPTABLE_OVERLAP,
     PRODUCTION_PIPELINE_VERSION,
     BulkReferenceError,
+    GtfTranscriptRecord,
     assess_fasta_gtf_overlap,
     bulk_analysis_only,
     infer_bulk_reference_mode,
@@ -27,6 +30,8 @@ from missus_tom.services.bulk_references import (
     legacy_biomart_migration_message,
     parse_gtf_transcript_records,
     read_supplied_transcript_to_gene,
+    safe_reference_read,
+    validate_mapping_fasta_overlap,
 )
 from missus_tom.services.dependencies import (
     _managed_root,
@@ -805,32 +810,81 @@ def _bulk_rnaseq_contract_checks(
     fasta_path = resources.get("transcriptome_fasta")
     index_path = resources.get("kallisto_index")
 
+    def _append_reference_error(label: str, exc: BulkReferenceError) -> None:
+        message = str(exc)
+        if message.startswith(label):
+            reference_errors.append(message)
+        else:
+            reference_errors.append(f"{label}: {message}")
+
     if mapping_path:
-        try:
-            read_supplied_transcript_to_gene(Path(mapping_path))
-        except BulkReferenceError as exc:
-            reference_errors.append(f"transcript_to_gene: {exc}")
+        mapping_file = Path(mapping_path)
+        if not mapping_file.is_file():
+            reference_errors.append("transcript_to_gene is missing or unreadable")
+        else:
+            try:
+                safe_reference_read(
+                    f"transcript_to_gene ({mapping_file})",
+                    lambda: read_supplied_transcript_to_gene(mapping_file),
+                )
+            except BulkReferenceError as exc:
+                _append_reference_error("transcript_to_gene", exc)
+            if (
+                mode == BulkReferenceMode.EXISTING_INDEX
+                and fasta_path
+                and Path(fasta_path).is_file()
+            ):
+                try:
+                    safe_reference_read(
+                        f"transcriptome_fasta ({fasta_path})",
+                        lambda: validate_mapping_fasta_overlap(mapping_file, Path(fasta_path)),
+                    )
+                except BulkReferenceError as exc:
+                    _append_reference_error("transcriptome_fasta", exc)
     elif not gtf_path:
         reference_errors.append("annotation_gtf or transcript_to_gene is required")
 
-    if gtf_path and not Path(gtf_path).is_file():
-        reference_errors.append("annotation_gtf is missing or unreadable")
-    elif gtf_path:
-        records = parse_gtf_transcript_records(Path(gtf_path))
-        if not records:
-            reference_errors.append(
-                "annotation_gtf does not contain transcript_id and gene_id attributes"
-            )
-        elif fasta_path and Path(fasta_path).is_file():
-            overlap = assess_fasta_gtf_overlap(
-                fasta_ids=iter_fasta_transcript_ids(Path(fasta_path)),
-                gtf_records=records,
-            )
-            if overlap.overlap_fraction < 0.95:
-                reference_errors.append(
-                    "transcriptome FASTA and annotation GTF appear incompatible "
-                    f"({overlap.overlap_fraction:.1%} identifier overlap)"
+    if gtf_path:
+        gtf_file = Path(gtf_path)
+        if not gtf_file.is_file():
+            reference_errors.append("annotation_gtf is missing or unreadable")
+        else:
+            records: dict[str, GtfTranscriptRecord] | None = None
+            try:
+                records = safe_reference_read(
+                    f"annotation_gtf ({gtf_file})",
+                    partial(parse_gtf_transcript_records, gtf_file),
                 )
+            except BulkReferenceError as exc:
+                _append_reference_error("annotation_gtf", exc)
+            if records is not None:
+                if not records:
+                    reference_errors.append(
+                        "annotation_gtf does not contain transcript_id and gene_id attributes"
+                    )
+                elif fasta_path and Path(fasta_path).is_file():
+                    try:
+                        fasta_ids = safe_reference_read(
+                            f"transcriptome_fasta ({fasta_path})",
+                            partial(iter_fasta_transcript_ids, Path(fasta_path)),
+                        )
+                    except BulkReferenceError as exc:
+                        _append_reference_error("transcriptome_fasta", exc)
+                    else:
+                        if not fasta_ids:
+                            reference_errors.append(
+                                "transcriptome_fasta does not contain any transcript headers"
+                            )
+                        else:
+                            overlap = assess_fasta_gtf_overlap(
+                                fasta_ids=fasta_ids,
+                                gtf_records=records,
+                            )
+                            if overlap.overlap_fraction < MIN_ACCEPTABLE_OVERLAP:
+                                reference_errors.append(
+                                    "transcriptome FASTA and annotation GTF appear incompatible "
+                                    f"({overlap.overlap_fraction:.1%} identifier overlap)"
+                                )
 
     analysis_only_refs = bulk_analysis_only(manifest) or analysis_only
     if analysis_only_refs:
@@ -838,8 +892,28 @@ def _bulk_rnaseq_contract_checks(
             reference_errors.append("analysis-only build mode must not include kallisto_index")
     elif mode == BulkReferenceMode.BUILD:
         for key in ("transcriptome_fasta", "annotation_gtf"):
-            if not resources.get(key) or not Path(resources[key]).is_file():
+            value = resources.get(key)
+            if not value or not Path(value).is_file():
                 reference_errors.append(f"{key} is required for build reference mode")
+                continue
+            resource_path = Path(value)
+            try:
+                if key == "transcriptome_fasta":
+                    fasta_ids = safe_reference_read(
+                        f"transcriptome_fasta ({resource_path})",
+                        partial(iter_fasta_transcript_ids, resource_path),
+                    )
+                    if not fasta_ids:
+                        reference_errors.append(
+                            "transcriptome_fasta does not contain any transcript headers"
+                        )
+                else:
+                    safe_reference_read(
+                        f"annotation_gtf ({resource_path})",
+                        partial(parse_gtf_transcript_records, resource_path),
+                    )
+            except BulkReferenceError as exc:
+                _append_reference_error(key, exc)
         if index_path:
             reference_errors.append("build reference mode must not include kallisto_index")
     elif mode == BulkReferenceMode.EXISTING_INDEX and (

@@ -8,8 +8,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from missus_tom.models.manifest import ProjectManifest
+from missus_tom.models.manifest import ExecutionProfile, ProjectManifest
 from missus_tom.models.preflight import CheckStatus, PreflightCheck
+from missus_tom.services.run_containment import (
+    native_containment_enablement_instructions,
+    probe_native_containment,
+)
 
 GIB = 1024**3
 
@@ -308,35 +312,63 @@ def execution_resource_checks(
     memory_budget = host.workflow_memory_bytes
     cpu_ok = profile.cpus <= host.workflow_cpus
     memory_ok = memory_budget is not None and profile.memory_gb * GIB <= memory_budget
-    checks = [
-        PreflightCheck(
-            check_id="workflow_cpu_budget",
-            label="Workflow CPU budget",
-            status=CheckStatus.PASSED if cpu_ok else failure,
-            message=(
-                f"{profile.cpus} CPU(s) requested; up to {host.workflow_cpus} available "
-                "for the workflow after reserving desktop capacity"
+    checks: list[PreflightCheck] = []
+    if manifest.execution_profile == ExecutionProfile.LOCAL:
+        containment = probe_native_containment()
+        checks.append(
+            PreflightCheck(
+                check_id="native_resource_containment",
+                label="Native resource containment",
+                status=(
+                    CheckStatus.PASSED
+                    if containment.available
+                    else (CheckStatus.BLOCKING if strict else CheckStatus.NOT_CONFIGURED)
+                ),
+                message=(
+                    containment.message
+                    if containment.available
+                    else (
+                        f"{containment.message} "
+                        f"{containment.enablement or native_containment_enablement_instructions()}"
+                    )
+                ),
+            )
+        )
+    checks.extend(
+        [
+            PreflightCheck(
+                check_id="workflow_cpu_budget",
+                label="Workflow CPU budget",
+                status=CheckStatus.PASSED if cpu_ok else failure,
+                message=(
+                    f"{profile.cpus} CPU(s) requested; up to {host.workflow_cpus} available "
+                    "for the workflow after reserving desktop capacity"
+                ),
+                details={"requested_cpus": profile.cpus, "safe_cpus": host.workflow_cpus},
             ),
-            details={"requested_cpus": profile.cpus, "safe_cpus": host.workflow_cpus},
-        ),
-        PreflightCheck(
-            check_id="workflow_memory_budget",
-            label="Workflow memory budget",
-            status=CheckStatus.PASSED if memory_ok else failure,
-            message=(
-                f"{profile.memory_gb:g} GiB requested; "
-                f"{memory_budget / GIB:.1f} GiB currently available for the workflow "
-                f"after reserving {host.reserved_memory_bytes / GIB:.1f} GiB"
-                if memory_budget is not None
-                else "Cannot determine available RAM; execution requires a readable memory limit"
+            PreflightCheck(
+                check_id="workflow_memory_budget",
+                label="Workflow memory budget",
+                status=CheckStatus.PASSED if memory_ok else failure,
+                message=(
+                    (
+                        f"{profile.memory_gb:g} GiB requested; "
+                        f"{memory_budget / GIB:.1f} GiB currently available for the workflow "
+                        f"after reserving {host.reserved_memory_bytes / GIB:.1f} GiB"
+                    )
+                    if memory_budget is not None
+                    else (
+                        "Cannot determine available RAM; execution requires a readable memory limit"
+                    )
+                ),
+                details={
+                    "requested_bytes": profile.memory_gb * GIB,
+                    "safe_bytes": memory_budget,
+                    "reserved_bytes": host.reserved_memory_bytes,
+                },
             ),
-            details={
-                "requested_bytes": profile.memory_gb * GIB,
-                "safe_bytes": memory_budget,
-                "reserved_bytes": host.reserved_memory_bytes,
-            },
-        ),
-    ]
+        ]
+    )
     if analysis_only is None:
         analysis_only = manifest.parameters.get("start_stage") == "analysis"
     input_bytes = estimated_input_bytes(manifest, analysis_only=analysis_only)

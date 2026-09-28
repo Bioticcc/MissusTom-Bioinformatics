@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "missus-tom-backend"
-version = "0.3.0"
+version = "0.3.0-rc.13"
 description = "Local validation and controlled workflow-execution backend for Missus Tom"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,6 +34,9 @@ missus-tom-ont-runner = "missus_tom.ont_runner:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+missus_tom = ["resources/**/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

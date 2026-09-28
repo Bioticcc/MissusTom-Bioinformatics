@@ -8,12 +8,52 @@ from pathlib import Path
 
 from missus_tom import __version__
 
+DEVELOPMENT_BUILD_REVISION = "development"
+MANIFEST_SCHEMA_VERSIONS: tuple[str, ...] = ("1.0.0", "1.1.0")
+BULK_PIPELINE_VERSIONS: tuple[str, ...] = ("0.5.0",)
+
+
+def read_build_revision() -> str:
+    injected = os.getenv("MISSUS_TOM_BUILD_REVISION", "").strip()
+    if injected:
+        return injected
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        packaged = Path(frozen_root) / "resources" / "build_revision.txt"
+        try:
+            value = packaged.read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
+        if value:
+            return value
+    return DEVELOPMENT_BUILD_REVISION
+
 
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Missus Tom"
     app_version: str = __version__
     api_prefix: str = "/api/v1"
+
+    @property
+    def build_revision(self) -> str:
+        return read_build_revision()
+
+    @property
+    def manifest_schema_versions(self) -> tuple[str, ...]:
+        return MANIFEST_SCHEMA_VERSIONS
+
+    @property
+    def bulk_pipeline_versions(self) -> tuple[str, ...]:
+        return BULK_PIPELINE_VERSIONS
+
+    @property
+    def capabilities(self) -> dict[str, bool]:
+        return {
+            "bulk_fasta_gtf_reference_preparation": True,
+            "bulk_managed_kallisto_index": True,
+            "bulk_legacy_biomart_execution": False,
+        }
 
     @property
     def execution_enabled(self) -> bool:

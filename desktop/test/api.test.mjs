@@ -11,9 +11,28 @@ async function loadApi() {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
   }).outputText
     .replace('from "./types";', 'from "data:text/javascript,export{}";')
+    .replace('from "./appVersion";', 'from "data:text/javascript,export const BUILD_REVISION = \\"development\\"; export const DEVELOPMENT_BUILD_REVISION = \\"development\\";";')
     .replace('from "@tauri-apps/api/core";', 'from "data:text/javascript,export const invoke = async () => ({ base_url: \\"http://127.0.0.1:8765\\", ready: true });";');
   return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}#${Math.random()}`);
 }
+
+test("Bulk backend compatibility rejects unavailable, malformed, old, and mismatched builds", async () => {
+  const { bulkProductionBackendError } = await loadApi();
+  assert.match(bulkProductionBackendError(null, "abc123"), /did not report a compatible health response/);
+  assert.match(bulkProductionBackendError({ status: "broken" }, "abc123"), /compatible health response/);
+  assert.match(bulkProductionBackendError({ status: "ok", capabilities: {} }, "abc123"), /too old/);
+  const compatible = {
+    status: "ok",
+    build_revision: "abc123",
+    capabilities: { bulk_fasta_gtf_reference_preparation: true },
+  };
+  assert.equal(bulkProductionBackendError(compatible, "abc123"), null);
+  assert.match(bulkProductionBackendError(compatible, "different"), /does not match the backend build/);
+  assert.match(
+    bulkProductionBackendError({ ...compatible, build_revision: undefined }, "abc123"),
+    /did not report build provenance/,
+  );
+});
 
 function installBrowserTimers() {
   const previousWindow = globalThis.window;
@@ -97,27 +116,29 @@ test("apiRequest distinguishes unavailable, malformed, and HTTP failure response
       statusText: "Conflict",
       json: async () => ({ success: false, data: null, errors: [{ code: "blocked", message: "Project is locked", field: "manifest" }], meta: {} }),
     });
-    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.status === 409 && error.message === "Project is locked" && error.fields[0] === "manifest");
+    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.status === 409 && error.message === "Project is locked" && error.fields[0] === "manifest" && error.code === "blocked");
   } finally {
     globalThis.fetch = previousFetch;
     timers.restore();
   }
 });
 
-test("setup install conflicts require HTTP 409 and a specific message", async () => {
+test("setup install conflicts require HTTP 409 and typed error codes", async () => {
   const { ApiError, setupInstallConflictMessage } = await loadApi();
-  const concurrent = new ApiError("another dependency installation is already running", [], 409);
-  const samePipeline = new ApiError("dependency installation is already running for this pipeline", [], 409);
-  const activeRun = new ApiError("a workflow run is active or requires recovery", [], 409);
-  const otherJob = new ApiError("another workflow job is active", [], 409);
-  const bareInstallation = new ApiError("Installation failed", [], 409);
-  const wrongStatus = new ApiError("another dependency installation is already running", [], 400);
+  const concurrent = new ApiError("another dependency installation is already running", [], 409, "dependency_install_in_progress");
+  const samePipeline = new ApiError("dependency installation is already running for this pipeline", [], 409, "dependency_install_in_progress");
+  const activeRun = new ApiError("a workflow run is active or requires recovery", [], 409, "workflow_admission_locked");
+  const otherJob = new ApiError("another workflow job is active", [], 409, "workflow_admission_locked");
+  const bareInstallation = new ApiError("Installation failed", [], 409, "dependency_verification_failed");
+  const messageOnly = new ApiError("another dependency installation is already running", [], 409);
+  const wrongStatus = new ApiError("another dependency installation is already running", [], 400, "dependency_install_in_progress");
 
   assert.match(setupInstallConflictMessage(concurrent), /another dependency installation/);
   assert.match(setupInstallConflictMessage(samePipeline), /another dependency installation/);
   assert.match(setupInstallConflictMessage(activeRun), /workflow run is active/);
   assert.match(setupInstallConflictMessage(otherJob), /workflow run is active/);
   assert.equal(setupInstallConflictMessage(bareInstallation), null);
+  assert.equal(setupInstallConflictMessage(messageOnly), null);
   assert.equal(setupInstallConflictMessage(wrongStatus), null);
   assert.equal(setupInstallConflictMessage(new Error("already running")), null);
 });

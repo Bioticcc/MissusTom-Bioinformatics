@@ -25,6 +25,7 @@ npm run lint
 npm test
 npm run typecheck
 npm run build
+npm run test:bundle
 
 cd "${project_root}"
 PYTHONDONTWRITEBYTECODE=1 "${venv_bin}/python" -m unittest discover -s workflows/ont_analysis/tests

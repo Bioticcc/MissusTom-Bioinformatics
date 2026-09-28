@@ -33,7 +33,7 @@ test("bulk manifest contract versions and reference resources", () => {
   });
 
   const indexResources = contract.buildBulkReferenceResources("quantification", "existing-index", {
-    transcriptomeFasta: "",
+    transcriptomeFasta: "/refs/original.fa",
     annotationGtf: "/refs/genes.gtf",
     kallistoIndex: "/refs/transcripts.idx",
     transcriptToGene: "",
@@ -41,6 +41,7 @@ test("bulk manifest contract versions and reference resources", () => {
   assert.deepEqual(indexResources, {
     kallisto_index: "/refs/transcripts.idx",
     annotation_gtf: "/refs/genes.gtf",
+    transcriptome_fasta: "/refs/original.fa",
   });
 
   const indexT2gResources = contract.buildBulkReferenceResources("quantification", "existing-index", {
@@ -87,6 +88,13 @@ test("reference mode resolution and comparison validation", () => {
   assert.match(contract.comparisonLabel("Treated", "Control", null), /positive log2FC means higher expression in Treated/);
 });
 
+test("backend capability loading blocks only Bulk project actions", () => {
+  assert.equal(contract.projectActionsBlockedByBackend("bulk-rnaseq", false, null), true);
+  assert.equal(contract.projectActionsBlockedByBackend("bulk-rnaseq", true, null), false);
+  assert.equal(contract.projectActionsBlockedByBackend("bulk-rnaseq", true, "old backend"), true);
+  assert.equal(contract.projectActionsBlockedByBackend("ont-analysis", false, "Bulk only"), false);
+});
+
 test("import merge revalidates legacy bulk wizard options", () => {
   const merged = contract.mergeImportedBulkOptions(
     {
@@ -107,16 +115,16 @@ test("import merge revalidates legacy bulk wizard options", () => {
 });
 
 test("unstranded libraries omit a Kallisto strandedness flag", () => {
-  assert.match(
-    contractSource,
-    /Recorded as unstranded; Kallisto runs without a strandedness flag\./,
-  );
+  assert.match(contractSource, /No strandedness flag\./);
   assert.doesNotMatch(contractSource, /--fr-stranded false/);
 });
 
 test("forward and reverse libraries describe the exact Kallisto flags", () => {
-  assert.match(contractSource, /Recorded as forward; Kallisto uses --fr-stranded\./);
-  assert.match(contractSource, /Recorded as reverse; Kallisto uses --rf-stranded\./);
+  assert.match(contractSource, /Read 1 maps in transcript orientation; Kallisto uses --fr-stranded\./);
+  assert.match(contractSource, /Read 1 maps antisense to the transcript; Kallisto uses --rf-stranded\./);
+  assert.match(contractSource, /Common first-strand protocols are usually RF/);
+  assert.doesNotMatch(contractSource, /Forward \(FR \/ first-strand\)/);
+  assert.doesNotMatch(contractSource, /Reverse \(RF \/ second-strand\)/);
 });
 
 test("wizard UI encodes production bulk controls", () => {
@@ -136,4 +144,13 @@ test("wizard UI encodes production bulk controls", () => {
   assert.match(wizardSource, /export_version: 3/);
   assert.match(wizardSource, /STRANDEDNESS_UI_OPTIONS/);
   assert.match(wizardSource, /positive log2 fold change means higher expression/);
+  assert.match(wizardSource, /Advanced: use an existing Kallisto index/);
+  assert.match(wizardSource, /Missus Tom will validate the FASTA and GTF/);
+  assert.doesNotMatch(wizardSource, /human BioMart/);
+  assert.doesNotMatch(wizardSource, /name="bulk-reference-mode"/);
+  assert.match(wizardSource, /const bulkHealthPending = !isOntPipeline && !healthReady/);
+  assert.match(wizardSource, /Checking backend compatibility/);
+  assert.match(wizardSource, /backendBlocksProjectActions/);
+  assert.match(wizardSource, /disabled=\{backendBlocksProjectActions && index > step\}/);
+  assert.match(wizardSource, /!isOntPipeline && healthReady && !bulkCompatError/);
 });

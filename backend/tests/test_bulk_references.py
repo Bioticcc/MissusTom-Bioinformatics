@@ -125,7 +125,7 @@ def test_compressed_fasta_and_gtf_are_supported(tmp_path: Path) -> None:
 
     assert iter_fasta_transcript_ids(fasta) == ["TX001"]
     assert parse_gtf_transcript_records(gtf)["TX001"].gene_id == "GENE001"
-    assert read_supplied_transcript_to_gene(mapping) == {"TX001"}
+    assert read_supplied_transcript_to_gene(mapping)[0].transcript_id == "TX001"
 
 
 def test_supplied_mapping_is_checked_against_fasta_when_available(tmp_path: Path) -> None:
@@ -230,6 +230,33 @@ def test_gff3_annotation_reports_required_gtf_format(tmp_path: Path) -> None:
     )
 
     with pytest.raises(BulkReferenceError, match="GFF3-style"):
+        parse_gtf_transcript_records(annotation)
+
+
+def test_gtf_ignores_blank_lines_and_comments(tmp_path: Path) -> None:
+    annotation = tmp_path / "annotation.gtf"
+    annotation.write_text(
+        "#genebuild\n"
+        "\n"
+        'chr1\tfixture\ttranscript\t1\t10\t.\t+\t.\tgene_id "GENE1"; transcript_id "TX1";\n',
+        encoding="utf-8",
+    )
+
+    records = parse_gtf_transcript_records(annotation)
+
+    assert set(records) == {"TX1"}
+    assert records["TX1"].gene_id == "GENE1"
+
+
+def test_gtf_rejects_malformed_feature_row_with_line_number(tmp_path: Path) -> None:
+    annotation = tmp_path / "annotation.gtf"
+    annotation.write_text(
+        'chr1\tfixture\texon\t1\t10\t.\t+\t.\tgene_id "GENE1"; transcript_id "TX1";\n'
+        "chr1\tfixture\texon\t1\t10\t.\t+\t.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BulkReferenceError, match=r"line 2.*9 tab-separated"):
         parse_gtf_transcript_records(annotation)
 
 
@@ -367,6 +394,42 @@ def test_failed_build_is_not_reused(tmp_path: Path) -> None:
     prepared = manager_ok.prepare(manifest)
 
     assert Path(prepared.kallisto_index).read_text(encoding="utf-8") == "idx"
+
+
+def test_zero_byte_kallisto_index_is_failed_and_not_marked_complete(tmp_path: Path) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["TX001"])
+    _write_gtf(gtf, [("TX001", "GENE001", "protein_coding", "GeneA")])
+
+    def empty_index_runner(command: object, _environment: object) -> object:
+        arguments = list(command)  # type: ignore[arg-type]
+        Path(arguments[arguments.index("-i") + 1]).touch()
+        import subprocess
+
+        return subprocess.CompletedProcess(arguments, 0, stdout="fake completed", stderr="")
+
+    manager = BulkReferenceManager(
+        cache_root=tmp_path / "cache",
+        kallisto=KallistoRuntime(executable=tmp_path / "fake-kallisto", version="0.52.0-test"),
+        command_runner=empty_index_runner,  # type: ignore[arg-type]
+    )
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+
+    with pytest.raises(BulkReferenceError, match="Kallisto index construction failed"):
+        manager.prepare(manifest)
+
+    index_dirs = list((tmp_path / "cache" / "kallisto_index").iterdir())
+    assert len(index_dirs) == 1
+    assert (index_dirs[0] / "failed.json").is_file()
+    assert (index_dirs[0] / "build.log").read_text(encoding="utf-8") == "fake completed"
+    assert not (index_dirs[0] / "complete.json").exists()
+    assert not (index_dirs[0] / "transcripts.idx").exists()
 
 
 def test_existing_index_accepts_supplied_transcript_to_gene(tmp_path: Path) -> None:
@@ -547,3 +610,155 @@ def test_complete_marker_is_written_last(tmp_path: Path) -> None:
     BulkReferenceManager(cache_root=tmp_path / "cache").prepare(manifest)
     repaired = json.loads(marker.read_text(encoding="utf-8"))
     assert repaired["identity"] == prepared.annotation_identity
+
+
+def test_conflicting_mapping_rows_are_rejected(tmp_path: Path) -> None:
+    mapping = tmp_path / "tx2gene.tsv"
+    mapping.write_text(
+        "transcript_id\tgene_id\nTX001\tGENE001\nTX001\tGENE002\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BulkReferenceError, match="conflicting gene_id"):
+        read_supplied_transcript_to_gene(mapping)
+
+
+def test_identical_duplicate_mapping_rows_are_deduped(tmp_path: Path) -> None:
+    mapping = tmp_path / "tx2gene.tsv"
+    mapping.write_text(
+        "transcript_id\tgene_id\tgene_name\nTX001\tGENE001\tGeneA\nTX001\tGENE001\tGeneA\n",
+        encoding="utf-8",
+    )
+
+    records = read_supplied_transcript_to_gene(mapping)
+
+    assert len(records) == 1
+    assert records[0].transcript_id == "TX001"
+
+
+def test_empty_mapping_identifiers_are_rejected(tmp_path: Path) -> None:
+    mapping = tmp_path / "tx2gene.tsv"
+    mapping.write_text("transcript_id\tgene_id\n\tGENE001\n", encoding="utf-8")
+
+    with pytest.raises(BulkReferenceError, match="empty identifier"):
+        read_supplied_transcript_to_gene(mapping)
+
+
+def test_failed_build_retains_build_log_and_failed_marker(tmp_path: Path) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+
+    kallisto = tmp_path / "kallisto-fail.sh"
+    kallisto.write_text("#!/bin/sh\necho failure-on-stderr 1>&2\nexit 2\n", encoding="utf-8")
+    kallisto.chmod(kallisto.stat().st_mode | stat.S_IXUSR)
+    manager = BulkReferenceManager(
+        cache_root=tmp_path / "cache",
+        kallisto=KallistoRuntime(executable=kallisto, version="0.52.0-test"),
+    )
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {
+                "transcriptome_fasta": str(fasta),
+                "annotation_gtf": str(gtf),
+            },
+        )
+    )
+
+    with pytest.raises(BulkReferenceError, match="See .*build.log"):
+        manager.prepare(manifest)
+
+    index_identity = None
+    for child in (tmp_path / "cache" / "kallisto_index").iterdir():
+        if (child / "failed.json").is_file():
+            index_identity = child.name
+            assert (child / "build.log").is_file()
+            assert "failure-on-stderr" in (child / "build.log").read_text(encoding="utf-8")
+            break
+    assert index_identity is not None
+
+    kallisto_ok = tmp_path / "kallisto-ok.sh"
+    kallisto_ok.write_text(
+        "#!/bin/sh\n"
+        'output=""\n'
+        'for arg in "$@"; do\n'
+        '  if [ "$prev" = "-i" ]; then output="$arg"; fi\n'
+        '  prev="$arg"\n'
+        "done\n"
+        'printf "idx" > "$output"\n',
+        encoding="utf-8",
+    )
+    kallisto_ok.chmod(kallisto_ok.stat().st_mode | stat.S_IXUSR)
+    manager_ok = BulkReferenceManager(
+        cache_root=tmp_path / "cache",
+        kallisto=KallistoRuntime(executable=kallisto_ok, version="0.52.0-test"),
+    )
+    rebuilt = manager_ok.prepare(manifest)
+
+    assert Path(rebuilt.kallisto_index).read_text(encoding="utf-8") == "idx"
+    index_dir = Path(rebuilt.kallisto_index).parent
+    assert not (index_dir / "failed.json").is_file()
+
+
+def test_safe_reference_read_maps_io_failures(tmp_path: Path) -> None:
+    from missus_tom.services.bulk_references import safe_reference_read
+
+    missing = tmp_path / "missing.fa"
+    with pytest.raises(BulkReferenceError, match="missing"):
+        safe_reference_read("transcriptome_fasta", lambda: missing.read_text(encoding="utf-8"))
+
+    bad_gzip = tmp_path / "bad.fa.gz"
+    bad_gzip.write_bytes(b"not gzip")
+    with pytest.raises(BulkReferenceError, match="invalid gzip"):
+        safe_reference_read("transcriptome_fasta", lambda: iter_fasta_transcript_ids(bad_gzip))
+
+    invalid_utf8 = tmp_path / "invalid.fa"
+    invalid_utf8.write_bytes(b">\xff\xfe\nACGT\n")
+    with pytest.raises(BulkReferenceError, match="UTF-8"):
+        safe_reference_read("transcriptome_fasta", lambda: iter_fasta_transcript_ids(invalid_utf8))
+
+
+def test_cache_lock_cancellation_while_waiting(tmp_path: Path) -> None:
+    import fcntl
+    import threading
+    import time
+
+    from missus_tom.services.bulk_references import _cache_lock
+
+    cache_dir = tmp_path / "cache" / "kallisto_index" / "lock-test"
+    cache_dir.mkdir(parents=True)
+    lock_path = cache_dir / ".prepare.lock"
+    lock_path.touch()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            release.set()
+            time.sleep(3)
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    release.wait(timeout=2)
+
+    cancelled = False
+
+    def cancel_check() -> bool:
+        nonlocal cancelled
+        cancelled = True
+        return True
+
+    with (
+        pytest.raises(BulkReferenceError, match="cancelled"),
+        _cache_lock(
+            cache_dir,
+            cancellation_check=cancel_check,
+            lock_timeout_seconds=5.0,
+        ),
+    ):
+        pass
+
+    assert cancelled
+    holder.join(timeout=5)

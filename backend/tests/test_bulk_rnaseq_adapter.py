@@ -15,6 +15,7 @@ from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter, executio
 from missus_tom.services import resources
 from missus_tom.services.bulk_references import BulkReferenceManager, PreparedBulkReferences
 from missus_tom.services.projects import ProjectHistoryStore, save_project
+from missus_tom.services.run_containment import ContainmentProbeResult
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +30,11 @@ def host_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
         resources.shutil,
         "disk_usage",
         lambda _: SimpleNamespace(free=1000 * resources.GIB, total=2000 * resources.GIB),
+    )
+    monkeypatch.setattr(
+        resources,
+        "probe_native_containment",
+        lambda: ContainmentProbeResult(available=True, message="test containment"),
     )
 
 
@@ -259,9 +265,13 @@ def test_local_profile_requires_nextflow_only(
         seen.append(executable)
         return "/usr/bin/nextflow" if executable == "nextflow" else None
 
-    def reject_docker_query(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        raise AssertionError("local profile must not query Docker")
+    def reject_docker_query(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        command = args[0] if args else []
+        if command and Path(str(command[0])).name == "docker":
+            raise AssertionError("local profile must not query Docker")
+        return original_run(*args, **kwargs)
 
+    original_run = bulk_module.subprocess.run
     monkeypatch.setattr(bulk_module, "runtime_tool", runtime_tool)
     monkeypatch.setattr(bulk_module.subprocess, "run", reject_docker_query)
 

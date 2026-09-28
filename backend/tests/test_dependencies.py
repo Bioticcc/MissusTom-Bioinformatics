@@ -13,6 +13,11 @@ from missus_tom.models.dependencies import (
     DependencyInstallStatus,
     DependencyRequirement,
 )
+from missus_tom.models.errors import (
+    DEPENDENCY_PREREQUISITE_FAILED,
+    WORKFLOW_ADMISSION_LOCKED,
+    ApiCodedError,
+)
 from missus_tom.services import dependencies
 from missus_tom.services.dependencies import (
     BULK_R_PACKAGES,
@@ -114,8 +119,10 @@ def test_ont_installation_still_fails_closed_without_a_dorado_digest(
 
     assert status.installable is False
     assert "SHA-256" in status.manual_requirements[0]
-    with pytest.raises(ValueError, match="authoritative pinned SHA-256"):
+    with pytest.raises(ApiCodedError, match="authoritative pinned SHA-256") as exc_info:
         installer.install("ont-analysis")
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == DEPENDENCY_PREREQUISITE_FAILED
 
 
 def test_recovery_marks_abandoned_install_failed(tmp_path) -> None:
@@ -224,8 +231,10 @@ def test_shared_run_admission_lock_excludes_second_installer(
     descriptor = first._acquire_run_lock(identifier)
     first._run_lock_descriptors[identifier] = descriptor
     try:
-        with pytest.raises(ValueError, match="workflow run is active"):
+        with pytest.raises(ApiCodedError, match="workflow run is active") as exc_info:
             second._acquire_run_lock("00000000-0000-0000-0000-000000000004")
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == WORKFLOW_ADMISSION_LOCKED
     finally:
         first._release_run_lock(identifier)
 
