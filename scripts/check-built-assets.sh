@@ -87,7 +87,39 @@ if [[ -n "${debian_root}" ]]; then
   desktop_binary=$(find "${debian_root}" -type f \( -name 'missus-tom' -o -name 'Missus Tom' \) -perm -u+x -print -quit)
   if [[ "${release_mode}" == true ]]; then
     [[ -n "${desktop_binary}" ]] || fail "Extracted Debian package is missing the desktop executable"
-    grep -aFq "${expected_revision}" "${desktop_binary}" || fail "Packaged desktop does not contain frontend revision ${expected_revision}"
+    # Tauri embeds frontend files as Brotli payloads, so the revision text is not
+    # present as plaintext. The asset map key is plaintext and is content-addressed
+    # by the Vite filename, which is enough to prove that exact bundle was packaged.
+    python3 - "${dist_root}" "${expected_revision}" "${desktop_binary}" <<'PY'
+import pathlib
+import sys
+
+dist_root = pathlib.Path(sys.argv[1])
+expected_revision = sys.argv[2]
+binary = pathlib.Path(sys.argv[3]).read_bytes()
+revision_bytes = expected_revision.encode()
+if revision_bytes in binary:
+    print("packaged desktop frontend revision: ok")
+    raise SystemExit(0)
+keys = []
+for path in dist_root.rglob("*"):
+    if not path.is_file() or path.suffix not in {".js", ".html", ".css"}:
+        continue
+    if revision_bytes not in path.read_bytes():
+        continue
+    keys.append("/" + path.relative_to(dist_root).as_posix())
+if not keys:
+    raise SystemExit(
+        f"Built UI no longer contains frontend revision {expected_revision}"
+    )
+missing = [key for key in keys if key.encode() not in binary]
+if missing:
+    raise SystemExit(
+        "Packaged desktop does not embed the frontend asset containing revision "
+        f"{expected_revision}: {', '.join(missing)}"
+    )
+print("packaged desktop frontend revision: ok")
+PY
   fi
 elif [[ "${release_mode}" == true ]]; then
   fail "Release verification requires --deb or --debian-root."
