@@ -227,7 +227,6 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     } finally {
       if (mounted.current) {
         setWorking(false);
-        setLiveJob(null);
       }
       if (controllerRef.current === controller) controllerRef.current = null;
     }

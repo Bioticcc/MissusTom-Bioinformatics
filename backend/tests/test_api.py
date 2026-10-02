@@ -49,6 +49,21 @@ async def test_health_reports_execution_enabled(client: AsyncClient) -> None:
     assert body["data"]["capabilities"]["bulk_legacy_biomart_execution"] is False
 
 
+async def test_backend_shutdown_stops_owned_work(monkeypatch: pytest.MonkeyPatch, client: AsyncClient) -> None:
+    stopped = False
+
+    def shutdown() -> None:
+        nonlocal stopped
+        stopped = True
+
+    monkeypatch.setattr(routes.run_manager, "shutdown", shutdown)
+    response = await client.post("/api/v1/backend/shutdown")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"status": "stopped"}
+    assert stopped is True
+
+
 @pytest.mark.parametrize("origin", ("tauri://localhost", "http://tauri.localhost"))
 async def test_tauri_origin_preflight_is_allowed(client: AsyncClient, origin: str) -> None:
     response = await client.options(

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiRequest } from "../api";
+import { apiRequest, getBackendStatus, type BackendStatus } from "../api";
 import { CheckList } from "../components/CheckList";
 import { LiveCommandLog } from "../components/LiveCommandLog";
 import { isDesktopShell, selectFiles } from "../native";
@@ -47,6 +47,7 @@ export function Dashboard({
 }) {
   const [preflight, setPreflight] = useState<SystemPreflight | null>(null);
   const [error, setError] = useState("");
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | undefined>();
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
   const [prepareJob, setPrepareJob] = useState<DemoPrepareJob | null>(null);
@@ -66,6 +67,9 @@ export function Dashboard({
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
+    void getBackendStatus().then((status) => {
+      if (active) setBackendStatus(status);
+    });
     void apiRequest<SystemPreflight>("/api/v1/system/preflight", { signal: controller.signal }).then((result) => {
       if (active) setPreflight(result);
     }).catch((reason: unknown) => {
@@ -215,9 +219,17 @@ export function Dashboard({
             <span className={error ? "health-dot offline" : "health-dot"} aria-hidden="true" />
           </div>
           {error ? (
-            <div className="inline-error" role="alert">
-              {error}
-            </div>
+            <>
+              <div className="inline-error" role="alert">{error}</div>
+              {backendStatus?.packaged && (backendStatus.startup_error || backendStatus.startup_log) && (
+                <details className="diagnostic-details">
+                  <summary>Backend startup diagnostics</summary>
+                  <p>{backendStatus.startup_error}</p>
+                  {backendStatus.startup_log_path && <small>Log file: {backendStatus.startup_log_path}</small>}
+                  {backendStatus.startup_log && <pre>{backendStatus.startup_log}</pre>}
+                </details>
+              )}
+            </>
           ) : !preflight ? (
             <p className="loading-copy">Checking local tools…</p>
           ) : (

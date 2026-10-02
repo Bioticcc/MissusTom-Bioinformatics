@@ -1,4 +1,6 @@
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -22,6 +24,8 @@ const PACKAGED_API_HOST: &str = "127.0.0.1";
 const PACKAGED_API_PORT: u16 = 8765;
 const HEALTH_ATTEMPTS: u8 = 30;
 const HEALTH_RETRY_DELAY: Duration = Duration::from_millis(200);
+const BACKEND_LOG_TAIL_BYTES: usize = 64 * 1024;
+const BACKEND_PID_FILE: &str = "backend.pid";
 
 struct RunOverlayState {
     active: Arc<AtomicBool>,
@@ -33,14 +37,27 @@ struct DependencyInstallState {
 
 struct BackendState {
     child: Mutex<Option<Child>>,
+    pid_file: Mutex<Option<PathBuf>>,
+    diagnostics: Mutex<BackendDiagnostics>,
     ready: AtomicBool,
+    closing: AtomicBool,
+}
+
+#[derive(Default)]
+struct BackendDiagnostics {
+    error: Option<String>,
+    log_path: Option<String>,
+    log: String,
 }
 
 impl Default for BackendState {
     fn default() -> Self {
         Self {
             child: Mutex::new(None),
+            pid_file: Mutex::new(None),
+            diagnostics: Mutex::new(BackendDiagnostics::default()),
             ready: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
         }
     }
 }
@@ -50,6 +67,9 @@ struct BackendStatus {
     base_url: String,
     ready: bool,
     packaged: bool,
+    startup_error: Option<String>,
+    startup_log_path: Option<String>,
+    startup_log: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,12 +214,6 @@ fn write_export_atomically(destination: &Path, contents: &str) -> Result<(), Str
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CloseDecision {
-    ExitAndStopBackend,
-    KeepRunningForActiveWork,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupDecision {
     AlreadyStarted,
     StartOwnedBackend,
@@ -293,12 +307,143 @@ fn startup_decision(port_is_available: bool, child_exists: bool) -> StartupDecis
     }
 }
 
-fn close_decision(run_is_active: bool, install_is_active: bool) -> CloseDecision {
-    if run_is_active || install_is_active {
-        CloseDecision::KeepRunningForActiveWork
-    } else {
-        CloseDecision::ExitAndStopBackend
+fn backend_log_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("backend-startup.log")
+}
+
+fn record_backend_diagnostics(state: &BackendState, error: impl Into<String>) {
+    if let Ok(mut diagnostics) = state.diagnostics.lock() {
+        diagnostics.error = Some(error.into());
+        if let Some(path) = diagnostics.log_path.as_deref() {
+            diagnostics.log = read_log_tail(Path::new(path));
+        }
     }
+    state.ready.store(false, Ordering::Release);
+}
+
+fn read_log_tail(path: &Path) -> String {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(metadata) = file.metadata() else {
+        return String::new();
+    };
+    let start = metadata.len().saturating_sub(BACKEND_LOG_TAIL_BYTES as u64);
+    if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    contents
+}
+
+fn write_pid_file(path: &Path, pid: u32) -> Result<(), String> {
+    std::fs::write(path, pid.to_string()).map_err(|error| {
+        format!("The backend started, but its ownership file could not be written: {error}")
+    })
+}
+
+#[cfg(unix)]
+fn process_matches_backend(pid: u32, backend: &Path) -> bool {
+    let process_path = PathBuf::from(format!("/proc/{pid}/exe"));
+    let Ok(process_path) = process_path.canonicalize() else {
+        return false;
+    };
+    let Ok(backend) = backend.canonicalize() else {
+        return false;
+    };
+    process_path == backend
+}
+
+#[cfg(not(unix))]
+fn process_matches_backend(_pid: u32, _backend: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn matching_backend_pids(backend: &Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| process_matches_backend(*pid, backend))
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn matching_backend_pids(_backend: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) {
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    for _ in 0..20 {
+        if !process_exists(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+fn request_backend_shutdown() -> bool {
+    let Ok(mut stream) = TcpStream::connect((PACKAGED_API_HOST, PACKAGED_API_PORT)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    if stream.write_all(
+        b"POST /api/v1/backend/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && response.starts_with("HTTP/1.")
+        && response.split_whitespace().any(|part| part == "200")
+}
+
+fn clean_stale_backend(app_data_dir: &Path, backend: &Path) {
+    let pid_path = app_data_dir.join(BACKEND_PID_FILE);
+    let mut pids = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|contents| contents.trim().parse::<u32>().ok())
+        .filter(|pid| process_matches_backend(*pid, backend))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if pids.is_empty() {
+        pids = matching_backend_pids(backend);
+    }
+    for pid in pids {
+        let _ = request_backend_shutdown();
+        for _ in 0..30 {
+            if !process_exists(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if process_exists(pid) {
+            terminate_process(pid);
+        }
+    }
+    let _ = std::fs::remove_file(pid_path);
 }
 
 fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
@@ -319,6 +464,22 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Could not create application data directory: {error}"))?;
 
     let (backend, ont_runner) = sidecar_paths(&executable_dir);
+    let state = app.state::<BackendState>();
+    let log_path = backend_log_path(&app_data_dir);
+    if let Ok(mut diagnostics) = state.diagnostics.lock() {
+        diagnostics.log_path = Some(log_path.to_string_lossy().into_owned());
+        diagnostics.error = None;
+        diagnostics.log.clear();
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("Could not open the backend startup log: {error}"))?;
+    writeln!(log, "\n--- Missus Tom backend startup ---").ok();
+    writeln!(log, "Backend: {}", backend.display()).ok();
+    writeln!(log, "API: {}", packaged_api_base()).ok();
+    clean_stale_backend(&app_data_dir, &backend);
     if !backend.is_file() || !ont_runner.is_file() {
         return Err(
             "Packaged backend sidecars are missing. Rebuild the Linux sidecars before bundling."
@@ -326,7 +487,6 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         );
     }
 
-    let state = app.state::<BackendState>();
     let child = state
         .child
         .lock()
@@ -334,10 +494,7 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
     match startup_decision(packaged_port_is_available(), child.is_some()) {
         StartupDecision::AlreadyStarted => return Ok(()),
         StartupDecision::RejectOccupiedPort => {
-            return Err(
-                "The packaged backend port is already in use; refusing to adopt or stop that process."
-                    .to_string(),
-            );
+            return Err("The packaged backend port is already in use by a process Missus Tom could not safely identify. Close that process or choose another local service port.".to_string());
         }
         StartupDecision::StartOwnedBackend => {}
     }
@@ -346,6 +503,9 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         .child
         .lock()
         .map_err(|_| "Backend lifecycle state is unavailable.".to_string())?;
+    let stdout = log
+        .try_clone()
+        .map_err(|error| format!("Could not prepare the backend startup log: {error}"))?;
     let started = Command::new(&backend)
         .args([] as [&str; 0])
         .env("MISSUS_TOM_API_HOST", PACKAGED_API_HOST)
@@ -354,10 +514,20 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         .env("MISSUS_TOM_STATE_DIR", &app_data_dir)
         .env("MISSUS_TOM_ONT_RUNNER", &ont_runner)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(log))
         .spawn()
         .map_err(|error| format!("Could not start the packaged backend: {error}"))?;
+    let pid_path = app_data_dir.join(BACKEND_PID_FILE);
+    if let Err(error) = write_pid_file(&pid_path, started.id()) {
+        let mut started = started;
+        let _ = started.kill();
+        let _ = started.wait();
+        return Err(error);
+    }
+    if let Ok(mut pid_file) = state.pid_file.lock() {
+        *pid_file = Some(pid_path);
+    }
     *child = Some(started);
     drop(child);
 
@@ -369,7 +539,7 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         std::thread::sleep(HEALTH_RETRY_DELAY);
     }
     stop_owned_backend(&state);
-    Err("The packaged backend did not become ready on its dedicated local port.".to_string())
+    Err("The packaged backend did not become ready on its dedicated local port. See the startup log for the exact backend error.".to_string())
 }
 
 fn stop_owned_backend(state: &BackendState) {
@@ -380,7 +550,29 @@ fn stop_owned_backend(state: &BackendState) {
         let _ = child.kill();
         let _ = child.wait();
     }
+    if let Ok(mut pid_file) = state.pid_file.lock() {
+        if let Some(path) = pid_file.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     state.ready.store(false, Ordering::Release);
+}
+
+fn stop_backend_and_exit(app: AppHandle) {
+    let state = app.state::<BackendState>();
+    if state
+        .child
+        .lock()
+        .map(|child| child.is_some())
+        .unwrap_or(false)
+    {
+        let _ = request_backend_shutdown();
+    }
+    stop_owned_backend(&state);
+    if let Some(overlay) = app.get_webview_window(RUN_OVERLAY_LABEL) {
+        let _ = overlay.close();
+    }
+    app.exit(0);
 }
 
 fn should_show_overlay(active: bool, main_is_minimized: bool) -> bool {
@@ -473,6 +665,21 @@ fn set_dependency_install_active(
 fn backend_status(state: State<'_, BackendState>) -> BackendStatus {
     let packaged_ready =
         !cfg!(debug_assertions) && state.ready.load(Ordering::Acquire) && health_is_ready();
+    let (startup_error, startup_log_path, startup_log) = state
+        .diagnostics
+        .lock()
+        .map(|diagnostics| {
+            (
+                diagnostics.error.clone(),
+                diagnostics.log_path.clone(),
+                diagnostics.log.clone(),
+            )
+        })
+        .unwrap_or((
+            Some("Backend diagnostics are unavailable.".to_string()),
+            None,
+            String::new(),
+        ));
     BackendStatus {
         base_url: if cfg!(debug_assertions) {
             "http://127.0.0.1:8000".to_string()
@@ -481,7 +688,30 @@ fn backend_status(state: State<'_, BackendState>) -> BackendStatus {
         },
         ready: !cfg!(debug_assertions) && packaged_ready,
         packaged: !cfg!(debug_assertions),
+        startup_error,
+        startup_log_path,
+        startup_log,
     }
+}
+
+#[tauri::command]
+async fn close_main_window(
+    window: WebviewWindow,
+    installs: State<'_, DependencyInstallState>,
+    backend: State<'_, BackendState>,
+) -> Result<(), String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    if installs.active.load(Ordering::Acquire) {
+        return Err("A dependency installation is still running. Wait for it to finish before closing Missus Tom.".to_string());
+    }
+    if backend.closing.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || stop_backend_and_exit(app))
+        .await
+        .map_err(|error| format!("Could not stop the packaged backend: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -579,7 +809,10 @@ pub fn run() {
             app.manage(DependencyInstallState::default());
             app.manage(BackendState::default());
             if !cfg!(debug_assertions) {
-                start_packaged_backend(&app.handle())?;
+                let backend = app.state::<BackendState>();
+                if let Err(error) = start_packaged_backend(&app.handle()) {
+                    record_backend_diagnostics(&backend, error);
+                }
             }
 
             let main = app
@@ -619,33 +852,16 @@ pub fn run() {
             if window.label() == MAIN_WINDOW_LABEL
                 && matches!(event, WindowEvent::CloseRequested { .. })
             {
-                let active = window
-                    .app_handle()
-                    .state::<RunOverlayState>()
-                    .active
-                    .load(Ordering::Acquire);
-                let install_active = window
-                    .app_handle()
-                    .state::<DependencyInstallState>()
-                    .active
-                    .load(Ordering::Acquire);
-                match close_decision(active, install_active) {
-                    CloseDecision::KeepRunningForActiveWork => {
-                        if let WindowEvent::CloseRequested { api, .. } = event {
-                            api.prevent_close();
-                        }
-                        let _ = window.hide();
-                    }
-                    CloseDecision::ExitAndStopBackend => {
-                        if let Some(overlay) =
-                            window.app_handle().get_webview_window(RUN_OVERLAY_LABEL)
-                        {
-                            let _ = overlay.close();
-                        }
-                        stop_owned_backend(&window.app_handle().state::<BackendState>());
-                        // The overlay is a second native window, so explicitly exit when the main
-                        // window closes instead of allowing it to keep the application alive.
-                        window.app_handle().exit(0);
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    let install_active = app
+                        .state::<DependencyInstallState>()
+                        .active
+                        .load(Ordering::Acquire);
+                    let backend = app.state::<BackendState>();
+                    if !install_active && !backend.closing.swap(true, Ordering::AcqRel) {
+                        std::thread::spawn(move || stop_backend_and_exit(app));
                     }
                 }
             }
@@ -657,7 +873,8 @@ pub fn run() {
             set_run_overlay_active,
             set_dependency_install_active,
             restore_main_window,
-            backend_status
+            backend_status,
+            close_main_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running Missus Tom");
@@ -668,10 +885,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        bottom_left_overlay_position, close_decision, enforce_export_extension,
-        parse_health_response, should_show_overlay, sidecar_paths, startup_decision,
-        validate_export_destination, write_export_atomically, CloseDecision, StartupDecision,
-        TextExportKind,
+        bottom_left_overlay_position, enforce_export_extension, parse_health_response,
+        should_show_overlay, sidecar_paths, startup_decision, validate_export_destination,
+        write_export_atomically, StartupDecision, TextExportKind,
     };
 
     #[test]
@@ -712,26 +928,6 @@ mod tests {
         assert!(!parse_health_response(
             "HTTP/1.1 503 Service Unavailable\r\n\r\n{\"data\":{\"status\":\"ok\"}}"
         ));
-    }
-
-    #[test]
-    fn active_runs_keep_the_owned_backend_alive_on_close() {
-        assert_eq!(
-            close_decision(true, false),
-            CloseDecision::KeepRunningForActiveWork
-        );
-        assert_eq!(
-            close_decision(false, true),
-            CloseDecision::KeepRunningForActiveWork
-        );
-        assert_eq!(
-            close_decision(true, true),
-            CloseDecision::KeepRunningForActiveWork
-        );
-        assert_eq!(
-            close_decision(false, false),
-            CloseDecision::ExitAndStopBackend
-        );
     }
 
     #[test]

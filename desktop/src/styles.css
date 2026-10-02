@@ -209,6 +209,25 @@ h4 {
   background: #a23b3b;
 }
 
+.shutdown-dialog {
+  position: fixed;
+  z-index: 20;
+  top: calc(var(--titlebar-height) + 0.75rem);
+  right: 1rem;
+  display: grid;
+  gap: 0.25rem;
+  max-width: 24rem;
+  padding: 0.8rem 1rem;
+  color: #17352c;
+  background: #e5f5ee;
+  border: 1px solid #8cc9b0;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.22);
+}
+
+.shutdown-dialog span { font-size: 0.85rem; }
+.shutdown-dialog-error { color: #5d2222; background: #fff0f0; border-color: #d69a9a; }
+
 .app-shell {
   display: grid;
   grid-template-columns: 244px minmax(0, 1fr);

@@ -32,7 +32,7 @@ test("Native helpers back the integrated title bar", () => {
   assert.match(nativeSource, /export async function closeMainWindow\(\)/);
   assert.match(nativeSource, /export async function isMainWindowMaximized\(\)/);
   assert.match(nativeSource, /getCurrentWindow\(\)\.toggleMaximize\(\)/);
-  assert.match(nativeSource, /getCurrentWindow\(\)\.close\(\)/);
+  assert.match(nativeSource, /invoke\("close_main_window"\)/);
   assert.doesNotMatch(nativeSource, /getCurrentWindow\(\)\.destroy\(\)/);
   assert.match(nativeSource, /if \(!isDesktopShell\(\)\)/);
 });

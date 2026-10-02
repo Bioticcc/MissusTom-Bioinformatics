@@ -87,7 +87,7 @@ export async function toggleMaximizeMainWindow(): Promise<void> {
 
 export async function closeMainWindow(): Promise<void> {
   if (!isDesktopShell()) return;
-  await getCurrentWindow().close();
+  await invoke("close_main_window");
 }
 
 export async function isMainWindowMaximized(): Promise<boolean> {

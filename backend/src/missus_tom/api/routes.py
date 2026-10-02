@@ -364,6 +364,16 @@ def get_runs() -> ApiResponse[list[RunRecord]]:
     return ApiResponse(data=run_manager.list_runs())
 
 
+@router.post(
+    f"{settings.api_prefix}/backend/shutdown",
+    response_model=ApiResponse[dict[str, str]],
+)
+def post_backend_shutdown() -> ApiResponse[dict[str, str]]:
+    """Stop owned workflow work before the desktop host terminates this process."""
+    run_manager.shutdown()
+    return ApiResponse(data={"status": "stopped"})
+
+
 @router.get(f"{settings.api_prefix}/runs/{{job_identifier}}", response_model=ApiResponse[RunRecord])
 def get_run(job_identifier: str) -> ApiResponse[RunRecord]:
     try:

@@ -9,6 +9,9 @@ export type BackendStatus = {
   base_url: string;
   ready: boolean;
   packaged: boolean;
+  startup_error?: string | null;
+  startup_log_path?: string | null;
+  startup_log?: string;
 };
 
 let backendBasePromise: Promise<string> | undefined;
@@ -30,7 +33,9 @@ export async function resolveApiBaseUrl(): Promise<string> {
   backendBasePromise ??= invoke<BackendStatus>("backend_status")
     .then((status) => {
       if (status.packaged && !status.ready) {
-        throw new Error("The packaged backend is not ready.");
+        const detail = status.startup_error || "The packaged backend did not become ready.";
+        const log = status.startup_log?.trim();
+        throw new Error(log ? `${detail}\n\nBackend startup log:\n${log}` : detail);
       }
       return selectApiBaseUrl(BROWSER_API_BASE, status);
     });
