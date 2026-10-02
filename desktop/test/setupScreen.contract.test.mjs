@@ -26,7 +26,7 @@ test("setup restores completed and running debug jobs", () => {
 test("setup and validation expose debug terminals while work is active", () => {
   assert.match(setupSource, /Starting setup and waiting for the backend job/);
   assert.match(wizardSource, /validation-debug-terminal/);
-  assert.match(wizardSource, /Waiting for backend checks/);
+  assert.match(wizardSource, /streamProjectValidation/);
   assert.match(dashboardSource, /Backend diagnostics/);
   assert.match(dashboardSource, /startup_log_path/);
 });

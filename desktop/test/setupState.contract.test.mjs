@@ -11,7 +11,7 @@ const setup = await import(`data:text/javascript;base64,${Buffer.from(compiled).
 
 function storage() {
   const values = new Map();
-  return { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  return { removeItem: (key) => values.delete(key), getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
 }
 
 test("setup completes only requested terminal actions", () => {
@@ -40,4 +40,17 @@ test("invalid persisted values fall back to safe defaults", () => {
   const local = storage();
   local.setItem(setup.SETUP_STORAGE_KEY, '{"version":99}');
   assert.deepEqual(setup.loadSetupState(local), setup.defaultSetupState());
+});
+
+
+test("reset clears first-launch completion without touching other preferences", () => {
+  const local = storage();
+  let state = setup.defaultSetupState();
+  state = setup.recordSetupOutcome(state, "bulk-rnaseq", "fixtures", { state: "complete", reason: "ready" });
+  state = setup.recordSetupOutcome(state, "bulk-rnaseq", "dependencies", { state: "complete", reason: "ready" });
+  setup.saveSetupState(local, state);
+  local.setItem("other-preferences", "keep");
+  setup.resetSetupState(local);
+  assert.equal(setup.loadSetupState(local).completed, false);
+  assert.equal(local.getItem("other-preferences"), "keep");
 });

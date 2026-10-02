@@ -117,3 +117,7 @@ export function selectedActions(state: PersistedSetupState, pipeline: SetupPipel
   const value = state.pipelines[pipeline];
   return value.selected ? (["fixtures", "dependencies"] as SetupAction[]).filter((action) => value[action]) : [];
 }
+
+export function resetSetupState(storage: Pick<Storage, "removeItem">): void {
+  storage.removeItem(SETUP_STORAGE_KEY);
+}

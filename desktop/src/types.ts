@@ -331,3 +331,8 @@ export interface DirectoryPreview {
   truncated: boolean;
   entries: DirectoryEntry[];
 }
+
+export type ValidationEvent =
+  | { type: "progress"; message: string }
+  | { type: "result"; result: ProjectValidation }
+  | { type: "error"; message: string };

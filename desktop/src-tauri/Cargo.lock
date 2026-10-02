@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "missus-tom"
-version = "0.3.0-rc.25"
+version = "0.3.0-rc.26"
 dependencies = [
  "libc",
  "serde",

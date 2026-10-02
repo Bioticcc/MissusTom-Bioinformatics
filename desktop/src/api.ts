@@ -156,3 +156,63 @@ export async function apiRequest<T>(
     init?.signal?.removeEventListener("abort", abortFromCaller);
   }
 }
+
+/** Stream real backend validation operations and return the authoritative final result. */
+export async function streamProjectValidation(
+  manifest: import("./types").ProjectManifest,
+  onProgress: (message: string) => void,
+  signal?: AbortSignal,
+): Promise<import("./types").ProjectValidation> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof window.setTimeout>;
+  let timedOut = false;
+  const resetTimeout = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, PROJECT_VALIDATION_TIMEOUT_MS);
+  };
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) controller.abort();
+  resetTimeout();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const apiBase = await resolveApiBaseUrl();
+    const response = await fetch(`${apiBase}/api/v1/projects/validate/stream`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manifest), signal: controller.signal,
+    });
+    if (!response.ok) {
+      const envelope = await response.json() as ApiEnvelope<never>;
+      throw new ApiError(envelope.errors?.map((error) => error.message).join("; ") || `Validation request failed (${response.status}).`, [], response.status);
+    }
+    if (!response.body) throw new ApiError("The backend did not provide a validation stream.");
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value, { stream: !done });
+      if (value?.length) resetTimeout();
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      if (done && pending.trim()) { lines.push(pending); pending = ""; }
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line) as import("./types").ValidationEvent;
+        if (event.type === "progress" && typeof event.message === "string") onProgress(event.message);
+        else if (event.type === "error" && typeof event.message === "string") throw new ApiError(event.message);
+        else if (event.type === "result" && typeof event.result?.valid === "boolean" && Array.isArray(event.result.checks) && event.result.manifest) return event.result;
+        else throw new ApiError("The backend returned an invalid validation event.");
+      }
+      if (done) throw new ApiError("Validation stream ended before the backend returned its results. Run checks again.");
+    }
+  } catch (reason) {
+    if (timedOut) throw new ApiError("No validation progress received for 120 seconds. The backend may still be finishing a check.");
+    throw reason;
+  } finally {
+    window.clearTimeout(timer!);
+    signal?.removeEventListener("abort", abort);
+    await reader?.cancel().catch(() => undefined);
+    controller.abort();
+  }
+}

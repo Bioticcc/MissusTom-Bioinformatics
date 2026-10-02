@@ -13,12 +13,14 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Final, Literal, TextIO, TypedDict, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
 from missus_tom.models.manifest import BulkReferenceMode, ProjectManifest
+from missus_tom.services.validation_progress import report_validation
 
 NORMALIZATION_VERSION: Final = "2"
 TRANSCRIPT_TO_GENE_COLUMNS: Final = (
@@ -237,11 +239,16 @@ def parse_gtf_transcript_records(
     *,
     cancellation_check: CancellationCheck | None = None,
 ) -> dict[str, GtfTranscriptRecord]:
+    report_validation(f"Reading GTF transcript and gene identifiers: {gtf_path.name}")
     by_transcript: dict[str, GtfTranscriptRecord] = {}
     feature_rows: dict[str, GtfTranscriptRecord] = {}
     gff3_attributes_seen = False
     with _open_reference_text(gtf_path) as handle:
         for line_number, line in enumerate(handle, start=1):
+            if line_number % 100_000 == 0:
+                report_validation(
+                    f"GTF: read {line_number:,} lines; {len(by_transcript):,} transcript IDs."
+                )
             if cancellation_check and cancellation_check():
                 raise BulkReferenceError("Reference preparation was cancelled.")
             if not line.strip() or line.startswith("#"):
@@ -279,6 +286,7 @@ def parse_gtf_transcript_records(
             "The selected annotation uses GFF3-style attributes. "
             "Bulk RNA-seq reference preparation requires a matching GTF file."
         )
+    report_validation(f"GTF complete: {len(by_transcript):,} transcript IDs.")
     return by_transcript
 
 
@@ -297,6 +305,7 @@ def iter_fasta_transcript_ids(
     *,
     cancellation_check: CancellationCheck | None = None,
 ) -> list[str]:
+    report_validation(f"Reading FASTA transcript headers: {fasta_path.name}")
     ids: list[str] = []
     with _open_reference_text(fasta_path) as handle:
         for line in handle:
@@ -306,6 +315,9 @@ def iter_fasta_transcript_ids(
                 transcript_id = parse_fasta_header_transcript_id(line)
                 if transcript_id:
                     ids.append(transcript_id)
+                    if len(ids) % 10_000 == 0:
+                        report_validation(f"FASTA: read {len(ids):,} transcript IDs.")
+    report_validation(f"FASTA complete: {len(ids):,} transcript IDs.")
     return ids
 
 
@@ -353,6 +365,7 @@ def assess_fasta_gtf_overlap(
     fasta_ids: Sequence[str],
     gtf_records: Mapping[str, GtfTranscriptRecord],
 ) -> OverlapAssessment:
+    report_validation("Comparing exact and version-normalized transcript identifiers.")
     exact_annotation_ids = set(gtf_records.keys())
     exact_fraction = _overlap_fraction(fasta_ids, exact_annotation_ids)
 
@@ -374,6 +387,24 @@ def assess_fasta_gtf_overlap(
         matched = stripped_matches
 
     overlap_fraction = matched / len(fasta_ids) if fasta_ids else 0.0
+    unmatched = list(
+        islice(
+            (
+                identifier
+                for identifier in fasta_ids
+                if identifier not in exact_annotation_ids
+                and strip_transcript_version(identifier) not in stripped_annotation
+            ),
+            8,
+        )
+    )
+    report_validation(
+        f"Transcript overlap: {matched:,}/{len(fasta_ids):,} ({overlap_fraction:.1%}); "
+        f"exact {exact_fraction:.1%}; version-normalized {stripped_fraction:.1%}; "
+        f"required {MIN_ACCEPTABLE_OVERLAP:.0%}."
+    )
+    if unmatched:
+        report_validation(f"Unmatched or ambiguous FASTA ID examples: {', '.join(unmatched[:8])}")
     return OverlapAssessment(
         policy=policy,
         fasta_transcript_count=len(fasta_ids),

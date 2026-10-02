@@ -156,6 +156,7 @@ test("wizard UI encodes production bulk controls", () => {
 });
 
 test("project preflight uses an operation-specific timeout and keeps timeout errors distinct", () => {
-  assert.match(wizardSource, /PROJECT_VALIDATION_TIMEOUT_MS/);
-  assert.match(wizardSource, /Project validation did not finish within 120 seconds/);
+  assert.match(wizardSource, /streamProjectValidation/);
+  assert.match(wizardSource, /validationController.current\?\.abort/);
+  assert.match(wizardSource, /setValidatedManifest\(null\)/);
 });

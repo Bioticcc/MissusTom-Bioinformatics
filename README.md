@@ -30,6 +30,12 @@ enrichment, or human ONT analysis.
 
 ## Setup and demo fixtures
 
+To repeat the first-launch setup, use **Settings → Reset first-launch setup**.
+This clears saved setup choices while preserving installed tools, projects, and results.
+Project validation displays live backend checks and reference-reading progress. Bulk
+FASTA/GTF compatibility requires at least 95% of FASTA transcript IDs to match the
+annotation after unambiguous version normalization; it is not sequence similarity.
+
 On first launch, open **Setup** and select Bulk RNA-seq, ONT analysis, or both.
 Setup can prepare dependencies and/or a synthetic demo fixture for each selected
 pipeline independently. You can return later to set up the other pipeline.

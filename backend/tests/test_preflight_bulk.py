@@ -345,3 +345,28 @@ def test_preflight_existing_index_fasta_mapping_mismatch_is_blocking(
 
     assert contract.status == CheckStatus.BLOCKING
     assert "incompatible" in contract.message.lower() or "0.0%" in contract.message
+
+
+@pytest.mark.parametrize("matched", [911, 949, 950])
+def test_overlap_gate_remains_95_percent(manifest_payload: dict[str, Any], matched: int) -> None:
+    payload = deepcopy(manifest_payload)
+    payload.update(schema_version="1.1.0", reference_mode="build", pipeline_version="0.5.0")
+    resources = payload["reference_resources"]
+    fasta = Path(resources["transcriptome_fasta"])
+    gtf = Path(resources["annotation_gtf"])
+    fasta.write_text("".join(f">ENST{i:011d}.2\nACGT\n" for i in range(1000)))
+    gtf.write_text(
+        "".join(
+            f'chr1\tfixture\texon\t1\t4\t.\t+\t.\tgene_id "GENE1"; transcript_id "ENST{i:011d}";\n'
+            for i in range(matched)
+        )
+    )
+    payload["reference_resources"] = {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)}
+    checks = project_preflight(ProjectManifest.model_validate(payload))
+    contract = next(check for check in checks if check.check_id == "bulk_reference_contract")
+    if matched < 950:
+        assert contract.status == CheckStatus.BLOCKING
+        assert "minimum 95%" in contract.message
+        assert f"{matched:,} of 1,000" in contract.message
+    else:
+        assert contract.status == CheckStatus.PASSED

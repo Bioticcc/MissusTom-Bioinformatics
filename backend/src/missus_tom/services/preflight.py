@@ -48,6 +48,7 @@ from missus_tom.services.resources import (
     inspect_host_resources,
     inspect_storage,
 )
+from missus_tom.services.validation_progress import ProgressChecks, report_validation
 
 
 def _version_check(
@@ -279,7 +280,8 @@ def _summarize_identifiers(values: list[str], *, limit: int = 8) -> str:
 
 
 def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
-    checks: list[PreflightCheck] = []
+    checks: list[PreflightCheck] = ProgressChecks()
+    report_validation("Checking project directories and sample assignments.")
     input_path = Path(manifest.input_directory)
     output_path = Path(manifest.output_directory)
     configured_start_stage = manifest.parameters.get("start_stage", "quantification")
@@ -742,7 +744,8 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
 def _bulk_rnaseq_contract_checks(
     manifest: ProjectManifest, *, analysis_only: bool
 ) -> list[PreflightCheck]:
-    checks: list[PreflightCheck] = []
+    checks: list[PreflightCheck] = ProgressChecks()
+    report_validation("Checking Bulk reference configuration and transcript compatibility.")
     migration = legacy_biomart_migration_message(manifest)
     if migration:
         checks.append(
@@ -883,7 +886,12 @@ def _bulk_rnaseq_contract_checks(
                             if overlap.overlap_fraction < MIN_ACCEPTABLE_OVERLAP:
                                 reference_errors.append(
                                     "transcriptome FASTA and annotation GTF appear incompatible "
-                                    f"({overlap.overlap_fraction:.1%} identifier overlap)"
+                                    f"({overlap.overlap_fraction:.1%} identifier overlap; "
+                                    f"minimum {MIN_ACCEPTABLE_OVERLAP:.0%}; "
+                                    f"{overlap.matched_transcript_count:,} of "
+                                    f"{overlap.fasta_transcript_count:,} FASTA IDs matched "
+                                    f"using {overlap.policy} matching). "
+                                    "Use FASTA and GTF from the same reference release."
                                 )
 
     analysis_only_refs = bulk_analysis_only(manifest) or analysis_only
@@ -957,7 +965,8 @@ def _bulk_rnaseq_contract_checks(
 
 def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     """Validate the intentionally narrow local ONT BAM-analysis contract."""
-    checks: list[PreflightCheck] = []
+    checks: list[PreflightCheck] = ProgressChecks()
+    report_validation("Checking project directories and sample assignments.")
     input_path = Path(manifest.input_directory)
     output_path = Path(manifest.output_directory)
     input_ok = input_path.is_dir() and os.access(input_path, os.R_OK | os.X_OK)

@@ -3,10 +3,13 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+from collections.abc import AsyncIterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from missus_tom.config import settings
@@ -60,6 +63,7 @@ from missus_tom.services.projects import (
 )
 from missus_tom.services.quantifications import discover_quantifications
 from missus_tom.services.runs import RunManager
+from missus_tom.services.validation_progress import validation_events
 
 router = APIRouter()
 pipeline_registry = default_pipeline_registry()
@@ -166,6 +170,19 @@ def post_project_validate(
     manifest: ProjectManifest,
 ) -> ApiResponse[ProjectValidationResult]:
     return ApiResponse(data=validate_project(manifest, adapter=_adapter_for(manifest)))
+
+
+@router.post(f"{settings.api_prefix}/projects/validate/stream")
+def post_project_validate_stream(manifest: ProjectManifest) -> StreamingResponse:
+    adapter = _adapter_for(manifest)
+
+    async def stream() -> AsyncIterator[str]:
+        async for event in validation_events(partial(validate_project, manifest, adapter=adapter)):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
+    )
 
 
 @router.get(f"{settings.api_prefix}/projects", response_model=ApiResponse[list[ProjectSummary]])

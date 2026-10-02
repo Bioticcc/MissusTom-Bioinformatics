@@ -177,3 +177,68 @@ test("selectApiBaseUrl uses a packaged sidecar base and retains browser fallback
   );
   assert.equal(selectApiBaseUrl("http://127.0.0.1:8000", undefined), "http://127.0.0.1:8000");
 });
+
+function streamedResponse(chunks) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    },
+  }), { headers: { "Content-Type": "application/x-ndjson" } });
+}
+
+test("validation streams fragmented progress before returning the final result", async () => {
+  const timers = installBrowserTimers();
+  const previousFetch = globalThis.fetch;
+  const result = { valid: false, checks: [], manifest: { project_id: "fixture" } };
+  globalThis.fetch = async () => streamedResponse([
+    '{"type":"progress","message":"Read',
+    'ing GTF"}\n',
+    JSON.stringify({ type: "result", result }),
+  ]);
+  try {
+    const { streamProjectValidation } = await loadApi();
+    const messages = [];
+    assert.deepEqual(await streamProjectValidation({}, (message) => messages.push(message)), result);
+    assert.deepEqual(messages, ["Reading GTF"]);
+  } finally { globalThis.fetch = previousFetch; timers.restore(); }
+});
+
+for (const [name, body, expected] of [
+  ["early EOF", '{"type":"progress","message":"Reading"}\n', /ended before/],
+  ["backend error", '{"type":"error","message":"Broken GTF"}\n', /Broken GTF/],
+  ["malformed event", '{"type":"result","result":{}}\n', /invalid validation event/],
+]) {
+  test(`validation rejects ${name}`, async () => {
+    const timers = installBrowserTimers();
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => streamedResponse([body]);
+    try {
+      const { streamProjectValidation } = await loadApi();
+      await assert.rejects(streamProjectValidation({}, () => {}), expected);
+    } finally { globalThis.fetch = previousFetch; timers.restore(); }
+  });
+}
+
+for (const callerAbort of [false, true]) {
+  test(`validation ${callerAbort ? "caller cancellation" : "idle timeout"} stops reading`, async () => {
+    const timers = installBrowserTimers();
+    const previousFetch = globalThis.fetch;
+    let started;
+    const reading = new Promise((resolve) => { started = resolve; });
+    globalThis.fetch = async (_url, init) => new Response(new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+        started();
+      },
+    }));
+    try {
+      const { streamProjectValidation } = await loadApi();
+      const caller = new AbortController();
+      const request = streamProjectValidation({}, () => {}, caller.signal);
+      await reading;
+      if (callerAbort) caller.abort(); else timers.fireTimer();
+      await assert.rejects(request, callerAbort ? /Aborted/ : /No validation progress received for 120 seconds/);
+    } finally { globalThis.fetch = previousFetch; timers.restore(); }
+  });
+}

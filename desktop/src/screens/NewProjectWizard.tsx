@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { apiRequest, bulkProductionBackendError, PROJECT_VALIDATION_TIMEOUT_MS } from "../api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { apiRequest, bulkProductionBackendError, streamProjectValidation } from "../api";
 import { inferAutomaticSettings, type AutomaticSettingsResult } from "../automaticSettings";
 import { APP_VERSION } from "../appVersion";
 import { CheckList } from "../components/CheckList";
@@ -236,6 +236,8 @@ export function NewProjectWizard({
   const [metadataImport, setMetadataImport] = useState<MetadataImportStatus | null>(null);
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [automaticSettings, setAutomaticSettings] = useState<AutomaticSettingsResult | null>(null);
+  const validationController = useRef<AbortController | null>(null);
+  useEffect(() => () => validationController.current?.abort(), []);
   const [validationDebug, setValidationDebug] = useState<string[]>([]);
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
@@ -290,6 +292,9 @@ export function NewProjectWizard({
   }, [assignmentSearch, samples]);
 
   const invalidateValidation = () => {
+    validationController.current?.abort();
+    setBusy((current) => current === "validate" ? "" : current);
+    setValidationDebug([]);
     setValidation(null);
     setValidatedManifest(null);
     setSavedPath("");
@@ -869,26 +874,27 @@ export function NewProjectWizard({
     }
     setBusy("validate");
     setError("");
-    setValidationDebug([
-      `[${new Date().toLocaleTimeString()}] Preparing manifest for local backend validation.`,
-      `[${new Date().toLocaleTimeString()}] Sending POST /api/v1/projects/validate.`,
-      `[${new Date().toLocaleTimeString()}] Waiting for backend checks; this terminal will remain visible while validation runs.`,
-    ]);
+    validationController.current?.abort();
+    const controller = new AbortController();
+    validationController.current = controller;
+    setValidation(null);
+    setValidatedManifest(null);
+    setValidationDebug([`[${new Date().toLocaleTimeString()}] Connecting to backend validation…`]);
     try {
-      const result = await apiRequest<ProjectValidation>("/api/v1/projects/validate", {
-        method: "POST",
-        body: JSON.stringify(buildManifest()),
-      }, {
-        timeoutMs: PROJECT_VALIDATION_TIMEOUT_MS,
-        timeoutMessage: "Project validation did not finish within 120 seconds. The backend may still be working; check its log and try again.",
-      });
+      const result = await streamProjectValidation(buildManifest(), (message) => {
+        if (!controller.signal.aborted) setValidationDebug((current) => [...current, `[${new Date().toLocaleTimeString()}] ${message}`]);
+      }, controller.signal);
+      if (controller.signal.aborted) return;
       setValidation(result);
       setValidatedManifest(result.valid ? result.manifest : null);
       setValidationDebug((current) => [...current, `[${new Date().toLocaleTimeString()}] Backend returned ${result.checks.length} project checks.`]);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Project validation failed");
+      if (controller.signal.aborted) return;
+      const message = reason instanceof Error ? reason.message : "Project validation failed";
+      setError(message);
+      setValidationDebug((current) => [...current, `[${new Date().toLocaleTimeString()}] Error: ${message}`]);
     } finally {
-      setBusy("");
+      if (validationController.current === controller) setBusy("");
     }
   };
 
@@ -1209,7 +1215,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
-            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation debug terminal</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}{busy === "validate" ? "\n[still running]" : ""}</pre></div>}
+            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation progress</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}</pre></div>}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );
@@ -1272,7 +1278,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
-            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation debug terminal</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}{busy === "validate" ? "\n[still running]" : ""}</pre></div>}
+            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation progress</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}</pre></div>}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );

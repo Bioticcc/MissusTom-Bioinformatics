@@ -10,7 +10,7 @@ import { apiRequest, getBackendStatus } from "./api";
 import { TitleBar } from "./components/TitleBar";
 import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
-import { loadSetupState } from "./setupState";
+import { loadSetupState, resetSetupState } from "./setupState";
 import type { HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
 import { APP_VERSION, formatBuildLabel } from "./appVersion";
 
@@ -214,7 +214,7 @@ export default function App() {
         )}
         {activeView === "jobs" && <Jobs activeRun={activeRun} />}
         {activeView === "results" && <Results activeRun={activeRun} />}
-        {activeView === "settings" && <Settings />}
+        {activeView === "settings" && <Settings onResetSetup={() => { resetSetupState(window.localStorage); setSetupRequired(true); setActiveView("setup"); }} isRunActive={Boolean(activeRun)} />}
         </main>
       </div>
     </div>
