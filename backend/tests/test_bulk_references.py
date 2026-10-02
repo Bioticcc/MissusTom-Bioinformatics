@@ -203,6 +203,55 @@ def test_version_stripped_overlap_when_exact_fails(tmp_path: Path) -> None:
     assert records[0].transcript_id == "ENST000001.1"
 
 
+@pytest.mark.parametrize("exact_count", [94, 96])
+@pytest.mark.parametrize("version_in_gtf", [False, True])
+def test_mixed_versions_normalize_before_compatibility(
+    tmp_path: Path, exact_count: int, version_in_gtf: bool
+) -> None:
+    gtf = tmp_path / "annotation.gtf"
+    ids = [f"ENST{index:011d}" for index in range(100)]
+    versioned = [
+        identifier if i < exact_count else f"{identifier}.2" for i, identifier in enumerate(ids)
+    ]
+    fasta_ids, annotation_ids = (ids, versioned) if version_in_gtf else (versioned, ids)
+    _write_gtf(
+        gtf,
+        [(identifier, "ENSG000001", "protein_coding", "GeneA") for identifier in annotation_ids],
+    )
+    gtf_records = parse_gtf_transcript_records(gtf)
+    overlap = assess_fasta_gtf_overlap(fasta_ids=fasta_ids, gtf_records=gtf_records)
+    assert overlap.exact_overlap_fraction == exact_count / 100
+    assert overlap.overlap_fraction == 1.0
+    assert overlap.policy == "version_stripped"
+    mapped = map_fasta_to_gtf_records(
+        fasta_ids=fasta_ids, gtf_records=gtf_records, policy=overlap.policy
+    )
+    assert [record.transcript_id for record in mapped] == fasta_ids
+
+
+def test_unrelated_collision_does_not_disable_normalization(tmp_path: Path) -> None:
+    gtf = tmp_path / "annotation.gtf"
+    _write_gtf(
+        gtf,
+        [
+            ("ENST000001", "GENE001", "protein_coding", "GeneA"),
+            ("TX001.1", "GENE002", "protein_coding", "GeneB"),
+            ("TX001.2", "GENE003", "protein_coding", "GeneC"),
+        ],
+    )
+    gtf_records = parse_gtf_transcript_records(gtf)
+    fasta_ids = ["ENST000001.2", "TX001.3", "TX001.1"]
+    overlap = assess_fasta_gtf_overlap(fasta_ids=fasta_ids, gtf_records=gtf_records)
+    assert overlap.overlap_fraction == 2 / 3
+    mapped = map_fasta_to_gtf_records(
+        fasta_ids=fasta_ids, gtf_records=gtf_records, policy=overlap.policy
+    )
+    assert [(record.transcript_id, record.gene_id) for record in mapped] == [
+        ("ENST000001.2", "GENE001"),
+        ("TX001.1", "GENE002"),
+    ]
+
+
 def test_version_stripping_is_not_used_for_colliding_annotation_ids(tmp_path: Path) -> None:
     gtf = tmp_path / "annotation.gtf"
     _write_gtf(
@@ -602,7 +651,7 @@ def test_complete_marker_is_written_last(tmp_path: Path) -> None:
     payload = json.loads(marker.read_text(encoding="utf-8"))
 
     assert payload["artifact"] == "transcript_to_gene.tsv"
-    assert payload["metadata"]["normalization_version"] == "1"
+    assert payload["metadata"]["normalization_version"] == "2"
     assert payload["metadata"]["overlap"]["policy"] == "exact"
 
     payload["identity"] = "wrong-cache-identity"

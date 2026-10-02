@@ -1345,6 +1345,21 @@ textarea {
   background: #fbfdfc;
 }
 
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  background-image: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+input::-webkit-search-cancel-button,
+input::-webkit-search-decoration,
+input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 input:hover,
 select:hover,
 textarea:hover {

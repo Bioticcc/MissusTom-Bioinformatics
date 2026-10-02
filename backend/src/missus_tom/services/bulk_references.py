@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from missus_tom.models.manifest import BulkReferenceMode, ProjectManifest
 
-NORMALIZATION_VERSION: Final = "1"
+NORMALIZATION_VERSION: Final = "2"
 TRANSCRIPT_TO_GENE_COLUMNS: Final = (
     "transcript_id",
     "gene_id",
@@ -29,7 +29,6 @@ TRANSCRIPT_TO_GENE_COLUMNS: Final = (
     "transcript_biotype",
 )
 MIN_ACCEPTABLE_OVERLAP: Final = 0.95
-VERSION_STRIP_MIN_IMPROVEMENT: Final = 0.10
 _COMPLETE_MARKER: Final = "complete.json"
 _FAILED_MARKER: Final = "failed.json"
 _INDEX_FILENAME: Final = "transcripts.idx"
@@ -331,14 +330,9 @@ def _overlap_fraction(fasta_ids: Sequence[str], annotation_ids: set[str]) -> flo
     return matched / len(fasta_ids)
 
 
-def assess_fasta_gtf_overlap(
-    *,
-    fasta_ids: Sequence[str],
+def _unambiguous_stripped_records(
     gtf_records: Mapping[str, GtfTranscriptRecord],
-) -> OverlapAssessment:
-    exact_annotation_ids = set(gtf_records.keys())
-    exact_fraction = _overlap_fraction(fasta_ids, exact_annotation_ids)
-
+) -> dict[str, GtfTranscriptRecord]:
     stripped_annotation: dict[str, GtfTranscriptRecord] = {}
     stripped_collisions: set[str] = set()
     for transcript_id, record in gtf_records.items():
@@ -349,6 +343,21 @@ def assess_fasta_gtf_overlap(
         else:
             stripped_annotation[stripped_id] = record
 
+    return {
+        key: record for key, record in stripped_annotation.items() if key not in stripped_collisions
+    }
+
+
+def assess_fasta_gtf_overlap(
+    *,
+    fasta_ids: Sequence[str],
+    gtf_records: Mapping[str, GtfTranscriptRecord],
+) -> OverlapAssessment:
+    exact_annotation_ids = set(gtf_records.keys())
+    exact_fraction = _overlap_fraction(fasta_ids, exact_annotation_ids)
+
+    stripped_annotation = _unambiguous_stripped_records(gtf_records)
+
     stripped_matches = 0
     for transcript_id in fasta_ids:
         if (
@@ -358,19 +367,11 @@ def assess_fasta_gtf_overlap(
             stripped_matches += 1
     stripped_fraction = stripped_matches / len(fasta_ids) if fasta_ids else 0.0
 
-    if exact_fraction >= MIN_ACCEPTABLE_OVERLAP:
-        policy: FastaIdPolicy = "exact"
-        matched = sum(1 for transcript_id in fasta_ids if transcript_id in exact_annotation_ids)
-    elif (
-        stripped_fraction >= MIN_ACCEPTABLE_OVERLAP
-        and stripped_fraction - exact_fraction >= VERSION_STRIP_MIN_IMPROVEMENT
-        and not stripped_collisions
-    ):
+    policy: FastaIdPolicy = "exact"
+    matched = sum(1 for transcript_id in fasta_ids if transcript_id in exact_annotation_ids)
+    if stripped_fraction > exact_fraction:
         policy = "version_stripped"
         matched = stripped_matches
-    else:
-        policy = "exact"
-        matched = sum(1 for transcript_id in fasta_ids if transcript_id in exact_annotation_ids)
 
     overlap_fraction = matched / len(fasta_ids) if fasta_ids else 0.0
     return OverlapAssessment(
@@ -389,9 +390,7 @@ def map_fasta_to_gtf_records(
     gtf_records: Mapping[str, GtfTranscriptRecord],
     policy: FastaIdPolicy,
 ) -> list[GtfTranscriptRecord]:
-    stripped_index: dict[str, GtfTranscriptRecord] = {}
-    for transcript_id, record in gtf_records.items():
-        stripped_index.setdefault(strip_transcript_version(transcript_id), record)
+    stripped_index = _unambiguous_stripped_records(gtf_records)
 
     mapped: list[GtfTranscriptRecord] = []
     for fasta_id in fasta_ids:
