@@ -403,6 +403,9 @@ fn terminate_process(pid: u32) {
     }
 }
 
+#[cfg(not(unix))]
+fn terminate_process(_pid: u32) {}
+
 fn request_backend_shutdown() -> bool {
     let Ok(mut stream) = TcpStream::connect((PACKAGED_API_HOST, PACKAGED_API_PORT)) else {
         return false;
@@ -432,16 +435,10 @@ fn clean_stale_backend(app_data_dir: &Path, backend: &Path) {
         pids = matching_backend_pids(backend);
     }
     for pid in pids {
-        let _ = request_backend_shutdown();
-        for _ in 0..30 {
-            if !process_exists(pid) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if process_exists(pid) {
-            terminate_process(pid);
-        }
+        // The executable identity above is the ownership proof. Do not send an
+        // HTTP shutdown request to the fixed port: it could belong to an
+        // unrelated service while the stale backend is no longer listening.
+        terminate_process(pid);
     }
     let _ = std::fs::remove_file(pid_path);
 }

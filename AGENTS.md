@@ -13,6 +13,23 @@
   packaged backend health check, frontend/backend revision match, and the
   final single-ZIP artifact contract.
 
+  ``` bash ```
+  git add .
+  git diff --cached --check
+  git status
+
+  
+  git commit -m "Backend diagnostic log"
+  git push -u origin feature/production-bulk-rnaseq
+
+
+  ``` bash ``` (Only after CI gives green, increment rc.## and run.)
+  git fetch origin --tags
+  git tag -a v0.3.0-rc.17 -m "Release v0.3.0-rc.17"
+  git push origin v0.3.0-rc.17
+
+
+
 ## Project map
 
 - Missus Tom is a local-only desktop workbench for human bulk RNA-seq and mouse

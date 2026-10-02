@@ -215,7 +215,16 @@ async def test_validate_save_and_plan_endpoints(
 
     validation = await client.post("/api/v1/projects/validate", json=manifest_payload)
     assert validation.status_code == 200
-    assert validation.json()["data"]["valid"] is True
+    validation_data = validation.json()["data"]
+    assert validation_data["valid"] is True
+    check_ids = {check["check_id"] for check in validation_data["checks"]}
+    assert {
+        "input_directory",
+        "fastq_pairing",
+        "experimental_groups",
+        "comparisons",
+        "bulk_reference_contract",
+    } <= check_ids
 
     saved = await client.post("/api/v1/projects/save", json=manifest_payload)
     assert saved.status_code == 200

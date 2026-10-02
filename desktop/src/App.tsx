@@ -25,7 +25,12 @@ const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
 ];
 
 export default function App() {
-  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [setupRequired, setSetupRequired] = useState(
+    () => isDesktopShell() && !loadSetupState(window.localStorage).completed,
+  );
+  const [activeView, setActiveView] = useState<ViewId>(() => (
+    isDesktopShell() && !loadSetupState(window.localStorage).completed ? "setup" : "dashboard"
+  ));
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
@@ -49,7 +54,10 @@ export default function App() {
   useEffect(() => {
     let live = true;
     void getBackendStatus().then((status) => {
-      if (live && status?.packaged && !loadSetupState(window.localStorage).completed) setActiveView("setup");
+      if (live && status?.packaged && !loadSetupState(window.localStorage).completed) {
+        setSetupRequired(true);
+        setActiveView("setup");
+      }
     });
     return () => { live = false; };
   }, []);
@@ -162,7 +170,7 @@ export default function App() {
         </div>
 
         <nav aria-label="Primary navigation">
-          {navigation.map((item) => (
+          {(setupRequired ? navigation.filter((item) => item.id === "setup") : navigation).map((item) => (
             <button
               type="button"
               className={activeView === item.id ? "nav-item active" : "nav-item"}
@@ -189,7 +197,11 @@ export default function App() {
         {activeView === "dashboard" && (
           <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
         )}
-        {activeView === "setup" && <Setup activeRun={activeRun} isRunActive={Boolean(activeRun)} onContinue={() => setActiveView("dashboard")} />}
+        {activeView === "setup" && <Setup
+          activeRun={activeRun}
+          isRunActive={Boolean(activeRun)}
+          onContinue={() => { setSetupRequired(false); setActiveView("dashboard"); }}
+        />}
         {activeView === "wizard" && <NewProjectWizard onProjectReady={projectReady} />}
         {activeView === "run-plan" && (
           <RunPlanScreen

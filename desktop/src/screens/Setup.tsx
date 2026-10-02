@@ -86,6 +86,48 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     controllerRef.current?.abort();
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    let restored: LiveJobContext | null = null;
+    const consider = (candidate: LiveJobContext) => {
+      if (!restored) {
+        restored = candidate;
+        return;
+      }
+      const running = candidate.status === "running";
+      const restoredRunning = restored.status === "running";
+      const candidateTime = Date.parse(candidate.lastOutputAt ?? candidate.startedAt ?? "") || 0;
+      const restoredTime = Date.parse(restored.lastOutputAt ?? restored.startedAt ?? "") || 0;
+      if ((running && !restoredRunning) || (running === restoredRunning && candidateTime > restoredTime)) restored = candidate;
+    };
+    const restore = async () => {
+      await Promise.all(setupPipelines.map(async (pipeline) => {
+        const [dependencyResult, demoResult] = await Promise.allSettled([
+          apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }),
+          apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/status`, { signal: controller.signal }),
+        ]);
+        if (controller.signal.aborted) return;
+        if (dependencyResult.status === "fulfilled" && dependencyResult.value.job) {
+          const job = dependencyResult.value.job;
+          consider({
+            kind: "dependencies", pipeline, jobIdentifier: job.job_identifier, status: job.status,
+            stage: job.current_stage || null, startedAt: job.started_at, lastOutputAt: job.last_output_at,
+          });
+        }
+        if (demoResult.status === "fulfilled" && demoResult.value.job) {
+          const job = demoResult.value.job;
+          consider({
+            kind: "fixtures", pipeline, jobIdentifier: job.job_identifier, status: job.status,
+            stage: job.current_stage || null, startedAt: job.started_at, lastOutputAt: job.last_output_at,
+          });
+        }
+      }));
+      if (!controller.signal.aborted && restored) setLiveJob(restored);
+    };
+    void restore();
+    return () => controller.abort();
+  }, []);
+
   const commit = (next: PersistedSetupState) => {
     saveSetupState(window.localStorage, next);
     if (mounted.current) setState(next);
@@ -249,7 +291,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
 
   return <div className="page-stack">
     <header className="page-header"><div><p className="eyebrow">Local environment</p><h1>Setup</h1><p className="lede">Choose the pipelines and local actions to prepare. Nothing installs until you explicitly start setup.</p></div></header>
-    <section className="development-banner setup-sequence-note"><span className="notice-icon" aria-hidden="true">i</span><div><strong>Machine-local synthetic fixtures</strong><p>Bulk RNA-seq synthetic fixtures support local setup checks and controlled execution when your environment is ready. ONT synthetic fixtures remain setup-only and do not execute a pipeline. Managed dependency installations run strictly one at a time; biological data is not uploaded.</p></div></section>
+    <section className="development-banner setup-sequence-note"><span className="notice-icon" aria-hidden="true">i</span><div><strong>Machine-local synthetic fixtures</strong><p>Bulk RNA-seq synthetic fixtures support local setup checks and controlled execution when your environment is ready. ONT synthetic fixtures remain setup-only and do not execute a pipeline. Managed dependency installations run strictly one at a time; biological data is not uploaded.</p><p className="field-help">After setup, additional pipeline requirements can be installed from the Local setup section in Step 1 of a new project.</p></div></section>
     {error && <div className="inline-error" role="alert">{error}</div>}
     {liveJob && liveLogFetch && <LiveCommandLog
       title={liveJob.kind === "fixtures" ? `${liveJob.pipeline} fixture preparation` : `${liveJob.pipeline} dependency installation`}

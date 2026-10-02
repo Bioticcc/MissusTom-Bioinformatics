@@ -4,6 +4,12 @@ import type { ApiEnvelope, HealthStatus } from "./types";
 
 const BROWSER_API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 15_000;
+export const PROJECT_VALIDATION_TIMEOUT_MS = 120_000;
+
+export type ApiRequestOptions = {
+  timeoutMs?: number;
+  timeoutMessage?: string;
+};
 
 export type BackendStatus = {
   base_url: string;
@@ -95,14 +101,20 @@ export function setupInstallConflictMessage(error: unknown): string | null {
   return null;
 }
 
-export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export async function apiRequest<T>(
+  path: string,
+  init?: RequestInit,
+  options: ApiRequestOptions = {},
+): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body != null && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const timeoutMessage = options.timeoutMessage ?? `The local backend did not respond within ${timeoutMs / 1000} seconds. Try again.`;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const abortFromCaller = () => controller.abort();
   init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
   if (init?.signal?.aborted) controller.abort();
@@ -114,7 +126,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
       response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal });
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
-      if (controller.signal.aborted) throw new ApiError("The local backend did not respond within 15 seconds. Try again.");
+      if (controller.signal.aborted) throw new ApiError(timeoutMessage);
       throw new ApiError("The local backend is unavailable. Start it on 127.0.0.1:8000 and try again.");
     }
 
@@ -123,7 +135,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
       envelope = (await response.json()) as ApiEnvelope<T>;
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
-      if (controller.signal.aborted) throw new ApiError("The local backend did not respond within 15 seconds. Try again.");
+      if (controller.signal.aborted) throw new ApiError(timeoutMessage);
       throw new ApiError("The local backend returned an invalid response.");
     }
     if (!response.ok || !envelope.success || envelope.data === null) {

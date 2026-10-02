@@ -71,6 +71,21 @@ def test_production_bulk_preflight_validates_reference_contract(
     assert contract.status == CheckStatus.PASSED
 
 
+def test_generalized_bulk_preflight_returns_individual_checks_for_blocking_input(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["samples"][0]["condition"] = ""
+    manifest = ProjectManifest.model_validate(payload)
+
+    checks = {check.check_id: check for check in project_preflight(manifest)}
+
+    assert checks["experimental_groups"].status == CheckStatus.BLOCKING
+    assert checks["experimental_groups"].message
+    assert "fastq_pairing" in checks
+    assert "bulk_reference_contract" in checks
+
+
 def test_fastq_outside_input_directory_is_blocking(
     manifest_payload: dict[str, Any],
 ) -> None:

@@ -74,6 +74,32 @@ test("apiRequest times out while a response body is still pending", async () => 
   }
 });
 
+test("apiRequest supports a longer operation-specific timeout", async () => {
+  const timers = installBrowserTimers();
+  const previousFetch = globalThis.fetch;
+  let bodyStarted;
+  globalThis.fetch = async (_url, init) => response({
+    json: () => new Promise((_, reject) => {
+      bodyStarted();
+      init.signal.addEventListener("abort", () => reject(new Error("body aborted")), { once: true });
+    }),
+  });
+  try {
+    const { ApiError, apiRequest } = await loadApi();
+    const bodyPending = new Promise((resolve) => { bodyStarted = resolve; });
+    const request = apiRequest("/project-validation", undefined, {
+      timeoutMs: 120_000,
+      timeoutMessage: "Project validation timed out.",
+    });
+    await bodyPending;
+    timers.fireTimer();
+    await assert.rejects(request, (error) => error instanceof ApiError && error.message === "Project validation timed out.");
+  } finally {
+    globalThis.fetch = previousFetch;
+    timers.restore();
+  }
+});
+
 test("apiRequest preserves a caller abort while the response body is pending", async () => {
   const timers = installBrowserTimers();
   const previousFetch = globalThis.fetch;

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiRequest, bulkProductionBackendError } from "../api";
+import { apiRequest, bulkProductionBackendError, PROJECT_VALIDATION_TIMEOUT_MS } from "../api";
+import { inferAutomaticSettings, type AutomaticSettingsResult } from "../automaticSettings";
 import { APP_VERSION } from "../appVersion";
 import { CheckList } from "../components/CheckList";
 import { FolderPreview } from "../components/FolderPreview";
@@ -234,6 +235,7 @@ export function NewProjectWizard({
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
   const [metadataImport, setMetadataImport] = useState<MetadataImportStatus | null>(null);
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
+  const [automaticSettings, setAutomaticSettings] = useState<AutomaticSettingsResult | null>(null);
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
@@ -870,6 +872,9 @@ export function NewProjectWizard({
       const result = await apiRequest<ProjectValidation>("/api/v1/projects/validate", {
         method: "POST",
         body: JSON.stringify(buildManifest()),
+      }, {
+        timeoutMs: PROJECT_VALIDATION_TIMEOUT_MS,
+        timeoutMessage: "Project validation did not finish within 120 seconds. The backend may still be working; check its log and try again.",
       });
       setValidation(result);
       setValidatedManifest(result.valid ? result.manifest : null);
@@ -979,6 +984,48 @@ export function NewProjectWizard({
     invalidateValidation();
   };
 
+  const attemptAutomaticSettings = () => {
+    const result = inferAutomaticSettings(samples);
+    setAutomaticSettings(result);
+    setError("");
+  };
+
+  const applyAutomaticSettings = () => {
+    if (!automaticSettings) return;
+    const suggestions = new Map(automaticSettings.suggestions.map((suggestion) => [suggestion.sampleIndex, suggestion]));
+    let applied = 0;
+    setSamples((current) => current.map((sample, sampleIndex) => {
+      const suggestion = suggestions.get(sampleIndex);
+      if (!suggestion) return sample;
+      const next = {
+        ...sample,
+        condition: sample.condition || suggestion.condition || "",
+        biological_replicate: sample.biological_replicate || suggestion.biological_replicate || "",
+        batch: sample.batch || suggestion.batch || null,
+        covariates: {
+          ...sample.covariates,
+          ...(sample.covariates.intervention ? {} : suggestion.intervention ? { intervention: suggestion.intervention } : {}),
+        },
+      };
+      if (next.condition !== sample.condition || next.biological_replicate !== sample.biological_replicate || next.batch !== sample.batch || next.covariates.intervention !== sample.covariates.intervention) applied += 1;
+      return next;
+    }));
+    setAssignmentHistory((current) => [...current, {
+      timestamp: new Date().toISOString(),
+      action: "automatic_settings_assignment",
+      matched: applied,
+      details: { fields: automaticSettings.inferredFields.join(", ") },
+    }]);
+    setAutomaticSettings(null);
+    setComparisons([]);
+    setNumerator("");
+    setDenominator("");
+    setComparisonIntervention("");
+    setMetadataImport(null);
+    setError("");
+    invalidateValidation();
+  };
+
   const addComparison = () => {
     const validationError = validateComparisonSelection(numerator, denominator, groups);
     if (validationError) {
@@ -1020,6 +1067,7 @@ export function NewProjectWizard({
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 1</p><h2>Project details</h2></div></div>
             <p className="helper-copy">Choose where this project starts before selecting its input folder.</p>
+            <p className="setup-guidance"><strong>Need another pipeline?</strong> You can install its requirements here from the Local setup section below without returning to first-launch setup.</p>
             <fieldset className="run-mode-panel setup-mode-panel">
               <legend>Pipeline</legend>
               <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
@@ -1102,7 +1150,18 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>Confirm experimental design</h2></div></div>
-            <div className="concept-explainer"><p><strong>Experimental design</strong> tells the analysis which biological group each sample belongs to.</p><ul><li><strong>Condition:</strong> the required group being studied, such as Control or Treated.</li><li><strong>Biological replicate:</strong> optional subject/specimen metadata retained for future paired analyses. The current unpaired analysis does not use it.</li><li><strong>Batch:</strong> optional provenance for when or where a sample was processed. It is recorded, but the current analysis does not adjust for batch.</li></ul><p>Missus Tom never guesses these biological facts from filenames.</p></div>
+            <div className="concept-explainer"><p><strong>Experimental design</strong> tells the analysis which biological group each sample belongs to.</p><ul><li><strong>Condition:</strong> the required group being studied, such as Control or Treated.</li><li><strong>Biological replicate:</strong> optional subject/specimen metadata retained for future paired analyses. The current unpaired analysis does not use it.</li><li><strong>Batch:</strong> optional provenance for when or where a sample was processed. It is recorded, but the current analysis does not adjust for batch.</li></ul><p>Missus Tom never guesses these biological facts from filenames unless you explicitly request an automatic suggestion.</p></div>
+            <div className="automatic-settings-panel">
+              <div><strong>Attempt automatic settings</strong><p>Use sample and read filenames to suggest condition, biological replicate, and clearly marked batch or intervention values.</p></div>
+              <button className="button secondary" type="button" onClick={attemptAutomaticSettings}>Attempt Automatic Settings</button>
+            </div>
+            {automaticSettings && <div className="automatic-settings-review" role="status">
+              <strong>Review automatic suggestions before applying</strong>
+              <p>These are filename-based guesses and may NOT be accurate. Confirm every value against your experimental records. Existing non-empty fields will be preserved.</p>
+              {automaticSettings.warnings.map((warning) => <p className="field-help" key={warning}>{warning}</p>)}
+              {automaticSettings.suggestions.length > 0 && <div className="table-scroll"><table className="automatic-settings-table"><thead><tr><th>Sample</th><th>Condition</th><th>Biological replicate</th><th>Batch</th><th>Intervention</th></tr></thead><tbody>{automaticSettings.suggestions.map((suggestion) => { const sample = samples[suggestion.sampleIndex]; return <tr key={sample.sample_id}><td>{sample.sample_id}</td><td>{suggestion.condition ?? "—"}</td><td>{suggestion.biological_replicate ?? "—"}</td><td>{suggestion.batch ?? "—"}</td><td>{suggestion.intervention ?? "—"}</td></tr>; })}</tbody></table></div>}
+              <div className="automatic-settings-actions"><button className="button primary" type="button" onClick={applyAutomaticSettings} disabled={automaticSettings.suggestions.length === 0}>Apply suggestions</button><button className="button secondary" type="button" onClick={() => setAutomaticSettings(null)}>Dismiss</button></div>
+            </div>}
             <div className="category-assignment-panel">
               <div className="category-assignment-heading"><div><strong>Bulk-assign experimental settings</strong><p>Find included samples by text in their identifiers, then assign any combination of condition, biological replicate, batch, and intervention. Matching ignores letter case and separators such as <code>_</code> and <code>-</code>.</p></div><button className="text-button" type="button" onClick={useSampleIdsAsReplicates}>Use each sample ID as its replicate ID</button></div>
               <div className="table-scroll"><table className="category-assignment-table"><thead><tr><th>Sample ID contains</th><th>Condition</th><th>Biological replicate (optional)</th><th>Batch</th><th>Intervention</th><th>Matches</th><th></th></tr></thead><tbody><tr><td><input value={assignmentSearch} onChange={(event) => setAssignmentSearch(event.target.value)} placeholder="e.g. O_D1" /></td><td><input value={assignmentCondition} onChange={(event) => setAssignmentCondition(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentReplicate} onChange={(event) => setAssignmentReplicate(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentBatch} onChange={(event) => setAssignmentBatch(event.target.value)} placeholder="Optional" /></td><td><input value={assignmentIntervention} onChange={(event) => setAssignmentIntervention(event.target.value)} placeholder="Optional" /></td><td><strong>{assignmentMatchCount}</strong></td><td><button className="button primary" type="button" onClick={applyDesignAssignment} disabled={!assignmentSearch.trim() || assignmentMatchCount === 0 || (!assignmentCondition.trim() && !assignmentReplicate.trim() && !assignmentBatch.trim() && !assignmentIntervention.trim())}>Apply</button></td></tr></tbody></table></div>

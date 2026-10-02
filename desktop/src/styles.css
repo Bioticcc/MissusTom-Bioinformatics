@@ -115,8 +115,8 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 summary:focus-visible {
-  outline: 3px solid rgba(63, 143, 129, 0.4);
-  outline-offset: 2px;
+  outline: 2px solid var(--green-500);
+  outline-offset: 1px;
 }
 
 h1,
@@ -1581,6 +1581,16 @@ legend {
   margin: 0;
 }
 
+.setup-guidance {
+  margin: 0;
+  border-left: 3px solid var(--green-500);
+  padding: 0.55rem 0.75rem;
+  color: var(--muted);
+  background: #f3faf6;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .setup-pipeline-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1920,6 +1930,56 @@ legend {
   border-radius: 10px;
   padding: 1rem;
   background: #f7faf8;
+}
+
+.automatic-settings-panel,
+.automatic-settings-review {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  border: 1px solid #dbe6e2;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  background: #f7faf8;
+}
+
+.automatic-settings-panel p,
+.automatic-settings-review > p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.automatic-settings-review {
+  display: block;
+  border-color: #ecd09d;
+  background: var(--amber-soft);
+}
+
+.automatic-settings-review .table-scroll {
+  margin-top: 0.75rem;
+}
+
+.automatic-settings-table {
+  width: 100%;
+  min-width: 700px;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.automatic-settings-table th,
+.automatic-settings-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid rgba(112, 71, 22, 0.15);
+  text-align: left;
+}
+
+.automatic-settings-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
 }
 
 .category-assignment-heading p {
