@@ -31,6 +31,7 @@ class DependencyInstallJob(BaseModel):
     last_output_at: datetime | None = None
     current_stage: str = ""
     log_tail: list[str] = Field(default_factory=list)
+    error_code: str | None = None
 
 
 class DependencyStatus(BaseModel):

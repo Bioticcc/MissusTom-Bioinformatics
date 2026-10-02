@@ -15,6 +15,7 @@ from missus_tom.api.routes import router, run_manager
 from missus_tom.config import settings
 from missus_tom.logging_config import configure_logging
 from missus_tom.models.common import ApiResponse, ErrorDetail
+from missus_tom.models.errors import ApiCodedError
 
 configure_logging()
 
@@ -49,6 +50,11 @@ app.include_router(router)
 def _error_response(status_code: int, errors: list[ErrorDetail]) -> JSONResponse:
     envelope: ApiResponse[dict[str, Any]] = ApiResponse(success=False, errors=errors)
     return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
+
+
+@app.exception_handler(ApiCodedError)
+async def coded_exception_handler(_request: Request, exc: ApiCodedError) -> JSONResponse:
+    return _error_response(exc.status_code, [ErrorDetail(code=exc.code, message=exc.message)])
 
 
 @app.exception_handler(StarletteHTTPException)

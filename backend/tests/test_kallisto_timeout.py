@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
 import textwrap
 import time
@@ -40,10 +42,87 @@ def test_run_with_timeout_preserves_command_failure_exit() -> None:
     assert "exceeded" not in result.stderr
 
 
-def test_run_with_timeout_normalizes_elapsed_limit_to_240() -> None:
+def test_run_with_timeout_returns_240_on_helper_timeout() -> None:
     result = _run_helper("1", "1", "sleep", "5")
     assert result.returncode == 240
     assert "exceeded 1s limit" in result.stderr
+
+
+def test_run_with_timeout_late_child_self_term_is_not_240() -> None:
+    result = _run_helper(
+        "10",
+        "1",
+        "bash",
+        "-c",
+        "sleep 2; kill -TERM $$",
+    )
+    assert result.returncode != 240
+    assert result.returncode in {0, 143}
+
+
+def test_run_with_timeout_late_child_self_kill_is_not_240() -> None:
+    result = _run_helper(
+        "10",
+        "1",
+        "bash",
+        "-c",
+        "sleep 2; kill -KILL $$",
+    )
+    assert result.returncode != 240
+    assert result.returncode in {0, 137}
+
+
+def test_run_with_timeout_external_child_termination_preserves_status() -> None:
+    result = _run_helper(
+        "7200",
+        "60",
+        "bash",
+        "-c",
+        "sleep 30 & worker=$!; sleep 1; kill -TERM $worker; wait $worker",
+    )
+    assert result.returncode != 240
+    assert result.returncode in {0, 143}
+
+
+def test_run_with_timeout_forced_kill_after_limit_still_240() -> None:
+    result = _run_helper("1", "1", "sleep", "30")
+    assert result.returncode == 240
+    assert "exceeded 1s limit" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("received_signal", "expected_status"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)],
+)
+def test_run_with_timeout_forwards_external_signal_to_child_process_group(
+    tmp_path: Path, received_signal: signal.Signals, expected_status: int
+) -> None:
+    child_pid_file = tmp_path / "child-pid"
+    wrapper = subprocess.Popen(
+        [
+            str(HELPER),
+            "7200",
+            "60",
+            "bash",
+            "-c",
+            f'echo $$ > "{child_pid_file}"; sleep 30 & wait',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while not child_pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert child_pid_file.exists()
+    child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+
+    wrapper.send_signal(received_signal)
+    stdout, stderr = wrapper.communicate(timeout=5)
+
+    assert wrapper.returncode == expected_status, stdout + stderr
+    with pytest.raises(ProcessLookupError):
+        os.killpg(child_pid, 0)
 
 
 def test_run_with_timeout_rejects_non_positive_timeout_args() -> None:

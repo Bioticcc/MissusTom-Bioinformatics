@@ -111,12 +111,12 @@ select {
 }
 
 button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
+input:focus,
+select:focus,
+textarea:focus,
 summary:focus-visible {
-  outline: 3px solid rgba(63, 143, 129, 0.4);
-  outline-offset: 2px;
+  outline: 2px solid var(--green-500);
+  outline-offset: 1px;
 }
 
 h1,
@@ -208,6 +208,25 @@ h4 {
   color: #fff;
   background: #a23b3b;
 }
+
+.shutdown-dialog {
+  position: fixed;
+  z-index: 20;
+  top: calc(var(--titlebar-height) + 0.75rem);
+  right: 1rem;
+  display: grid;
+  gap: 0.25rem;
+  max-width: 24rem;
+  padding: 0.8rem 1rem;
+  color: #17352c;
+  background: #e5f5ee;
+  border: 1px solid #8cc9b0;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.22);
+}
+
+.shutdown-dialog span { font-size: 0.85rem; }
+.shutdown-dialog-error { color: #5d2222; background: #fff0f0; border-color: #d69a9a; }
 
 .app-shell {
   display: grid;
@@ -967,6 +986,30 @@ h4 {
   margin-top: 0.75rem;
 }
 
+.debug-terminal,
+.validation-debug-terminal pre {
+  max-height: 24rem;
+  overflow: auto;
+  margin: 0.75rem 0 0;
+  border: 1px solid #26443f;
+  border-radius: 8px;
+  padding: 0.75rem;
+  color: #d9f4e8;
+  background: #132522;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.debug-terminal-heading {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .live-command-log-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1326,10 +1369,43 @@ textarea {
   background: #fbfdfc;
 }
 
-input:hover,
-select:hover,
-textarea:hover {
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  background-image: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+input::-webkit-search-cancel-button,
+input::-webkit-search-decoration,
+input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+input:hover:not(:focus),
+select:hover:not(:focus),
+textarea:hover:not(:focus) {
   border-color: #8eaaa2;
+}
+
+/* Paint the control focus ring ourselves, including when the pointer leaves it. */
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--green-500);
+  outline: 2px solid transparent;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 2px var(--green-500);
+}
+
+select {
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='m1 1 5 5 5-5' fill='none' stroke='%23344a47' stroke-width='2'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
 }
 
 textarea {
@@ -1560,6 +1636,16 @@ legend {
 .pipeline-dependencies .section-heading,
 .pipeline-dependencies > .button {
   margin: 0;
+}
+
+.setup-guidance {
+  margin: 0;
+  border-left: 3px solid var(--green-500);
+  padding: 0.55rem 0.75rem;
+  color: var(--muted);
+  background: #f3faf6;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .setup-pipeline-grid {
@@ -1901,6 +1987,56 @@ legend {
   border-radius: 10px;
   padding: 1rem;
   background: #f7faf8;
+}
+
+.automatic-settings-panel,
+.automatic-settings-review {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  border: 1px solid #dbe6e2;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  background: #f7faf8;
+}
+
+.automatic-settings-panel p,
+.automatic-settings-review > p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.automatic-settings-review {
+  display: block;
+  border-color: #ecd09d;
+  background: var(--amber-soft);
+}
+
+.automatic-settings-review .table-scroll {
+  margin-top: 0.75rem;
+}
+
+.automatic-settings-table {
+  width: 100%;
+  min-width: 700px;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.automatic-settings-table th,
+.automatic-settings-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid rgba(112, 71, 22, 0.15);
+  text-align: left;
+}
+
+.automatic-settings-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
 }
 
 .category-assignment-heading p {

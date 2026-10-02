@@ -1,5 +1,35 @@
 # Missus Tom agent guide
 
+## GitHub Push/Releases
+
+- Do not create a release tag until the exact intended commit has passed the
+  complete CI check.
+- Push the validated branch commit first, inspect the GitHub Actions result,
+  and fix any failures before tagging.
+- Treat a failed release tag as permanently tied to its failed commit; do not
+  reuse or move that tag. Create a new release-candidate tag only from a
+  green, package-verified commit.
+- Before declaring release readiness, confirm the Debian package checks,
+  packaged backend health check, frontend/backend revision match, and the
+  final single-ZIP artifact contract.
+
+  ``` bash ```
+  git add .
+  git diff --cached --check
+  git status
+
+
+  git commit -m "Backend diagnostic log"
+  git push -u origin feature/production-bulk-rnaseq
+
+
+  ``` bash ``` (Only after CI gives green, increment rc.## and run.)
+  git fetch origin --tags
+  git tag -a v0.3.0-rc.22 -m "Release v0.3.0-rc.22"
+  git push origin v0.3.0-rc.22
+
+
+
 ## Project map
 
 - Missus Tom is a local-only desktop workbench for human bulk RNA-seq and mouse

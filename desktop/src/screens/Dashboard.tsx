@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiRequest } from "../api";
+import { apiRequest, getBackendStatus, type BackendStatus } from "../api";
 import { CheckList } from "../components/CheckList";
 import { LiveCommandLog } from "../components/LiveCommandLog";
 import { isDesktopShell, selectFiles } from "../native";
@@ -47,6 +47,8 @@ export function Dashboard({
 }) {
   const [preflight, setPreflight] = useState<SystemPreflight | null>(null);
   const [error, setError] = useState("");
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | undefined>();
+  const [showBackendDiagnostics, setShowBackendDiagnostics] = useState(false);
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
   const [prepareJob, setPrepareJob] = useState<DemoPrepareJob | null>(null);
@@ -66,6 +68,9 @@ export function Dashboard({
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
+    void getBackendStatus().then((status) => {
+      if (active) setBackendStatus(status);
+    });
     void apiRequest<SystemPreflight>("/api/v1/system/preflight", { signal: controller.signal }).then((result) => {
       if (active) setPreflight(result);
     }).catch((reason: unknown) => {
@@ -213,11 +218,28 @@ export function Dashboard({
               <h2>Readiness</h2>
             </div>
             <span className={error ? "health-dot offline" : "health-dot"} aria-hidden="true" />
+            {isDesktopShell() && <button className="text-button" type="button" onClick={() => setShowBackendDiagnostics((current) => !current)}>
+              {showBackendDiagnostics ? "Hide backend diagnostics" : "Backend diagnostics"}
+            </button>}
           </div>
+          {showBackendDiagnostics && <div className="diagnostic-details" role="status">
+            <strong>Packaged backend diagnostics</strong>
+            {backendStatus?.startup_log_path && <small>Log file: {backendStatus.startup_log_path}</small>}
+            {backendStatus?.startup_error && <p>{backendStatus.startup_error}</p>}
+            {backendStatus?.startup_log ? <pre>{backendStatus.startup_log}</pre> : <p className="field-help">No startup output is currently available. This log does not include live project-validation progress.</p>}
+          </div>}
           {error ? (
-            <div className="inline-error" role="alert">
-              {error}
-            </div>
+            <>
+              <div className="inline-error" role="alert">{error}</div>
+              {backendStatus?.packaged && (backendStatus.startup_error || backendStatus.startup_log) && !showBackendDiagnostics && (
+                <details className="diagnostic-details">
+                  <summary>Backend startup diagnostics</summary>
+                  <p>{backendStatus.startup_error}</p>
+                  {backendStatus.startup_log_path && <small>Log file: {backendStatus.startup_log_path}</small>}
+                  {backendStatus.startup_log && <pre>{backendStatus.startup_log}</pre>}
+                </details>
+              )}
+            </>
           ) : !preflight ? (
             <p className="loading-copy">Checking local tools…</p>
           ) : (

@@ -3,10 +3,13 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+from collections.abc import AsyncIterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from missus_tom.config import settings
@@ -25,6 +28,7 @@ from missus_tom.models.discovery import (
     QuantificationDiscoveryRequest,
     QuantificationDiscoveryResult,
 )
+from missus_tom.models.errors import UNSUPPORTED_PIPELINE, ApiCodedError
 from missus_tom.models.manifest import (
     ProjectManifest,
     ProjectSaveResult,
@@ -59,6 +63,7 @@ from missus_tom.services.projects import (
 )
 from missus_tom.services.quantifications import discover_quantifications
 from missus_tom.services.runs import RunManager
+from missus_tom.services.validation_progress import validation_events
 
 router = APIRouter()
 pipeline_registry = default_pipeline_registry()
@@ -80,6 +85,10 @@ def health() -> ApiResponse[dict[str, Any]]:
             "version": settings.app_version,
             "status": "ok",
             "execution_enabled": settings.execution_enabled,
+            "build_revision": settings.build_revision,
+            "manifest_schema_versions": list(settings.manifest_schema_versions),
+            "bulk_pipeline_versions": list(settings.bulk_pipeline_versions),
+            "capabilities": settings.capabilities,
         }
     )
 
@@ -161,6 +170,19 @@ def post_project_validate(
     manifest: ProjectManifest,
 ) -> ApiResponse[ProjectValidationResult]:
     return ApiResponse(data=validate_project(manifest, adapter=_adapter_for(manifest)))
+
+
+@router.post(f"{settings.api_prefix}/projects/validate/stream")
+def post_project_validate_stream(manifest: ProjectManifest) -> StreamingResponse:
+    adapter = _adapter_for(manifest)
+
+    async def stream() -> AsyncIterator[str]:
+        async for event in validation_events(partial(validate_project, manifest, adapter=adapter)):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
+    )
 
 
 @router.get(f"{settings.api_prefix}/projects", response_model=ApiResponse[list[ProjectSummary]])
@@ -328,19 +350,16 @@ def get_bulk_rnaseq_demo_project() -> ApiResponse[HumanDemoProject]:
 @router.post(f"{settings.api_prefix}/runs/start", response_model=ApiResponse[RunRecord])
 def post_run_start(request: RunStartRequest) -> ApiResponse[RunRecord]:
     adapter = _adapter_for(request.manifest)
-    checks = adapter.validate_project(request.manifest)
-    analysis_only_ignored_checks = (
-        {"fastq_pairing", "references"}
-        if request.manifest.pipeline_identifier == "bulk-rnaseq"
-        and request.start_stage.value == "analysis"
-        else set()
+    validation_manifest = request.manifest.model_copy(
+        update={
+            "parameters": {
+                **request.manifest.parameters,
+                "start_stage": request.start_stage.value,
+            }
+        }
     )
-    blocking = [
-        check.message
-        for check in checks
-        if check.status.value == "blocking_failure"
-        and check.check_id not in analysis_only_ignored_checks
-    ]
+    checks = adapter.validate_project(validation_manifest)
+    blocking = [check.message for check in checks if check.status.value == "blocking_failure"]
     if blocking:
         raise HTTPException(
             status_code=409,
@@ -360,6 +379,16 @@ def post_run_start(request: RunStartRequest) -> ApiResponse[RunRecord]:
 @router.get(f"{settings.api_prefix}/runs", response_model=ApiResponse[list[RunRecord]])
 def get_runs() -> ApiResponse[list[RunRecord]]:
     return ApiResponse(data=run_manager.list_runs())
+
+
+@router.post(
+    f"{settings.api_prefix}/backend/shutdown",
+    response_model=ApiResponse[dict[str, str]],
+)
+def post_backend_shutdown() -> ApiResponse[dict[str, str]]:
+    """Stop owned workflow work before the desktop host terminates this process."""
+    run_manager.shutdown()
+    return ApiResponse(data={"status": "stopped"})
 
 
 @router.get(f"{settings.api_prefix}/runs/{{job_identifier}}", response_model=ApiResponse[RunRecord])
@@ -429,7 +458,7 @@ def get_pipeline_status(pipeline_identifier: str) -> ApiResponse[PipelineStatusR
     try:
         return ApiResponse(data=pipeline_registry.get(pipeline_identifier).inspect_availability())
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise ApiCodedError(404, UNSUPPORTED_PIPELINE, str(exc)) from exc
 
 
 @router.get(
@@ -442,7 +471,7 @@ def get_pipeline_dependencies(pipeline_identifier: str) -> ApiResponse[Dependenc
         pipeline_registry.get(pipeline_identifier)
         return ApiResponse(data=dependency_installer.status(pipeline_identifier))
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise ApiCodedError(404, UNSUPPORTED_PIPELINE, str(exc)) from exc
 
 
 @router.post(
@@ -460,7 +489,7 @@ def post_pipeline_dependencies_install(
     except ValueError as exc:
         message = str(exc)
         if message.startswith("unsupported pipeline identifier"):
-            raise HTTPException(status_code=404, detail=message) from exc
+            raise ApiCodedError(404, UNSUPPORTED_PIPELINE, message) from exc
         raise HTTPException(status_code=409, detail=message) from exc
 
 

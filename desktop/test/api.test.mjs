@@ -11,9 +11,28 @@ async function loadApi() {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
   }).outputText
     .replace('from "./types";', 'from "data:text/javascript,export{}";')
+    .replace('from "./appVersion";', 'from "data:text/javascript,export const BUILD_REVISION = \\"development\\"; export const DEVELOPMENT_BUILD_REVISION = \\"development\\";";')
     .replace('from "@tauri-apps/api/core";', 'from "data:text/javascript,export const invoke = async () => ({ base_url: \\"http://127.0.0.1:8765\\", ready: true });";');
   return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}#${Math.random()}`);
 }
+
+test("Bulk backend compatibility rejects unavailable, malformed, old, and mismatched builds", async () => {
+  const { bulkProductionBackendError } = await loadApi();
+  assert.match(bulkProductionBackendError(null, "abc123"), /did not report a compatible health response/);
+  assert.match(bulkProductionBackendError({ status: "broken" }, "abc123"), /compatible health response/);
+  assert.match(bulkProductionBackendError({ status: "ok", capabilities: {} }, "abc123"), /too old/);
+  const compatible = {
+    status: "ok",
+    build_revision: "abc123",
+    capabilities: { bulk_fasta_gtf_reference_preparation: true },
+  };
+  assert.equal(bulkProductionBackendError(compatible, "abc123"), null);
+  assert.match(bulkProductionBackendError(compatible, "different"), /does not match the backend build/);
+  assert.match(
+    bulkProductionBackendError({ ...compatible, build_revision: undefined }, "abc123"),
+    /did not report build provenance/,
+  );
+});
 
 function installBrowserTimers() {
   const previousWindow = globalThis.window;
@@ -49,6 +68,32 @@ test("apiRequest times out while a response body is still pending", async () => 
     await bodyPending;
     timers.fireTimer();
     await assert.rejects(request, (error) => error instanceof ApiError && error.message.includes("did not respond within 15 seconds"));
+  } finally {
+    globalThis.fetch = previousFetch;
+    timers.restore();
+  }
+});
+
+test("apiRequest supports a longer operation-specific timeout", async () => {
+  const timers = installBrowserTimers();
+  const previousFetch = globalThis.fetch;
+  let bodyStarted;
+  globalThis.fetch = async (_url, init) => response({
+    json: () => new Promise((_, reject) => {
+      bodyStarted();
+      init.signal.addEventListener("abort", () => reject(new Error("body aborted")), { once: true });
+    }),
+  });
+  try {
+    const { ApiError, apiRequest } = await loadApi();
+    const bodyPending = new Promise((resolve) => { bodyStarted = resolve; });
+    const request = apiRequest("/project-validation", undefined, {
+      timeoutMs: 120_000,
+      timeoutMessage: "Project validation timed out.",
+    });
+    await bodyPending;
+    timers.fireTimer();
+    await assert.rejects(request, (error) => error instanceof ApiError && error.message === "Project validation timed out.");
   } finally {
     globalThis.fetch = previousFetch;
     timers.restore();
@@ -97,27 +142,29 @@ test("apiRequest distinguishes unavailable, malformed, and HTTP failure response
       statusText: "Conflict",
       json: async () => ({ success: false, data: null, errors: [{ code: "blocked", message: "Project is locked", field: "manifest" }], meta: {} }),
     });
-    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.status === 409 && error.message === "Project is locked" && error.fields[0] === "manifest");
+    await assert.rejects(apiRequest("/conflict"), (error) => error instanceof ApiError && error.status === 409 && error.message === "Project is locked" && error.fields[0] === "manifest" && error.code === "blocked");
   } finally {
     globalThis.fetch = previousFetch;
     timers.restore();
   }
 });
 
-test("setup install conflicts require HTTP 409 and a specific message", async () => {
+test("setup install conflicts require HTTP 409 and typed error codes", async () => {
   const { ApiError, setupInstallConflictMessage } = await loadApi();
-  const concurrent = new ApiError("another dependency installation is already running", [], 409);
-  const samePipeline = new ApiError("dependency installation is already running for this pipeline", [], 409);
-  const activeRun = new ApiError("a workflow run is active or requires recovery", [], 409);
-  const otherJob = new ApiError("another workflow job is active", [], 409);
-  const bareInstallation = new ApiError("Installation failed", [], 409);
-  const wrongStatus = new ApiError("another dependency installation is already running", [], 400);
+  const concurrent = new ApiError("another dependency installation is already running", [], 409, "dependency_install_in_progress");
+  const samePipeline = new ApiError("dependency installation is already running for this pipeline", [], 409, "dependency_install_in_progress");
+  const activeRun = new ApiError("a workflow run is active or requires recovery", [], 409, "workflow_admission_locked");
+  const otherJob = new ApiError("another workflow job is active", [], 409, "workflow_admission_locked");
+  const bareInstallation = new ApiError("Installation failed", [], 409, "dependency_verification_failed");
+  const messageOnly = new ApiError("another dependency installation is already running", [], 409);
+  const wrongStatus = new ApiError("another dependency installation is already running", [], 400, "dependency_install_in_progress");
 
   assert.match(setupInstallConflictMessage(concurrent), /another dependency installation/);
   assert.match(setupInstallConflictMessage(samePipeline), /another dependency installation/);
   assert.match(setupInstallConflictMessage(activeRun), /workflow run is active/);
   assert.match(setupInstallConflictMessage(otherJob), /workflow run is active/);
   assert.equal(setupInstallConflictMessage(bareInstallation), null);
+  assert.equal(setupInstallConflictMessage(messageOnly), null);
   assert.equal(setupInstallConflictMessage(wrongStatus), null);
   assert.equal(setupInstallConflictMessage(new Error("already running")), null);
 });
@@ -130,3 +177,68 @@ test("selectApiBaseUrl uses a packaged sidecar base and retains browser fallback
   );
   assert.equal(selectApiBaseUrl("http://127.0.0.1:8000", undefined), "http://127.0.0.1:8000");
 });
+
+function streamedResponse(chunks) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    },
+  }), { headers: { "Content-Type": "application/x-ndjson" } });
+}
+
+test("validation streams fragmented progress before returning the final result", async () => {
+  const timers = installBrowserTimers();
+  const previousFetch = globalThis.fetch;
+  const result = { valid: false, checks: [], manifest: { project_id: "fixture" } };
+  globalThis.fetch = async () => streamedResponse([
+    '{"type":"progress","message":"Read',
+    'ing GTF"}\n',
+    JSON.stringify({ type: "result", result }),
+  ]);
+  try {
+    const { streamProjectValidation } = await loadApi();
+    const messages = [];
+    assert.deepEqual(await streamProjectValidation({}, (message) => messages.push(message)), result);
+    assert.deepEqual(messages, ["Reading GTF"]);
+  } finally { globalThis.fetch = previousFetch; timers.restore(); }
+});
+
+for (const [name, body, expected] of [
+  ["early EOF", '{"type":"progress","message":"Reading"}\n', /ended before/],
+  ["backend error", '{"type":"error","message":"Broken GTF"}\n', /Broken GTF/],
+  ["malformed event", '{"type":"result","result":{}}\n', /invalid validation event/],
+]) {
+  test(`validation rejects ${name}`, async () => {
+    const timers = installBrowserTimers();
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => streamedResponse([body]);
+    try {
+      const { streamProjectValidation } = await loadApi();
+      await assert.rejects(streamProjectValidation({}, () => {}), expected);
+    } finally { globalThis.fetch = previousFetch; timers.restore(); }
+  });
+}
+
+for (const callerAbort of [false, true]) {
+  test(`validation ${callerAbort ? "caller cancellation" : "idle timeout"} stops reading`, async () => {
+    const timers = installBrowserTimers();
+    const previousFetch = globalThis.fetch;
+    let started;
+    const reading = new Promise((resolve) => { started = resolve; });
+    globalThis.fetch = async (_url, init) => new Response(new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+        started();
+      },
+    }));
+    try {
+      const { streamProjectValidation } = await loadApi();
+      const caller = new AbortController();
+      const request = streamProjectValidation({}, () => {}, caller.signal);
+      await reading;
+      if (callerAbort) caller.abort(); else timers.fireTimer();
+      await assert.rejects(request, callerAbort ? /Aborted/ : /No validation progress received for 120 seconds/);
+    } finally { globalThis.fetch = previousFetch; timers.restore(); }
+  });
+}

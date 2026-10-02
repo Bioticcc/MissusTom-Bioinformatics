@@ -17,24 +17,25 @@ or remains planned.
 | Raw read QC | FastQC in batches/retries, with failed batches retried one file at a time using one thread; output-pair checks, then MultiQC. | `FASTQC_RAW` and `MULTIQC_RAW`. | Implemented for included manifest samples and lanes with FastQC 0.12.1 and MultiQC 1.33. Native exit 134/139 retries once with each staged read isolated in a one-thread JVM; each isolated invocation can retry once for the same native exits. |
 | Adapter trimming | Paired cutadapt, fixed adapters, `-m 20`, `-q 20`; existing outputs cause a skip. | `CUTADAPT_PAIRED` with explicit adapter/quality parameters and paired lanes per sample. | Implemented with Cutadapt 5.2 and validated manifest settings. |
 | Clean read QC | FastQC/MultiQC on trimmed FASTQs, with the same one-file/one-thread native-crash fallback. | `FASTQC_CLEAN` and `MULTIQC_CLEAN`. | Implemented with declared HTML, ZIP, report, and data-directory outputs. |
-| Kallisto index | Species-dependent transcript FASTA and reused index path. | A validated index path is supplied in the manifest. | A compatible human index is reused read-only. Index construction is not implemented. |
+| Kallisto index | Species-dependent transcript FASTA and reused index path. | Application reference preparation uses the managed Kallisto or validates an explicitly supplied index. | Implemented with separate content-addressed index and annotation caches, atomic completion metadata, and an advanced existing-index mode. |
 | Kallisto quant | Paired `--rf-stranded`; complete output means three nonempty files. | `KALLISTO_QUANT`, one task per confirmed sample. | Implemented with Kallisto 0.52.0; each task publishes `abundance.h5`, `abundance.tsv`, and `run_info.json`. A two-hour per-sample `run_with_timeout` foreground limit terminates and retries one stalled attempt before failing cleanly. |
-| Transcript-to-gene map | GTF imported and converted through GenomicFeatures/txdbmaker/AnnotationDbi. | Target annotation plus reviewed BioMart mapping inside `FULL_HUMAN_ANALYSIS`. | Implemented for the fixed GENCODE v49 demo; general reference preparation remains future work. |
-| Gene summarization | tximport reads per-sample kallisto outputs. | tximport section of `FULL_HUMAN_ANALYSIS`. | Implemented from `abundance.tsv`; inferential replicates are disabled because the quantification stage does not request bootstraps. |
-| RNA class filter | lncRNA scripts grep `lncRNA`; mRNA scripts require `protein_coding`. | Class-specific sections of `FULL_HUMAN_ANALYSIS`. | Implemented with the observed rules; broader biotype policy still requires confirmation. |
-| Count filter/model fit | DESeq2 count filter, `~group`, rlog, normal LFC shrinkage, fixed thresholds/resources. | DESeq2 section of `FULL_HUMAN_ANALYSIS`. | Implemented for manifest-defined two-group comparisons and thresholds. Batch/paired designs remain disabled. |
+| Transcript-to-gene map | GTF imported and converted through GenomicFeatures/txdbmaker/AnnotationDbi. | Application reference preparation normalizes matching FASTA/GTF identifiers before `BULK_RNASEQ_ANALYSIS`. | Implemented without BioMart: required transcript/gene IDs plus optional names and biotypes are cached and recorded with overlap policy and checksums. |
+| Gene summarization | tximport reads per-sample kallisto outputs. | tximport section of `BULK_RNASEQ_ANALYSIS`. | Implemented from `abundance.tsv` and the normalized mapping; inferential replicates are disabled because quantification does not request bootstraps. |
+| RNA class filter | lncRNA scripts grep `lncRNA`; mRNA scripts require `protein_coding`. | Optional class-specific sections after mandatory all-gene analysis. | Implemented with exact documented biotype values. Missing/unsupported biotypes skip only optional subsets and record the reason. |
+| Count filter/model fit | DESeq2 count filter, `~group`, rlog, normal LFC shrinkage, fixed thresholds/resources. | DESeq2 section of `BULK_RNASEQ_ANALYSIS`. | Implemented as `~ condition` for explicit numerator-versus-denominator comparisons. Batch/paired designs remain disabled. |
 | Human comparisons | Metadata-driven H/OD1 and intervention follow-ups with minimum four per group. | Human design adapter produces a reviewed contrast/sample sheet. | Explicit manifest conditions and imported intervention metadata support baseline and intervention-filtered two-group contrasts; no filename-derived biology. |
 | Mouse comparisons | Prefix/tissue parsing and four hardcoded contrasts across five tissues. | Mouse design adapter consumes explicit condition/tissue fields. | Replace biological filename inference before execution. |
-| Plots | PCA, heatmap, volcano, MA, histograms, LFC density, distance, summary and UpSet plots. | Reporting section of `FULL_HUMAN_ANALYSIS`. | Implemented per manifest comparison; cross-comparison UpSet output remains future work. |
-| Tables | Full/up/down/DE tables, normalized matrices, comparison summaries. | Reporting section of `FULL_HUMAN_ANALYSIS`. | Implemented with stable paths for mRNA, lncRNA, and combined summaries. |
+| Plots | PCA, heatmap, volcano, MA, histograms, LFC density, distance, summary and UpSet plots. | Reporting section of `BULK_RNASEQ_ANALYSIS`. | Implemented per manifest comparison; cross-comparison UpSet output remains future work. |
+| Tables | Full/up/down/DE tables, normalized matrices, comparison summaries. | Reporting section of `BULK_RNASEQ_ANALYSIS`. | Implemented with stable all-gene paths and optional mRNA/lncRNA subsets. |
 | Logs/resume | Timestamped Bash/R logs; partial file-presence skips; no durable job ledger. | Nextflow trace/timeline/report plus application run-state JSON and captured stdout/stderr. | Implemented with a retained work directory and `-resume`; all 35 processes were verified as cached on a repeat run. SQLite job history remains future work. |
 
 ## Implemented end-to-end workflow
 
 The workflow implements manifest-to-channel conversion, multi-lane raw
-FastQC/MultiQC, paired Cutadapt, clean FastQC/MultiQC, kallisto quantification,
-tximport, and separate mRNA/lncRNA DESeq2 analyses for each requested
-comparison. The restricted demo remains an optional validated example.
+FastQC/MultiQC, paired Cutadapt, clean FastQC/MultiQC, Kallisto quantification,
+tximport, and all-gene DESeq2 analysis for each requested comparison, with
+optional annotation-supported gene-class subsets. The synthetic executable demo
+uses the same FASTA/GTF reference-preparation and local workflow route.
 
 ## Mouse ONT modified-base analysis
 

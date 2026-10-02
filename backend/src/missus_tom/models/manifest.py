@@ -40,6 +40,11 @@ class ExecutionProfile(StrEnum):
     APPTAINER = "apptainer"
 
 
+class BulkReferenceMode(StrEnum):
+    BUILD = "build"
+    EXISTING_INDEX = "existing-index"
+
+
 class PipelineStatus(StrEnum):
     DRAFT = "draft"
     VALIDATED = "validated"
@@ -176,6 +181,7 @@ class ProjectManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     schema_version: str = "1.0.0"
+    reference_mode: BulkReferenceMode | None = None
     project_name: str = Field(min_length=1, max_length=120)
     project_identifier: UUID
     created_at: datetime
@@ -187,6 +193,7 @@ class ProjectManifest(BaseModel):
     reference_genome: str
     annotation_source: str
     reference_resources: dict[str, str] = Field(default_factory=dict)
+    reference_provenance: dict[str, Any] | None = None
     library_type: str
     read_layout: ReadLayout
     strandedness: Strandedness
@@ -207,6 +214,14 @@ class ProjectManifest(BaseModel):
     @classmethod
     def normalize_reference_paths(cls, values: dict[str, str]) -> dict[str, str]:
         return {key: normalize_user_path(value) for key, value in values.items() if value.strip()}
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: str) -> str:
+        value = value.strip()
+        if value not in {"1.0.0", "1.1.0"}:
+            raise ValueError("unsupported schema_version")
+        return value
 
     @field_validator(
         "project_name",
@@ -235,7 +250,54 @@ class ProjectManifest(BaseModel):
         if len(comparison_ids) != len(set(comparison_ids)):
             raise ValueError("comparison identifiers must be unique")
 
+        if self.pipeline_identifier == "bulk-rnaseq":
+            self._validate_bulk_reference_contract()
+
         return self
+
+    def _validate_bulk_reference_contract(self) -> None:
+        resources = self.reference_resources
+        analysis_only = self.parameters.get("start_stage") == "analysis"
+        mode = self.reference_mode
+        if mode is None:
+            if self.schema_version == "1.1.0":
+                raise ValueError("bulk RNA-seq manifests at schema 1.1.0 require reference_mode")
+            return
+
+        has_fasta = bool(resources.get("transcriptome_fasta"))
+        has_gtf = bool(resources.get("annotation_gtf"))
+        has_index = bool(resources.get("kallisto_index"))
+        has_mapping = bool(resources.get("transcript_to_gene"))
+        has_annotation = has_gtf or has_mapping
+
+        if analysis_only:
+            if not has_annotation:
+                raise ValueError(
+                    "analysis-only bulk projects require annotation_gtf or transcript_to_gene"
+                )
+            if mode == BulkReferenceMode.BUILD and has_index:
+                raise ValueError("analysis-only build mode must not include kallisto_index")
+            return
+
+        if mode == BulkReferenceMode.BUILD:
+            if not has_fasta or not has_gtf:
+                raise ValueError(
+                    "build reference mode requires transcriptome_fasta and annotation_gtf"
+                )
+            if has_index:
+                raise ValueError("build reference mode must not include kallisto_index")
+            return
+
+        if mode == BulkReferenceMode.EXISTING_INDEX:
+            if not has_index:
+                raise ValueError("existing-index reference mode requires kallisto_index")
+            if not has_annotation:
+                raise ValueError(
+                    "existing-index reference mode requires annotation_gtf or transcript_to_gene"
+                )
+            return
+
+        raise ValueError("unsupported bulk reference mode")
 
 
 class ProjectValidationResult(BaseModel):

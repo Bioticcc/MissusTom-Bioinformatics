@@ -9,8 +9,8 @@ These instructions apply under `workflows/` in addition to the root guide.
   minimum Nextflow version.
 - `bulk_rnaseq/conf/resources.config` owns process resources and pinned runtime
   images. `bulk_rnaseq/docker/Dockerfile.analysis` owns the local R image.
-- `bulk_rnaseq/bin/full_human_analysis.R` implements the fixed mRNA/lncRNA
-  statistical analysis for the restricted eight-sample demo.
+- `bulk_rnaseq/bin/bulk_rnaseq_analysis.R` implements manifest-defined generic
+  all-gene analysis with optional annotation-supported mRNA/lncRNA subsets.
 - `ont_analysis/run_pipeline.py` owns manifest-to-config validation and
   sequential native-tool invocation. `ont_analysis/stages/` owns stage reuse
   and output gates; its `lib/` contains the migrated scientific helpers/R.

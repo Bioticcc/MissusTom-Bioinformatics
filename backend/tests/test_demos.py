@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import stat
 import time
 from pathlib import Path
 
@@ -11,9 +10,8 @@ from pydantic import ValidationError
 
 from missus_tom.api import routes
 from missus_tom.models.demos import DemoPrepareRequest, DemoPrepareStatus
-from missus_tom.pipeline_adapters import bulk_rnaseq as bulk_module
+from missus_tom.models.manifest import BulkReferenceMode, ProjectManifest
 from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
-from missus_tom.services import demos as demos_module
 from missus_tom.services.demos import (
     DemoService,
     lcg_sequence,
@@ -29,31 +27,6 @@ def demos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DemoService:
     service = DemoService(state_directory=state)
     monkeypatch.setattr(routes, "demo_service", service)
     return service
-
-
-@pytest.fixture
-def kallisto_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    script = tmp_path / "kallisto-stub"
-    script.write_text(
-        """#!/bin/sh
-if [ "$1" = "index" ] && [ "$2" = "-i" ] && [ -n "$3" ]; then
-  printf 'KALLISTO\\0stub-index' > "$3"
-  exit 0
-fi
-exit 2
-""",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-
-    def runtime_tool(name: str, pipeline_identifier: str) -> str | None:
-        if name == "kallisto" and pipeline_identifier == "bulk-rnaseq":
-            return str(script)
-        return None
-
-    monkeypatch.setattr(demos_module, "runtime_tool", runtime_tool)
-    monkeypatch.setattr(demos_module, "runtime_environment", lambda _: {"PATH": str(tmp_path)})
-    return script
 
 
 def wait_for_prepare(service: DemoService, job_identifier: str, *, timeout: float = 60.0) -> None:
@@ -109,11 +82,8 @@ def test_synthetic_read_count_is_deterministic() -> None:
 @pytest.mark.parametrize("pipeline_identifier", ("bulk-rnaseq", "ont-analysis"))
 def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_metadata(
     demos: DemoService,
-    kallisto_stub: Path,
     pipeline_identifier: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    del kallisto_stub
     response = routes.post_demo_prepare(pipeline_identifier, DemoPrepareRequest(consent=True))
 
     job = response.data
@@ -126,7 +96,7 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
     metadata = json.loads((bundle / "BUNDLE_MANIFEST.json").read_text(encoding="utf-8"))
     assert metadata["synthetic_only"] is True
     assert metadata["network_downloads"] is False
-    assert metadata["fixture_version"] == "3"
+    assert metadata["fixture_version"] == "4"
     assert metadata["pipeline_identifier"] == pipeline_identifier
     assert set(metadata["files"]) >= {
         "README.txt",
@@ -146,10 +116,17 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
     else:
         assert fixture_metadata["execution_supported"] is True
         assert status.execution_supported
-        index_bytes = (bundle / "references/transcripts.idx").read_bytes()
-        assert not index_bytes.startswith(b"NOT_A_KALLISTO")
+        assert not (bundle / "references/biomart.tsv").exists()
+        assert not (bundle / "references/transcripts.idx").exists()
         manifest = json.loads((bundle / "project_manifest.json").read_text(encoding="utf-8"))
         assert len(manifest["samples"]) == 4
+        assert manifest["schema_version"] == "1.1.0"
+        assert manifest["reference_mode"] == BulkReferenceMode.BUILD.value
+        assert manifest["pipeline_version"] == "0.5.0"
+        assert manifest["reference_resources"] == {
+            "annotation_gtf": str((bundle / "references/annotation.gtf").resolve()),
+            "transcriptome_fasta": str((bundle / "references/transcripts.fa").resolve()),
+        }
         assert manifest["parameters"] == {
             "absolute_log2_fold_change": 0.3,
             "adapter_r1": "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
@@ -162,39 +139,35 @@ def test_prepare_writes_regeneratable_synthetic_bundle_with_self_consistency_met
             "trim_minimum_length": 20,
             "trim_quality": 20,
         }
-        biomart_lines = (bundle / "references/biomart.tsv").read_text(encoding="utf-8").splitlines()
-        biomart_header = biomart_lines[0]
-        assert biomart_header == "Gene stable ID version\tGene type\tGene name"
+        gtf_text = (bundle / "references/annotation.gtf").read_text(encoding="utf-8")
+        assert 'gene_name "SMOKEPC1"' in gtf_text
+        assert 'gene_type "protein_coding"' in gtf_text
+        assert 'transcript_type "protein_coding"' in gtf_text
+        assert 'gene_name "SMOKELNC1"' in gtf_text
+        assert 'gene_type "lncRNA"' in gtf_text
+        assert 'transcript_type "lncRNA"' in gtf_text
+        fasta_text = (bundle / "references/transcripts.fa").read_text(encoding="utf-8")
+        assert "ENST" not in fasta_text and "ENSG" not in fasta_text
+        assert ">TX000001|" in fasta_text
         project = routes.get_bulk_rnaseq_demo_project().data
         assert project is not None and project.manifest.pipeline_identifier == "bulk-rnaseq"
+        validated = ProjectManifest.model_validate(manifest)
+        assert validated.reference_mode == BulkReferenceMode.BUILD
         saved_manifest = bundle / "project-output/input_manifest/project_manifest.json"
         assert saved_manifest.is_file()
         assert json.loads(saved_manifest.read_text(encoding="utf-8")) == manifest
         BulkRnaSeqAdapter.validate_saved_manifest(project.manifest)
-        adapter = BulkRnaSeqAdapter()
-        monkeypatch.setattr(
-            bulk_module,
-            "runtime_tool",
-            lambda executable, _pipeline: "/usr/bin/nextflow" if executable == "nextflow" else None,
-        )
-        monkeypatch.setattr(
-            bulk_module,
-            "validate_execution_resources",
-            lambda _manifest, *, analysis_only: None,
-        )
-        adapter.validate_execution(project.manifest)
-        command = adapter.construct_command(project.manifest)
-        manifest_index = command.index("--manifest") + 1
-        assert Path(command[manifest_index]) == saved_manifest
-        assert Path(command[manifest_index]).is_file()
-        plan = adapter.construct_run_plan(project.manifest)
-        assert plan.command_preview[manifest_index] == str(saved_manifest)
+        log_text = routes.get_demo_prepare_job_log(
+            pipeline_identifier, job.job_identifier, offset=0, limit=100_000
+        ).data
+        assert log_text is not None
+        assert "building_index" not in log_text.text.lower()
+        assert "kallisto index" not in log_text.text.lower()
 
 
 def test_stale_non_executable_bulk_fixture_is_prepared_before_project_load(
-    demos: DemoService, kallisto_stub: Path
+    demos: DemoService,
 ) -> None:
-    del kallisto_stub
     first = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True)).data
     assert first is not None
     wait_for_prepare(demos, first.job_identifier)
@@ -224,8 +197,7 @@ def test_stale_non_executable_bulk_fixture_is_prepared_before_project_load(
     BulkRnaSeqAdapter.validate_saved_manifest(project.manifest)
 
 
-def test_status_rejects_tampered_fixture_file(demos: DemoService, kallisto_stub: Path) -> None:
-    del kallisto_stub
+def test_status_rejects_tampered_fixture_file(demos: DemoService) -> None:
     prepared = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True))
     assert prepared.data is not None
     wait_for_prepare(demos, prepared.data.job_identifier)
@@ -247,8 +219,7 @@ def test_unknown_demo_is_not_created(demos: DemoService) -> None:
     assert not (demos.root / "unknown").exists()
 
 
-def test_prepare_job_log_endpoint(demos: DemoService, kallisto_stub: Path) -> None:
-    del kallisto_stub
+def test_prepare_job_log_endpoint(demos: DemoService) -> None:
     prepared = routes.post_demo_prepare("bulk-rnaseq", DemoPrepareRequest(consent=True))
     assert prepared.data is not None
     wait_for_prepare(demos, prepared.data.job_identifier)

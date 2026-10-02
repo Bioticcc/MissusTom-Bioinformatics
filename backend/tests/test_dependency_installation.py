@@ -336,6 +336,8 @@ def test_failed_candidate_does_not_replace_active_prefix(
     root.mkdir(parents=True)
     original = {"environment": "environments/previous/environment"}
     (root / "active.json").write_text(json.dumps(original))
+    previous = root / "environments" / "previous" / "environment"
+    previous.mkdir(parents=True)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
     monkeypatch.setattr(dependencies, "inspect_storage", lambda path: _linux_storage(path))
     monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
@@ -344,16 +346,70 @@ def test_failed_candidate_does_not_replace_active_prefix(
     monkeypatch.setattr(
         installer, "_verify_environment", Mock(side_effect=RuntimeError("unusable"))
     )
+    install_job = job()
 
     with pytest.raises(RuntimeError, match="unusable"):
-        installer._install_environment(job())
+        installer._install_environment(install_job)
     assert json.loads((root / "active.json").read_text()) == original
+    assert previous.is_dir()
+    assert not (root / "environments" / install_job.job_identifier).exists()
+
+
+def test_failed_bulk_candidate_is_removed_without_touching_ont(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    lock = tmp_path / "bulk-rnaseq-linux-64.lock"
+    lock.write_text(
+        "@EXPLICIT\nhttps://example.invalid/linux-64/r-base-4.4.1-h0_0.tar.bz2#deadbeef\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dependencies, "bulk_conda_lock_path", lambda: lock)
+    bulk_root = tmp_path / "dependencies" / "bulk-rnaseq"
+    ont_root = tmp_path / "dependencies" / "ont-analysis"
+    previous = bulk_root / "environments" / "previous" / "environment"
+    ont_env = ont_root / "environments" / "ont-keep" / "environment"
+    previous.mkdir(parents=True)
+    ont_env.mkdir(parents=True)
+    (bulk_root / "active.json").write_text(
+        json.dumps({"environment": "environments/previous/environment"})
+    )
+    (ont_root / "active.json").write_text(
+        json.dumps({"environment": "environments/ont-keep/environment"})
+    )
+    installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
+    monkeypatch.setattr(dependencies, "inspect_storage", lambda path: _linux_storage(path))
+    monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
+
+    def fail_after_prefix(job: DependencyInstallJob, command: list[str], **_: object) -> None:
+        prefix = Path(command[command.index("--prefix") + 1])
+        prefix.mkdir(parents=True)
+        raise RuntimeError("unusable")
+
+    monkeypatch.setattr(installer, "_run", fail_after_prefix)
+    install_job = bulk_job()
+
+    with pytest.raises(RuntimeError, match="unusable"):
+        installer._install_environment(install_job)
+
+    assert not (bulk_root / "environments" / install_job.job_identifier).exists()
+    assert previous.is_dir()
+    assert ont_env.is_dir()
+    assert json.loads((bulk_root / "active.json").read_text())["environment"] == (
+        "environments/previous/environment"
+    )
+    assert json.loads((ont_root / "active.json").read_text())["environment"] == (
+        "environments/ont-keep/environment"
+    )
 
 
 def test_bulk_install_uses_native_r_packages_without_docker_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    lock = tmp_path / "bulk-rnaseq-linux-64.lock"
+    lock.write_text("@EXPLICIT\n", encoding="utf-8")
+    monkeypatch.setattr(dependencies, "bulk_conda_lock_path", lambda: lock)
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
     monkeypatch.setattr(dependencies, "inspect_storage", lambda path: _linux_storage(path))
     monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
@@ -370,13 +426,30 @@ def test_bulk_install_uses_native_r_packages_without_docker_images(
     installer._install_environment(install_job)
 
     create_command = run.call_args.args[1]
-    assert "fastqc=0.12.1" in create_command
-    assert "multiqc=1.33" in create_command
-    assert "cutadapt=5.2" in create_command
-    assert "kallisto=0.52.0" in create_command
-    install_r.assert_called_once()
-    assert install_r.call_args.args[0] is install_job
+    assert "--file" in create_command
+    assert str(lock) in create_command
+    install_r.assert_not_called()
     install_images.assert_not_called()
+
+
+def test_packaged_bulk_lock_is_explicit_complete_and_has_provenance() -> None:
+    lock = dependencies.bulk_conda_lock_path()
+    assert lock.is_file()
+    lines = [
+        line.strip()
+        for line in lock.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert lines[0] == "@EXPLICIT"
+    artifacts = lines[1:]
+    assert len(artifacts) > len(dependencies._BULK_LOCK_PACKAGES)
+    assert all(line.startswith("https://") and "#" in line for line in artifacts)
+    assert all(len(line.rsplit("#", 1)[1]) in {32, 64} for line in artifacts)
+    versions = dependencies._lock_package_versions(lock)
+    assert set(dependencies._BULK_LOCK_PACKAGES) <= versions.keys()
+    provenance = dependencies.bulk_lock_provenance(prefix=lock.parent / "not-installed")
+    digest = provenance["lock_sha256"]
+    assert isinstance(digest, str) and len(digest) == 64
 
 
 def test_bulk_verification_checks_kallisto_and_r_packages(
@@ -390,6 +463,7 @@ def test_bulk_verification_checks_kallisto_and_r_packages(
     installer = dependencies.DependencyInstaller(state_directory=tmp_path / "dependencies")
     run = Mock()
     monkeypatch.setattr(installer, "_run", run)
+    monkeypatch.setattr(installer, "_verify_bulk_lock_versions", Mock())
 
     installer._verify_environment(bulk_job(), prefix)
 

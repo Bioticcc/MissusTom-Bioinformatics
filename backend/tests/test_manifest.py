@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from missus_tom.models.manifest import ProjectManifest
+from missus_tom.models.manifest import BulkReferenceMode, ProjectManifest
 from missus_tom.services.projects import validate_project
 
 
@@ -148,6 +148,29 @@ def test_invalid_pipeline_threshold_is_blocking(manifest_payload: dict[str, Any]
 
     assert result.valid is False
     assert any(check.check_id == "pipeline_parameters" for check in result.checks)
+
+
+def test_build_reference_mode_rejects_kallisto_index_in_manifest(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["schema_version"] = "1.1.0"
+    payload["reference_mode"] = BulkReferenceMode.BUILD.value
+
+    with pytest.raises(ValidationError, match="build reference mode"):
+        ProjectManifest.model_validate(payload)
+
+
+def test_existing_index_mode_requires_annotation_or_mapping(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["schema_version"] = "1.1.0"
+    payload["reference_mode"] = BulkReferenceMode.EXISTING_INDEX.value
+    payload["reference_resources"].pop("annotation_gtf")
+
+    with pytest.raises(ValidationError, match="annotation_gtf or transcript_to_gene"):
+        ProjectManifest.model_validate(payload)
 
 
 def test_analysis_only_uses_kallisto_tables_instead_of_fastqs(

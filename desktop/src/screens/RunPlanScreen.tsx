@@ -43,12 +43,25 @@ export function RunPlanScreen({
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
   const [refreshedPlan, setRefreshedPlan] = useState<RunPlan | null>(null);
   const isOntPipeline = manifest?.pipeline_identifier === "ont-analysis";
+  const includedSamples = manifest?.samples.filter((sample) => sample.included) ?? [];
+  const hasQuantificationReference = manifest?.reference_mode === "build"
+    ? Boolean(
+      manifest.reference_resources.transcriptome_fasta
+      && manifest.reference_resources.annotation_gtf,
+    )
+    : Boolean(manifest?.reference_resources.kallisto_index);
   const canQuantify = Boolean(
     !isOntPipeline
-    && manifest?.reference_resources.kallisto_index
-    && manifest?.samples.filter((sample) => sample.included).every(
+    && includedSamples.length > 0
+    && hasQuantificationReference
+    && includedSamples.every(
       (sample) => sample.r1_files.length > 0 && sample.r1_files.length === sample.r2_files.length,
     ),
+  );
+  const canAnalyze = Boolean(
+    !isOntPipeline
+    && includedSamples.length > 0
+    && includedSamples.every((sample) => Boolean(sample.abundance_tsv)),
   );
 
   useEffect(() => {
@@ -201,23 +214,24 @@ export function RunPlanScreen({
           />
           <span>
             <strong>Quantification + analysis</strong>
-            <small>{canQuantify ? "Run FASTQ quality control, trimming, kallisto quantification, and downstream analysis." : "Unavailable: this project was created from existing Kallisto results and has no FASTQ/index inputs."}</small>
+            <small>{canQuantify ? "Run FASTQ quality control, trimming, Kallisto index preparation or reuse, quantification, and downstream analysis." : "Unavailable: this project needs paired FASTQs plus FASTA/GTF build references or an existing Kallisto index."}</small>
           </span>
         </label>
-        <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}`}>
+        <label className={`run-mode-option${startStage === "analysis" ? " selected" : ""}${canAnalyze ? "" : " disabled"}`}>
           <input
             type="radio"
             name="start-stage"
             checked={startStage === "analysis"}
+            disabled={!canAnalyze}
             onChange={() => setStartStage("analysis")}
           />
           <span>
             <strong>Analysis only</strong>
-            <small>Skip FASTQ processing and use existing kallisto abundance tables from this project.</small>
+            <small>{canAnalyze ? "Skip FASTQ processing and use the selected per-sample Kallisto abundance tables." : "Unavailable: each included sample needs a selected abundance.tsv input."}</small>
           </span>
         </label>
         <p className="run-mode-note">
-          Analysis only requires <code>results/counts/kallisto/&lt;sample_id&gt;/abundance.tsv</code> for every included sample.
+          Analysis only requires a selected <code>abundance.tsv</code> under the project input directory for every included sample.
         </p>
       </fieldset>}
 

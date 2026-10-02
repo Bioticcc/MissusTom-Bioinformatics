@@ -11,6 +11,8 @@ import {
 
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState("");
 
   useEffect(() => {
     if (!isDesktopShell()) return;
@@ -48,8 +50,21 @@ export function TitleBar() {
     event.stopPropagation();
   };
 
+  const close = async () => {
+    if (closing) return;
+    setClosing(true);
+    setCloseError("");
+    try {
+      await closeMainWindow();
+    } catch (reason) {
+      setClosing(false);
+      setCloseError(reason instanceof Error ? reason.message : "Missus Tom could not stop safely.");
+    }
+  };
+
   return (
-    <header className="app-titlebar" role="banner" aria-label="Window title bar">
+    <>
+      <header className="app-titlebar" role="banner" aria-label="Window title bar">
       <div
         className="app-titlebar-drag"
         onMouseDown={drag}
@@ -81,12 +96,22 @@ export function TitleBar() {
           type="button"
           className="app-titlebar-control app-titlebar-control-close"
           aria-label="Close window"
+          disabled={closing}
           onMouseDown={stopDrag}
-          onClick={() => { void closeMainWindow(); }}
+          onClick={() => { void close(); }}
         >
           <span aria-hidden="true">×</span>
         </button>
       </div>
-    </header>
+      </header>
+      {closing && <div className="shutdown-dialog" role="status" aria-live="polite">
+        <strong>Stopping Missus Tom…</strong>
+        <span>Active work is being safely stopped. This window will close automatically.</span>
+      </div>}
+      {closeError && <div className="shutdown-dialog shutdown-dialog-error" role="alert">
+        <strong>Missus Tom is still running</strong>
+        <span>{closeError}</span>
+      </div>}
+    </>
   );
 }

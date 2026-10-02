@@ -10,8 +10,9 @@ import { apiRequest, getBackendStatus } from "./api";
 import { TitleBar } from "./components/TitleBar";
 import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
-import { loadSetupState } from "./setupState";
-import type { ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
+import { loadSetupState, resetSetupState } from "./setupState";
+import type { HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
+import { APP_VERSION, formatBuildLabel } from "./appVersion";
 
 const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
   { id: "dashboard", label: "Dashboard", glyph: "⌂" },
@@ -24,18 +25,39 @@ const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
 ];
 
 export default function App() {
-  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [setupRequired, setSetupRequired] = useState(
+    () => isDesktopShell() && !loadSetupState(window.localStorage).completed,
+  );
+  const [activeView, setActiveView] = useState<ViewId>(() => (
+    isDesktopShell() && !loadSetupState(window.localStorage).completed ? "setup" : "dashboard"
+  ));
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
   const [runPollError, setRunPollError] = useState("");
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const runLifecycleGeneration = useRef(0);
   const runStartPending = useRef(false);
 
   useEffect(() => {
     let live = true;
+    void apiRequest<HealthStatus>("/health")
+      .then((payload) => {
+        if (live) setHealth(payload);
+      })
+      .catch(() => {
+        if (live) setHealth(null);
+      });
+    return () => { live = false; };
+  }, []);
+
+  useEffect(() => {
+    let live = true;
     void getBackendStatus().then((status) => {
-      if (live && status?.packaged && !loadSetupState(window.localStorage).completed) setActiveView("setup");
+      if (live && status?.packaged && !loadSetupState(window.localStorage).completed) {
+        setSetupRequired(true);
+        setActiveView("setup");
+      }
     });
     return () => { live = false; };
   }, []);
@@ -148,7 +170,7 @@ export default function App() {
         </div>
 
         <nav aria-label="Primary navigation">
-          {navigation.map((item) => (
+          {(setupRequired ? navigation.filter((item) => item.id === "setup") : navigation).map((item) => (
             <button
               type="button"
               className={activeView === item.id ? "nav-item active" : "nav-item"}
@@ -165,7 +187,7 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <span className="version-chip">v0.3.0</span>
+          <span className="version-chip">{formatBuildLabel(health?.version ?? APP_VERSION, health?.build_revision)}</span>
           <p>Local bioinformatics workbench</p>
         </div>
         </aside>
@@ -175,7 +197,11 @@ export default function App() {
         {activeView === "dashboard" && (
           <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
         )}
-        {activeView === "setup" && <Setup activeRun={activeRun} isRunActive={Boolean(activeRun)} onContinue={() => setActiveView("dashboard")} />}
+        {activeView === "setup" && <Setup
+          activeRun={activeRun}
+          isRunActive={Boolean(activeRun)}
+          onContinue={() => { setSetupRequired(false); setActiveView("dashboard"); }}
+        />}
         {activeView === "wizard" && <NewProjectWizard onProjectReady={projectReady} />}
         {activeView === "run-plan" && (
           <RunPlanScreen
@@ -188,7 +214,7 @@ export default function App() {
         )}
         {activeView === "jobs" && <Jobs activeRun={activeRun} />}
         {activeView === "results" && <Results activeRun={activeRun} />}
-        {activeView === "settings" && <Settings />}
+        {activeView === "settings" && <Settings onResetSetup={() => { resetSetupState(window.localStorage); setSetupRequired(true); setActiveView("setup"); }} isRunActive={Boolean(activeRun)} />}
         </main>
       </div>
     </div>

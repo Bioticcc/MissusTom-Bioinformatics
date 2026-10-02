@@ -9,10 +9,8 @@ import hashlib
 import io
 import json
 import os
-import selectors
 import shutil
 import stat
-import subprocess
 import threading
 from collections.abc import Sequence
 from contextlib import suppress
@@ -33,12 +31,15 @@ from missus_tom.models.demos import (
     DemoStatus,
 )
 from missus_tom.models.manifest import ProjectManifest
-from missus_tom.services.dependencies import runtime_environment, runtime_tool
-from missus_tom.services.projects import ProjectHistoryStore, save_project
+from missus_tom.services.projects import (
+    ProjectHistoryStore,
+    _write_json_atomic,
+    project_directories,
+)
 
 _CATALOG: Final = {
     "bulk-rnaseq": {
-        "title": "Synthetic human bulk RNA-seq fixture",
+        "title": "Synthetic bulk RNA-seq fixture",
         "note": (
             "Synthetic sequences and references generated locally for functional "
             "workflow validation; not for biological or clinical interpretation."
@@ -53,7 +54,7 @@ _CATALOG: Final = {
     },
 }
 _BUNDLE_MANIFEST = "BUNDLE_MANIFEST.json"
-_FIXTURE_VERSION: Final = "3"
+_FIXTURE_VERSION: Final = "4"
 _LCG_MODULUS: Final = 2_147_483_647
 _LCG_MULTIPLIER: Final = 1_664_525
 _LCG_INCREMENT: Final = 1_013_904_223
@@ -336,15 +337,10 @@ class DemoService:
                 job=job,
             )
 
-        self._set_stage(job, "building_index")
-        index_path = bundle / references / "transcripts.idx"
-        fasta_path = bundle / references / "transcripts.fa"
-        self._build_kallisto_index(job, index_path, fasta_path)
-
         # The runner accepts only the canonical saved-project location.  Write
         # the bundle copy from the same validated manifest after saving it.
         manifest = ProjectManifest.model_validate(self._bulk_manifest(bundle, inputs, references))
-        save_project(
+        self._save_synthetic_bulk_project(
             manifest,
             history_store=ProjectHistoryStore(self.state_directory / "missus_tom.sqlite3"),
         )
@@ -368,6 +364,21 @@ class DemoService:
             ),
         )
         self._finalize_bundle(job.pipeline_identifier, bundle)
+
+    @staticmethod
+    def _save_synthetic_bulk_project(
+        manifest: ProjectManifest,
+        *,
+        history_store: ProjectHistoryStore,
+    ) -> None:
+        """Persist the demo project layout without legacy reference preflight keys."""
+        project_directory = Path(manifest.output_directory)
+        project_directory.mkdir(parents=True, exist_ok=True)
+        for relative in project_directories(manifest):
+            (project_directory / relative).mkdir(parents=True, exist_ok=True)
+        manifest_path = project_directory / "input_manifest" / "project_manifest.json"
+        _write_json_atomic(manifest_path, manifest.model_dump(mode="json"))
+        history_store.record(manifest, manifest_path)
 
     def _prepare_ont(self, job: DemoPrepareJob) -> None:
         bundle = self.root / job.pipeline_identifier
@@ -424,35 +435,39 @@ class DemoService:
 
     def _write_bulk_references(self, references: Path, job: DemoPrepareJob) -> builtins.list[str]:
         transcripts = references / "transcripts.fa"
-        biomart = references / "biomart.tsv"
         gtf = references / "annotation.gtf"
         sequences: builtins.list[str] = []
+        gtf_lines: builtins.list[str] = []
         with transcripts.open("w", encoding="utf-8") as fasta:
-            biomart_lines = ["Gene stable ID version\tGene type\tGene name\n"]
-            gtf_lines: builtins.list[str] = []
             for index in range(_TRANSCRIPT_COUNT):
                 sequence = lcg_sequence(index + 17)
                 sequences.append(sequence)
-                transcript_id = f"ENST900000{index + 1:03d}"
-                gene_id = f"ENSG900000{index + 1:03d}"
+                transcript_id = f"TX{index + 1:06d}"
+                gene_id = f"GN{index + 1:06d}"
                 if index < 12:
                     gene_name = f"SMOKEPC{index + 1}"
                     gene_type = "protein_coding"
+                    transcript_type = "protein_coding"
                 else:
                     gene_name = f"SMOKELNC{index - 11}"
                     gene_type = "lncRNA"
+                    transcript_type = "lncRNA"
                 header = (
                     f">{transcript_id}|{gene_id}|SMOKE|SMOKE|SMOKE|{gene_name}|SMOKE|{gene_type}"
                 )
                 fasta.write(f"{header}\n{sequence}\n")
-                biomart_lines.append(f"{gene_id}\t{gene_type}\t{gene_name}\n")
-                gtf_lines.append(
-                    f"synthetic\tfixture\texon\t1\t{len(sequence)}\t.\t+\t.\t"
-                    f'gene_id "{gene_id}"; transcript_id "{transcript_id}";\n'
+                attributes = (
+                    f'gene_id "{gene_id}"; transcript_id "{transcript_id}"; '
+                    f'gene_name "{gene_name}"; gene_type "{gene_type}"; '
+                    f'transcript_type "{transcript_type}";'
                 )
-            self._write_text(biomart, "".join(biomart_lines))
-            self._write_text(gtf, "".join(gtf_lines))
-        self._log(job, f"Wrote {_TRANSCRIPT_COUNT} synthetic transcripts and reference tables.")
+                end = len(sequence)
+                for feature in ("transcript", "exon"):
+                    gtf_lines.append(
+                        f"synthetic\tfixture\t{feature}\t1\t{end}\t.\t+\t.\t{attributes}\n"
+                    )
+        self._write_text(gtf, "".join(gtf_lines))
+        self._log(job, f"Wrote {_TRANSCRIPT_COUNT} synthetic transcripts and matching GTF.")
         return sequences
 
     def _write_bulk_sample_fastqs(
@@ -479,20 +494,6 @@ class DemoService:
             self._write_bytes(inputs / f"{sample_id}_R{mate}.fastq.gz", buffer.getvalue())
         self._log(job, f"Wrote paired FASTQs for {sample_id}.")
 
-    def _build_kallisto_index(
-        self, job: DemoPrepareJob, index_path: Path, fasta_path: Path
-    ) -> None:
-        executable = runtime_tool("kallisto", "bulk-rnaseq")
-        if executable is None:
-            raise RuntimeError(
-                "kallisto is not installed in the managed bulk-rnaseq environment; "
-                "install pipeline dependencies before preparing the executable demo"
-            )
-        command = [executable, "index", "-i", str(index_path), str(fasta_path)]
-        self._run_subprocess(job, command, env=runtime_environment("bulk-rnaseq"))
-        if not index_path.is_file():
-            raise RuntimeError("kallisto index command did not create the expected index file")
-
     def _bulk_manifest(self, bundle: Path, inputs: str, references: str) -> dict[str, object]:
         samples = [
             self._sample(sample_id, condition, inputs, replicate=replicate)
@@ -503,14 +504,13 @@ class DemoService:
             bundle=bundle,
             input_directory=inputs,
             output_directory="project-output",
-            organism="Homo sapiens",
+            organism="Synthetic organism",
             reference_genome="synthetic-reference",
             annotation_source="synthetic-fixture",
+            reference_mode="build",
             reference_resources={
                 "transcriptome_fasta": f"{references}/transcripts.fa",
                 "annotation_gtf": f"{references}/annotation.gtf",
-                "biomart": f"{references}/biomart.tsv",
-                "kallisto_index": f"{references}/transcripts.idx",
             },
             library_type="synthetic total RNA",
             read_layout="paired-end",
@@ -626,6 +626,7 @@ class DemoService:
         organism: str,
         reference_genome: str,
         annotation_source: str,
+        reference_mode: str | None = None,
         reference_resources: dict[str, str],
         library_type: str,
         read_layout: str,
@@ -649,8 +650,10 @@ class DemoService:
                 normalized[key] = [absolute(str(item)) for item in raw_paths]
             normalized_samples.append(normalized)
         profile = resource_profile or {"cpus": 1, "memory_gb": 1, "max_parallel_tasks": 1}
-        return {
-            "schema_version": "1.0.0",
+        schema_version = "1.1.0" if pipeline_identifier == "bulk-rnaseq" else "1.0.0"
+        pipeline_version = "0.5.0" if pipeline_identifier == "bulk-rnaseq" else "0.1.0"
+        payload: dict[str, object] = {
+            "schema_version": schema_version,
             "project_name": f"Synthetic {pipeline_identifier} demo",
             "project_identifier": str(
                 uuid5(NAMESPACE_URL, f"missus-tom/demo/{pipeline_identifier}/{_FIXTURE_VERSION}")
@@ -659,7 +662,7 @@ class DemoService:
             "input_directory": absolute(input_directory),
             "output_directory": absolute(output_directory),
             "pipeline_identifier": pipeline_identifier,
-            "pipeline_version": "0.4.0" if pipeline_identifier == "bulk-rnaseq" else "0.1.0",
+            "pipeline_version": pipeline_version,
             "organism": organism,
             "reference_genome": reference_genome,
             "annotation_source": annotation_source,
@@ -677,6 +680,9 @@ class DemoService:
             "application_version": "0.1.0",
             "pipeline_status": "draft",
         }
+        if reference_mode is not None:
+            payload["reference_mode"] = reference_mode
+        return payload
 
     def _readme(self, pipeline_identifier: str) -> str:
         if pipeline_identifier == "bulk-rnaseq":
@@ -916,54 +922,6 @@ class DemoService:
             os.write(descriptor, (line + "\n").encode("utf-8", errors="replace"))
         finally:
             os.close(descriptor)
-
-    def _run_subprocess(
-        self,
-        job: DemoPrepareJob,
-        command: builtins.list[str],
-        *,
-        env: dict[str, str] | None = None,
-    ) -> None:
-        self._log(job, "Running: " + " ".join(command))
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,
-            shell=False,
-            env=env,
-            start_new_session=True,
-        )
-        assert process.stdout is not None
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        pending = b""
-        try:
-            while selector.get_map() or process.poll() is None:
-                for key, _ in selector.select(timeout=1):
-                    chunk = os.read(key.fd, 4096)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    pending += chunk
-                    while b"\n" in pending or len(pending) >= 4096:
-                        if b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                        else:
-                            line, pending = pending[:4096], pending[4096:]
-                        decoded = line.decode("utf-8", errors="replace").rstrip()
-                        self._log(job, decoded[:2000])
-            if pending:
-                decoded = pending.decode("utf-8", errors="replace").rstrip()
-                self._log(job, decoded[:2000])
-            return_code = process.wait()
-        except Exception:
-            with suppress(ProcessLookupError):
-                process.kill()
-            process.wait()
-            raise
-        if return_code != 0:
-            raise RuntimeError(f"command failed with exit code {return_code}: {' '.join(command)}")
 
 
 demo_service = DemoService()

@@ -232,13 +232,13 @@ process KALLISTO_QUANT {
     """
 }
 
-process FULL_HUMAN_ANALYSIS {
+process BULK_RNASEQ_ANALYSIS {
     label 'analysis'
     publishDir "${params.outdir}", mode: 'copy', overwrite: true
 
     input:
     tuple val(sample_ids), val(conditions), val(interventions), path(abundance_files, stageAs: 'quantifications/??/*')
-    path biomart
+    path transcript_to_gene
     val comparisons
     val adjusted_p_value
     val absolute_log2_fold_change
@@ -256,7 +256,7 @@ process FULL_HUMAN_ANALYSIS {
     def comparison_rows = comparisons.collect { comparison ->
         "printf '%s\\t%s\\t%s\\t%s\\n' ${shellQuote(comparison.comparison_id)} ${shellQuote(comparison.numerator)} ${shellQuote(comparison.denominator)} ${shellQuote(comparison.intervention ?: '')} >> comparisons.tsv"
     }.join('\n')
-    def biomart_arg = shellQuote(biomart)
+    def mapping_arg = shellQuote(transcript_to_gene)
     """
     printf 'sample_id\tcondition\tintervention\tabundance_tsv\n' > samples.tsv
     ${rows}
@@ -264,7 +264,7 @@ process FULL_HUMAN_ANALYSIS {
     ${comparison_rows}
 
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 RCPP_PARALLEL_NUM_THREADS=1 \
-      full_human_analysis.R samples.tsv ${biomart_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size}
+      bulk_rnaseq_analysis.R samples.tsv ${mapping_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size}
     """
 }
 
@@ -293,11 +293,14 @@ workflow {
     if (!manifest_data.comparisons || manifest_data.comparisons.isEmpty()) {
         error "At least one manifest comparison is required."
     }
+    if (!manifest_data.reference_resources.transcript_to_gene) {
+        error "The manifest must define reference_resources.transcript_to_gene."
+    }
     if (start_stage == 'quantification' && !manifest_data.reference_resources.kallisto_index) {
         error "The manifest must define reference_resources.kallisto_index."
     }
-    if (!manifest_data.reference_resources.biomart) {
-        error "The manifest must define reference_resources.biomart."
+    if (start_stage == 'analysis' && manifest_data.reference_resources.kallisto_index) {
+        log.warn "Analysis-only run: reference_resources.kallisto_index is present but will not be used."
     }
 
     condition_by_sample = included_samples.collectEntries { sample ->
@@ -346,8 +349,8 @@ workflow {
             ? manifest_data.parameters.absolute_log2_fold_change
             : 0.30
     ) as Double
-    biomart = Channel.value(
-        file(manifest_data.reference_resources.biomart as String, checkIfExists: true)
+    transcript_to_gene = Channel.value(
+        file(manifest_data.reference_resources.transcript_to_gene as String, checkIfExists: true)
     )
 
     if (start_stage == 'quantification') {
@@ -387,11 +390,11 @@ workflow {
         quantifications = Channel
             .fromList(included_samples)
             .map { sample ->
-                def abundance_path = sample.abundance_tsv ?: (
-                    "${params.outdir}/counts/kallisto/${sample.sample_id}/abundance.tsv"
-                )
+                if (!sample.abundance_tsv) {
+                    error "Analysis-only sample ${sample.sample_id} must define abundance_tsv."
+                }
                 def abundance_file = file(
-                    abundance_path as String,
+                    sample.abundance_tsv as String,
                     checkIfExists: true
                 )
                 tuple(sample.sample_id as String, abundance_file)
@@ -417,9 +420,9 @@ workflow {
                 ordered.collect { it[3] }
             )
         }
-    FULL_HUMAN_ANALYSIS(
+    BULK_RNASEQ_ANALYSIS(
         analysis_input,
-        biomart,
+        transcript_to_gene,
         manifest_data.comparisons,
         adjusted_p_value,
         absolute_log2_fold_change,

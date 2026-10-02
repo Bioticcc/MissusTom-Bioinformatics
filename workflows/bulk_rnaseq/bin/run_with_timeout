@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Run a foreground command under portable GNU/BusyBox timeout(1).
-# When the wall limit is reached (exit 124 GNU, 143 TERM, 137 KILL), emit a
-# clear message and exit 240 for the bulk RNA-seq Kallisto retry policy.
+# Run a foreground command under a helper-owned wall-clock watchdog.
+# Exit 240 only when this script initiated the timeout TERM/KILL sequence.
 set -o nounset -o pipefail
 
 usage() {
@@ -31,16 +30,86 @@ if [[ $# -lt 1 ]]; then
   usage
 fi
 
-SECONDS=0
+watchdog_marker=$(mktemp)
+watchdog_cancel="${watchdog_marker}.cancel"
+cleanup() {
+  rm -f "$watchdog_marker" "$watchdog_cancel"
+}
+trap cleanup EXIT
+
 set +e
-timeout -s TERM -k "$grace_seconds" "$timeout_seconds" "$@"
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$@" &
+else
+  "$@" &
+fi
+child_pid=$!
+child_pgid=$child_pid
+
+watchdog_main() {
+  local remaining=$timeout_seconds
+  while (( remaining > 0 )); do
+    if [[ -f $watchdog_cancel ]]; then
+      return 0
+    fi
+    sleep 1
+    remaining=$((remaining - 1))
+  done
+  if [[ -f $watchdog_cancel ]]; then
+    return 0
+  fi
+  if kill -0 "$child_pid" 2>/dev/null || kill -0 "-$child_pgid" 2>/dev/null; then
+    echo "1" >"$watchdog_marker"
+    kill -TERM "-$child_pgid" 2>/dev/null || kill -TERM "$child_pid" 2>/dev/null
+    sleep "$grace_seconds"
+    if kill -0 "$child_pid" 2>/dev/null || kill -0 "-$child_pgid" 2>/dev/null; then
+      kill -KILL "-$child_pgid" 2>/dev/null || kill -KILL "$child_pid" 2>/dev/null
+    fi
+  fi
+}
+
+watchdog_main &
+watchdog_pid=$!
+
+finish_external_signal() {
+  local received_signal=$1
+  local signal_status=$2
+  touch "$watchdog_cancel"
+  if kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+  fi
+  kill -"$received_signal" "-$child_pgid" 2>/dev/null || kill -"$received_signal" "$child_pid" 2>/dev/null || true
+  # A non-interactive shell can ignore INT/HUP while waiting for a background
+  # child.  Escalate after a brief delivery window so cancellation cannot leave
+  # the isolated process group behind.
+  sleep 1
+  if kill -0 "-$child_pgid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    kill -TERM "-$child_pgid" 2>/dev/null || kill -TERM "$child_pid" 2>/dev/null || true
+    sleep 1
+  fi
+  if kill -0 "-$child_pgid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+    kill -KILL "-$child_pgid" 2>/dev/null || kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  wait "$child_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  trap - TERM INT HUP
+  exit "$signal_status"
+}
+trap 'finish_external_signal TERM 143' TERM
+trap 'finish_external_signal INT 130' INT
+trap 'finish_external_signal HUP 129' HUP
+
+wait "$child_pid"
 status=$?
-set -e
 
-elapsed=$SECONDS
+touch "$watchdog_cancel"
+if kill -0 "$watchdog_pid" 2>/dev/null; then
+  kill -TERM "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
+fi
 
-if (( elapsed >= timeout_seconds )) && [[ $status -eq 124 || $status -eq 137 || $status -eq 143 ]]; then
-  echo "run_with_timeout: command exceeded ${timeout_seconds}s limit (timeout exit ${status})" >&2
+if [[ -s $watchdog_marker ]]; then
+  echo "run_with_timeout: command exceeded ${timeout_seconds}s limit" >&2
   exit 240
 fi
 
