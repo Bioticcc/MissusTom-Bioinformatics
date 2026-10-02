@@ -48,6 +48,7 @@ export function Dashboard({
   const [preflight, setPreflight] = useState<SystemPreflight | null>(null);
   const [error, setError] = useState("");
   const [backendStatus, setBackendStatus] = useState<BackendStatus | undefined>();
+  const [showBackendDiagnostics, setShowBackendDiagnostics] = useState(false);
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
   const [prepareJob, setPrepareJob] = useState<DemoPrepareJob | null>(null);
@@ -217,11 +218,20 @@ export function Dashboard({
               <h2>Readiness</h2>
             </div>
             <span className={error ? "health-dot offline" : "health-dot"} aria-hidden="true" />
+            {isDesktopShell() && <button className="text-button" type="button" onClick={() => setShowBackendDiagnostics((current) => !current)}>
+              {showBackendDiagnostics ? "Hide backend diagnostics" : "Backend diagnostics"}
+            </button>}
           </div>
+          {showBackendDiagnostics && <div className="diagnostic-details" role="status">
+            <strong>Packaged backend diagnostics</strong>
+            {backendStatus?.startup_log_path && <small>Log file: {backendStatus.startup_log_path}</small>}
+            {backendStatus?.startup_error && <p>{backendStatus.startup_error}</p>}
+            {backendStatus?.startup_log ? <pre>{backendStatus.startup_log}</pre> : <p className="field-help">No startup output is currently available. This log does not include live project-validation progress.</p>}
+          </div>}
           {error ? (
             <>
               <div className="inline-error" role="alert">{error}</div>
-              {backendStatus?.packaged && (backendStatus.startup_error || backendStatus.startup_log) && (
+              {backendStatus?.packaged && (backendStatus.startup_error || backendStatus.startup_log) && !showBackendDiagnostics && (
                 <details className="diagnostic-details">
                   <summary>Backend startup diagnostics</summary>
                   <p>{backendStatus.startup_error}</p>

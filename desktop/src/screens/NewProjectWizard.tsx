@@ -236,6 +236,7 @@ export function NewProjectWizard({
   const [metadataImport, setMetadataImport] = useState<MetadataImportStatus | null>(null);
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [automaticSettings, setAutomaticSettings] = useState<AutomaticSettingsResult | null>(null);
+  const [validationDebug, setValidationDebug] = useState<string[]>([]);
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
@@ -868,6 +869,11 @@ export function NewProjectWizard({
     }
     setBusy("validate");
     setError("");
+    setValidationDebug([
+      `[${new Date().toLocaleTimeString()}] Preparing manifest for local backend validation.`,
+      `[${new Date().toLocaleTimeString()}] Sending POST /api/v1/projects/validate.`,
+      `[${new Date().toLocaleTimeString()}] Waiting for backend checks; this terminal will remain visible while validation runs.`,
+    ]);
     try {
       const result = await apiRequest<ProjectValidation>("/api/v1/projects/validate", {
         method: "POST",
@@ -878,6 +884,7 @@ export function NewProjectWizard({
       });
       setValidation(result);
       setValidatedManifest(result.valid ? result.manifest : null);
+      setValidationDebug((current) => [...current, `[${new Date().toLocaleTimeString()}] Backend returned ${result.checks.length} project checks.`]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Project validation failed");
     } finally {
@@ -1202,6 +1209,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
+            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation debug terminal</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}{busy === "validate" ? "\n[still running]" : ""}</pre></div>}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );
@@ -1264,6 +1272,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
+            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation debug terminal</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}{busy === "validate" ? "\n[still running]" : ""}</pre></div>}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );

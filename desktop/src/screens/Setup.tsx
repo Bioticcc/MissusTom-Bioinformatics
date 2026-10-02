@@ -293,6 +293,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     <header className="page-header"><div><p className="eyebrow">Local environment</p><h1>Setup</h1><p className="lede">Choose the pipelines and local actions to prepare. Nothing installs until you explicitly start setup.</p></div></header>
     <section className="development-banner setup-sequence-note"><span className="notice-icon" aria-hidden="true">i</span><div><strong>Machine-local synthetic fixtures</strong><p>Bulk RNA-seq synthetic fixtures support local setup checks and controlled execution when your environment is ready. ONT synthetic fixtures remain setup-only and do not execute a pipeline. Managed dependency installations run strictly one at a time; biological data is not uploaded.</p><p className="field-help">After setup, additional pipeline requirements can be installed from the Local setup section in Step 1 of a new project.</p></div></section>
     {error && <div className="inline-error" role="alert">{error}</div>}
+    {working && !liveJob && <pre className="debug-terminal" aria-label="Setup debug terminal">Starting setup and waiting for the backend job…</pre>}
     {liveJob && liveLogFetch && <LiveCommandLog
       title={liveJob.kind === "fixtures" ? `${liveJob.pipeline} fixture preparation` : `${liveJob.pipeline} dependency installation`}
       resetKey={`${liveJob.kind}-${liveJob.jobIdentifier}`}

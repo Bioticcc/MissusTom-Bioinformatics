@@ -986,6 +986,28 @@ h4 {
   margin-top: 0.75rem;
 }
 
+.debug-terminal,
+.validation-debug-terminal pre {
+  margin: 0.75rem 0 0;
+  border: 1px solid #26443f;
+  border-radius: 8px;
+  padding: 0.75rem;
+  color: #d9f4e8;
+  background: #132522;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.debug-terminal-heading {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .live-command-log-meta {
   display: flex;
   flex-wrap: wrap;

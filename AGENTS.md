@@ -18,15 +18,15 @@
   git diff --cached --check
   git status
 
-  
+
   git commit -m "Backend diagnostic log"
   git push -u origin feature/production-bulk-rnaseq
 
 
   ``` bash ``` (Only after CI gives green, increment rc.## and run.)
   git fetch origin --tags
-  git tag -a v0.3.0-rc.17 -m "Release v0.3.0-rc.17"
-  git push origin v0.3.0-rc.17
+  git tag -a v0.3.0-rc.22 -m "Release v0.3.0-rc.22"
+  git push origin v0.3.0-rc.22
 
 
 
