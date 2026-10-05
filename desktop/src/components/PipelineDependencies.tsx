@@ -1,22 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { LiveCommandLog } from "./LiveCommandLog";
-import { setDependencyInstallActive } from "../native";
-import type { CommandLogChunk, PipelineDependencies } from "../types";
+import type { CommandLogChunk, DependencyJobStatus, PipelineDependencies } from "../types";
 
 const POLL_INTERVAL_MS = 5_000;
-const dependencyBusy = new Map<string, boolean>();
-
-function setPipelineDependencyBusy(pipelineIdentifier: string, active: boolean): void {
-  dependencyBusy.set(pipelineIdentifier, active);
-  void setDependencyInstallActive([...dependencyBusy.values()].some(Boolean)).catch(() => {
-    // Desktop lifecycle reporting is best-effort; status polling remains authoritative.
-  });
-}
-
-function reportDependencyBusy(pipelineIdentifier: string, result: PipelineDependencies): void {
-  setPipelineDependencyBusy(pipelineIdentifier, result.job?.status === "running");
-}
 
 export function PipelineDependencies({
   pipelineIdentifier,
@@ -29,7 +16,6 @@ export function PipelineDependencies({
   const [job, setJob] = useState<PipelineDependencies["job"]>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
-  const [statusRefreshPending, setStatusRefreshPending] = useState(false);
   const [error, setError] = useState("");
   const generationRef = useRef(0);
   const requestRef = useRef(0);
@@ -39,15 +25,18 @@ export function PipelineDependencies({
   const refresh = useCallback(async (signal: AbortSignal) => apiRequest<PipelineDependencies>(
       `/api/v1/pipelines/${pipelineIdentifier}/dependencies`,
       { signal },
+      { requestKind: "long" },
     ), [pipelineIdentifier]);
+  const refreshJobStatus = useCallback(async (signal: AbortSignal) => apiRequest<DependencyJobStatus>(
+    "/api/v1/dependencies/jobs/active", { signal }, { requestKind: "short" },
+  ), []);
 
   const applyStatus = useCallback((result: PipelineDependencies, generation: number, request: number) => {
     if (generation !== generationRef.current || request !== requestRef.current) return false;
     setDependencies(result);
     setJob(result.job);
-    reportDependencyBusy(pipelineIdentifier, result);
     return true;
-  }, [pipelineIdentifier]);
+  }, []);
 
   useEffect(() => {
     lifecycleControllerRef.current?.abort();
@@ -59,7 +48,6 @@ export function PipelineDependencies({
     requestRef.current = request;
     setDependencies(null);
     setJob(null);
-    setStatusRefreshPending(false);
     setError("");
     setLoading(true);
     void refresh(controller.signal)
@@ -78,7 +66,7 @@ export function PipelineDependencies({
   }, [applyStatus, refresh]);
 
   useEffect(() => {
-    if (job?.status !== "running" || statusRefreshPending) return;
+    if (job?.status !== "running") return;
     const lifecycleController = lifecycleControllerRef.current;
     if (!lifecycleController) return;
     const controller = new AbortController();
@@ -94,15 +82,29 @@ export function PipelineDependencies({
       const request = requestRef.current + 1;
       requestRef.current = request;
       try {
-        const result = await refresh(controller.signal);
-        if (!applyStatus(result, generation, request)) return;
-        if (result.job?.status === "succeeded" && notifiedJobRef.current !== result.job.job_identifier) {
-          notifiedJobRef.current = result.job.job_identifier;
+        const status = await refreshJobStatus(controller.signal);
+        const result = status.jobs.find((candidate) => candidate.pipeline_identifier === pipelineIdentifier) ?? null;
+        if (generation !== generationRef.current || request !== requestRef.current) return;
+        if (!result) {
+          const requirements = await refresh(controller.signal);
+          if (generation !== generationRef.current || request !== requestRef.current) return;
+          applyStatus(requirements, generation, request);
+          if (requirements.job?.status === "succeeded" && notifiedJobRef.current !== requirements.job.job_identifier) {
+            notifiedJobRef.current = requirements.job.job_identifier;
+            void Promise.resolve(onInstalled?.()).catch((reason: unknown) => {
+              if (!controller.signal.aborted && generation === generationRef.current) setError(reason instanceof Error ? reason.message : "The run plan could not be refreshed.");
+            });
+          }
+          return;
+        }
+        setJob(result);
+        if (result.status === "succeeded" && notifiedJobRef.current !== result.job_identifier) {
+          notifiedJobRef.current = result.job_identifier;
           void Promise.resolve(onInstalled?.()).catch((reason: unknown) => {
             if (!controller.signal.aborted && generation === generationRef.current) setError(reason instanceof Error ? reason.message : "The run plan could not be refreshed.");
           });
         }
-        if (!controller.signal.aborted && generation === generationRef.current && result.job?.status === "running") timeout = window.setTimeout(poll, POLL_INTERVAL_MS);
+        if (!controller.signal.aborted && generation === generationRef.current && result.status === "running") timeout = window.setTimeout(poll, POLL_INTERVAL_MS);
       } catch (reason) {
         if (!controller.signal.aborted && generation === generationRef.current && request === requestRef.current) {
           setError(reason instanceof Error ? reason.message : "Installation status could not be refreshed.");
@@ -118,7 +120,7 @@ export function PipelineDependencies({
       lifecycleController.signal.removeEventListener("abort", abortFromLifecycle);
       if (timeout !== undefined) window.clearTimeout(timeout);
     };
-  }, [applyStatus, job?.status, onInstalled, refresh, statusRefreshPending]);
+  }, [applyStatus, job?.status, onInstalled, pipelineIdentifier, refresh, refreshJobStatus]);
 
   const requestRefresh = async () => {
     const controller = lifecycleControllerRef.current;
@@ -146,7 +148,6 @@ export function PipelineDependencies({
     requestRef.current = request;
     setInstalling(true);
     setError("");
-    setPipelineDependencyBusy(pipelineIdentifier, true);
     try {
       const result = await apiRequest<NonNullable<PipelineDependencies["job"]>>(
         `/api/v1/pipelines/${pipelineIdentifier}/dependencies/install`,
@@ -160,22 +161,6 @@ export function PipelineDependencies({
           if (!controller.signal.aborted && generation === generationRef.current) setError(callbackError instanceof Error ? callbackError.message : "The run plan could not be refreshed.");
         });
       }
-      setStatusRefreshPending(true);
-      const refreshRequest = requestRef.current + 1;
-      requestRef.current = refreshRequest;
-      void refresh(controller.signal).then((status) => {
-        if (!applyStatus(status, generation, refreshRequest)) return;
-        if (status.job?.status === "succeeded" && notifiedJobRef.current !== status.job.job_identifier) {
-          notifiedJobRef.current = status.job.job_identifier;
-          void Promise.resolve(onInstalled?.()).catch((callbackError: unknown) => {
-            if (!controller.signal.aborted && generation === generationRef.current) setError(callbackError instanceof Error ? callbackError.message : "The run plan could not be refreshed.");
-          });
-        }
-      }).catch((refreshError: unknown) => {
-        if (!controller.signal.aborted && generation === generationRef.current && refreshRequest === requestRef.current) setError(refreshError instanceof Error ? refreshError.message : "Installation status could not be refreshed.");
-      }).finally(() => {
-        if (!controller.signal.aborted && generation === generationRef.current && refreshRequest === requestRef.current) setStatusRefreshPending(false);
-      });
     } catch (reason) {
       if (!controller.signal.aborted && generation === generationRef.current && request === requestRef.current) setError(reason instanceof Error ? reason.message : "Required packages could not be installed.");
     } finally {

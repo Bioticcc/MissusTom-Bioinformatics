@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sqlite3
 from collections.abc import AsyncIterator
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from missus_tom.models.demos import DemoPrepareJob, DemoPrepareRequest, DemoStat
 from missus_tom.models.dependencies import (
     DependencyInstallJob,
     DependencyInstallRequest,
+    DependencyJobStatus,
     DependencyStatus,
 )
 from missus_tom.models.directories import DirectoryPreview, DirectoryPreviewRequest
@@ -54,10 +55,13 @@ from missus_tom.services.dependencies import dependency_installer
 from missus_tom.services.directories import preview_directory
 from missus_tom.services.fastq import discover_fastqs
 from missus_tom.services.metadata import read_metadata_csv
+from missus_tom.services.observability import backend_observability
 from missus_tom.services.preflight import system_preflight
 from missus_tom.services.projects import (
     ProjectHistoryStore,
     open_project,
+    recent_validation,
+    remember_validation,
     save_project,
     validate_project,
 )
@@ -79,6 +83,28 @@ def _adapter_for(manifest: ProjectManifest) -> PipelineAdapter:
 
 @router.get("/health", response_model=ApiResponse[dict[str, Any]])
 def health() -> ApiResponse[dict[str, Any]]:
+    dependency_jobs = dependency_installer.active_jobs()
+    validation = backend_observability.snapshot()["active_operations"]
+    active_runs = [
+        run
+        for run in run_manager.list_runs()
+        if run.status.value in {"queued", "preparing", "running", "cancelling"}
+    ]
+    active_operations = [
+        *validation,
+        *[
+            {"operation": f"dependency installation: {job.pipeline_identifier}"}
+            for job in dependency_jobs
+        ],
+        *[
+            {
+                "operation": (
+                    f"workflow: {run.pipeline_identifier} {run.current_stage or run.status.value}"
+                )
+            }
+            for run in active_runs
+        ],
+    ]
     return ApiResponse(
         data={
             "name": settings.app_name,
@@ -89,6 +115,39 @@ def health() -> ApiResponse[dict[str, Any]]:
             "manifest_schema_versions": list(settings.manifest_schema_versions),
             "bulk_pipeline_versions": list(settings.bulk_pipeline_versions),
             "capabilities": settings.capabilities,
+            "activity": {
+                "state": "busy" if active_operations else "idle",
+                "operation": active_operations[0]["operation"] if active_operations else None,
+            },
+        }
+    )
+
+
+@router.get(f"{settings.api_prefix}/diagnostics", response_model=ApiResponse[dict[str, Any]])
+def get_backend_diagnostics() -> ApiResponse[dict[str, Any]]:
+    """Operator-facing local state, deliberately excluding project input paths."""
+    active_runs = [
+        {
+            "job_identifier": run.job_identifier,
+            "pipeline_identifier": run.pipeline_identifier,
+            "status": run.status,
+            "current_stage": run.current_stage,
+        }
+        for run in run_manager.list_runs()
+        if run.status.value in {"queued", "preparing", "running", "cancelling"}
+    ]
+    return ApiResponse(
+        data={
+            "process_id": os.getpid(),
+            "base_url": f"http://{settings.api_host}:{settings.api_port}",
+            "version": settings.app_version,
+            "build_revision": settings.build_revision,
+            "health": "ready",
+            "dependency_install_jobs": [
+                job.model_dump(mode="json") for job in dependency_installer.active_jobs()
+            ],
+            "active_workflow_runs": active_runs,
+            **backend_observability.snapshot(),
         }
     )
 
@@ -169,16 +228,27 @@ def post_directory_preview(
 def post_project_validate(
     manifest: ProjectManifest,
 ) -> ApiResponse[ProjectValidationResult]:
-    return ApiResponse(data=validate_project(manifest, adapter=_adapter_for(manifest)))
+    result = validate_project(manifest, adapter=_adapter_for(manifest))
+    remember_validation(result)
+    return ApiResponse(data=result)
 
 
 @router.post(f"{settings.api_prefix}/projects/validate/stream")
 def post_project_validate_stream(manifest: ProjectManifest) -> StreamingResponse:
     adapter = _adapter_for(manifest)
 
+    def validate_and_remember() -> ProjectValidationResult:
+        result = validate_project(manifest, adapter=adapter)
+        remember_validation(result)
+        return result
+
     async def stream() -> AsyncIterator[str]:
-        async for event in validation_events(partial(validate_project, manifest, adapter=adapter)):
-            yield json.dumps(event) + "\n"
+        token = backend_observability.begin_operation("project validation")
+        try:
+            async for event in validation_events(validate_and_remember):
+                yield json.dumps(event) + "\n"
+        finally:
+            backend_observability.finish_operation(token)
 
     return StreamingResponse(
         stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
@@ -222,7 +292,11 @@ def post_project_open(request: ProjectOpenRequest) -> ApiResponse[ProjectOpenRes
 )
 def post_project_save(manifest: ProjectManifest) -> ApiResponse[ProjectSaveResult]:
     try:
-        result = save_project(manifest, adapter=_adapter_for(manifest))
+        validation = recent_validation(manifest) or validate_project(
+            manifest, adapter=_adapter_for(manifest)
+        )
+        result = save_project(manifest, validation=validation)
+        remember_validation(validation)
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ApiResponse(data=result)
@@ -231,7 +305,8 @@ def post_project_save(manifest: ProjectManifest) -> ApiResponse[ProjectSaveResul
 @router.post(f"{settings.api_prefix}/runs/plan", response_model=ApiResponse[RunPlan])
 def post_run_plan(request: RunPlanRequest) -> ApiResponse[RunPlan]:
     adapter = _adapter_for(request.manifest)
-    checks = adapter.validate_project(request.manifest)
+    validation = recent_validation(request.manifest)
+    checks = validation.checks if validation else adapter.validate_project(request.manifest)
     blocking = [check.message for check in checks if check.status.value == "blocking_failure"]
     if blocking:
         raise HTTPException(
@@ -472,6 +547,16 @@ def get_pipeline_dependencies(pipeline_identifier: str) -> ApiResponse[Dependenc
         return ApiResponse(data=dependency_installer.status(pipeline_identifier))
     except ValueError as exc:
         raise ApiCodedError(404, UNSUPPORTED_PIPELINE, str(exc)) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/dependencies/jobs/active",
+    response_model=ApiResponse[DependencyJobStatus],
+)
+def get_active_dependency_jobs() -> ApiResponse[DependencyJobStatus]:
+    """Lifecycle polling endpoint. Never call dependency verification here."""
+    jobs = dependency_installer.active_jobs()
+    return ApiResponse(data=DependencyJobStatus(active=bool(jobs), jobs=jobs))
 
 
 @router.post(

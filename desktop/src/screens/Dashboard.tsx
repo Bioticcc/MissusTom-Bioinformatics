@@ -5,6 +5,7 @@ import { LiveCommandLog } from "../components/LiveCommandLog";
 import { isDesktopShell, selectFiles } from "../native";
 import type {
   CommandLogChunk,
+  BackendDiagnostics,
   DemoPrepareJob,
   DemoStatus,
   HumanDemoProject,
@@ -48,6 +49,7 @@ export function Dashboard({
   const [preflight, setPreflight] = useState<SystemPreflight | null>(null);
   const [error, setError] = useState("");
   const [backendStatus, setBackendStatus] = useState<BackendStatus | undefined>();
+  const [diagnostics, setDiagnostics] = useState<BackendDiagnostics | null>(null);
   const [showBackendDiagnostics, setShowBackendDiagnostics] = useState(false);
   const [demoError, setDemoError] = useState("");
   const [loadingDemo, setLoadingDemo] = useState(false);
@@ -88,6 +90,29 @@ export function Dashboard({
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!showBackendDiagnostics) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const result = await apiRequest<BackendDiagnostics>(
+          "/api/v1/diagnostics", { signal: controller.signal }, { requestKind: "short" },
+        );
+        if (!controller.signal.aborted) setDiagnostics(result);
+      } catch {
+        // Keep the previous snapshot alongside the host startup information.
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(() => void refresh(), 2_000);
+      }
+    };
+    void refresh();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [showBackendDiagnostics]);
 
   useEffect(() => () => {
     demoControllerRef.current?.abort();
@@ -227,6 +252,12 @@ export function Dashboard({
             {backendStatus?.startup_log_path && <small>Log file: {backendStatus.startup_log_path}</small>}
             {backendStatus?.startup_error && <p>{backendStatus.startup_error}</p>}
             {backendStatus?.startup_log ? <pre>{backendStatus.startup_log}</pre> : <p className="field-help">No startup output is currently available. This log does not include live project-validation progress.</p>}
+            {diagnostics && <>
+              <p><strong>Backend:</strong> PID {diagnostics.process_id} · {diagnostics.base_url} · {diagnostics.health}</p>
+              <p><strong>Last health response:</strong> {diagnostics.last_successful_health_response ? new Date(diagnostics.last_successful_health_response).toLocaleString() : "not yet recorded"}</p>
+              <p><strong>Active work:</strong> {diagnostics.active_operations.map((operation) => operation.operation).join(", ") || diagnostics.dependency_install_jobs.map((job) => `dependency installation: ${job.pipeline_identifier}`).join(", ") || "none"}</p>
+              {diagnostics.slow_requests.length > 0 && <details><summary>Recent slow backend requests</summary><ul>{diagnostics.slow_requests.map((request) => <li key={`${request.path}-${request.completed_at}`}>{request.path} · {request.duration_ms} ms · HTTP {request.status_code}</li>)}</ul></details>}
+            </>}
           </div>}
           {error ? (
             <>

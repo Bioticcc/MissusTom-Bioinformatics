@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiRequest, setupInstallConflictMessage } from "../api";
 import { LiveCommandLog } from "../components/LiveCommandLog";
-import { setDependencyInstallActive } from "../native";
-import type { CommandLogChunk, DemoPrepareJob, DemoStatus, PipelineDependencies, RunRecord } from "../types";
+import type { CommandLogChunk, DependencyJobStatus, DemoPrepareJob, DemoStatus, PipelineDependencies, RunRecord } from "../types";
 import {
   areRequestedActionsComplete,
   loadSetupState,
@@ -54,10 +53,12 @@ async function pollDemoJob(pipeline: SetupPipelineIdentifier, jobIdentifier: str
   throw new DOMException("Setup cancelled", "AbortError");
 }
 
-async function pollInstall(pipeline: SetupPipelineIdentifier, controller: AbortSignal): Promise<PipelineDependencies> {
+async function pollInstall(pipeline: SetupPipelineIdentifier, controller: AbortSignal): Promise<void> {
   while (!controller.aborted) {
-    const status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller });
-    if (status.job?.status !== "running") return status;
+    const status = await apiRequest<DependencyJobStatus>(
+      "/api/v1/dependencies/jobs/active", { signal: controller }, { requestKind: "short" },
+    );
+    if (!status.jobs.some((job) => job.pipeline_identifier === pipeline)) return;
     await new Promise<void>((resolve, reject) => {
       const timer = window.setTimeout(resolve, POLL_INTERVAL_MS);
       controller.addEventListener("abort", () => {
@@ -102,26 +103,28 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     };
     const restore = async () => {
       await Promise.all(setupPipelines.map(async (pipeline) => {
-        const [dependencyResult, demoResult] = await Promise.allSettled([
-          apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }),
+        const demoResult = await Promise.allSettled([
           apiRequest<DemoStatus>(`/api/v1/demos/${pipeline}/status`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted) return;
-        if (dependencyResult.status === "fulfilled" && dependencyResult.value.job) {
-          const job = dependencyResult.value.job;
-          consider({
-            kind: "dependencies", pipeline, jobIdentifier: job.job_identifier, status: job.status,
-            stage: job.current_stage || null, startedAt: job.started_at, lastOutputAt: job.last_output_at,
-          });
-        }
-        if (demoResult.status === "fulfilled" && demoResult.value.job) {
-          const job = demoResult.value.job;
+        if (demoResult[0].status === "fulfilled" && demoResult[0].value.job) {
+          const job = demoResult[0].value.job;
           consider({
             kind: "fixtures", pipeline, jobIdentifier: job.job_identifier, status: job.status,
             stage: job.current_stage || null, startedAt: job.started_at, lastOutputAt: job.last_output_at,
           });
         }
       }));
+      const dependencyJobs = await apiRequest<DependencyJobStatus>(
+        "/api/v1/dependencies/jobs/active", { signal: controller.signal }, { requestKind: "short" },
+      ).catch(() => null);
+      for (const job of dependencyJobs?.jobs ?? []) {
+        consider({
+          kind: "dependencies", pipeline: job.pipeline_identifier as SetupPipelineIdentifier,
+          jobIdentifier: job.job_identifier, status: job.status, stage: job.current_stage || null,
+          startedAt: job.started_at, lastOutputAt: job.last_output_at,
+        });
+      }
       if (!controller.signal.aborted && restored) setLiveJob(restored);
     };
     void restore();
@@ -145,8 +148,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
     return next;
   };
 
-  const syncDependencyLiveJob = (pipeline: SetupPipelineIdentifier, status: PipelineDependencies) => {
-    const job = status.job;
+  const syncDependencyLiveJob = (pipeline: SetupPipelineIdentifier, job: PipelineDependencies["job"]) => {
     if (!job) {
       setLiveJob(null);
       return;
@@ -222,7 +224,11 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
           continue;
         }
         try {
-          let status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal });
+          let status = await apiRequest<PipelineDependencies>(
+            `/api/v1/pipelines/${pipeline}/dependencies`,
+            { signal: controller.signal },
+            { requestKind: "long" },
+          );
           if (status.missing.length === 0) {
             current = record(current, pipeline, "dependencies", "skipped", "All required dependencies are already available.");
             continue;
@@ -232,24 +238,22 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
             continue;
           }
           if (status.job?.status === "running") {
-            syncDependencyLiveJob(pipeline, status);
-            await setDependencyInstallActive(true).catch(() => undefined);
-            status = await pollInstall(pipeline, controller.signal);
-            await setDependencyInstallActive(false).catch(() => undefined);
+            syncDependencyLiveJob(pipeline, status.job);
+            await pollInstall(pipeline, controller.signal);
+            status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
           }
           if (status.missing.length === 0 || status.job?.status === "succeeded") {
             current = record(current, pipeline, "dependencies", "complete", status.job?.message ?? "Dependencies are ready.");
             continue;
           }
-          await setDependencyInstallActive(true).catch(() => undefined);
           const installJob = await apiRequest<NonNullable<PipelineDependencies["job"]>>(
             `/api/v1/pipelines/${pipeline}/dependencies/install`,
             { method: "POST", body: JSON.stringify({ consent: true }), signal: controller.signal },
           );
-          syncDependencyLiveJob(pipeline, { ...status, job: installJob });
-          status = await pollInstall(pipeline, controller.signal);
-          await setDependencyInstallActive(false).catch(() => undefined);
-          syncDependencyLiveJob(pipeline, status);
+          syncDependencyLiveJob(pipeline, installJob);
+          await pollInstall(pipeline, controller.signal);
+          status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
+          syncDependencyLiveJob(pipeline, status.job);
           current = status.job?.status === "succeeded"
             ? record(current, pipeline, "dependencies", "complete", status.job.message)
             : record(current, pipeline, "dependencies", "failed", status.job?.message ?? "Installation did not complete.");

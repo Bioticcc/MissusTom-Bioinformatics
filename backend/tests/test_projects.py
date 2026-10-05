@@ -14,7 +14,14 @@ from httpx import ASGITransport, AsyncClient
 from missus_tom.api import routes
 from missus_tom.main import app
 from missus_tom.models.manifest import ProjectManifest
-from missus_tom.services.projects import ProjectHistoryStore, open_project, save_project
+from missus_tom.services.projects import (
+    ProjectHistoryStore,
+    open_project,
+    recent_validation,
+    remember_validation,
+    save_project,
+    validate_project,
+)
 
 
 def test_history_lists_saved_projects_and_missing_files(
@@ -91,6 +98,19 @@ def test_save_does_not_change_active_project_manifest(
         os.close(descriptor)
     save_project(manifest, history_store=store)
     assert path.read_bytes() != before
+
+
+def test_recent_validation_rejects_changed_manifest_inputs(
+    manifest_payload: dict[str, Any],
+) -> None:
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    remember_validation(validate_project(manifest))
+    assert recent_validation(manifest) is not None
+
+    input_path = Path(manifest.samples[0].r1_files[0])
+    input_path.write_text("changed", encoding="utf-8")
+
+    assert recent_validation(manifest) is None
 
 
 def test_save_rejects_symlinked_project_directories(

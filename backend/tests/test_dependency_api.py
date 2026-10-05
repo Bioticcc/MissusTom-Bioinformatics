@@ -52,6 +52,9 @@ class _Installer:
             message="Preparing local environment",
         )
 
+    def active_jobs(self) -> list[DependencyInstallJob]:
+        return []
+
 
 @pytest.fixture
 def dependency_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,6 +97,31 @@ async def test_dependency_unknown_pipeline_is_404(
     body = response.json()
     assert body["success"] is False
     assert body["errors"][0]["code"] == "unsupported_pipeline"
+
+
+async def test_active_dependency_jobs_is_cheap_and_never_verifies_dependencies(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CheapInstaller:
+        def active_jobs(self) -> list[DependencyInstallJob]:
+            return [
+                DependencyInstallJob(
+                    job_identifier="00000000-0000-0000-0000-000000000999",
+                    pipeline_identifier="bulk-rnaseq",
+                    status=DependencyInstallStatus.RUNNING,
+                    message="Installing",
+                )
+            ]
+
+        def status(self, _pipeline_identifier: str) -> DependencyStatus:
+            raise AssertionError("lifecycle polling must not perform a dependency probe")
+
+    monkeypatch.setattr(routes, "dependency_installer", _CheapInstaller())
+    response = await client.get("/api/v1/dependencies/jobs/active")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["active"] is True
+    assert response.json()["data"]["jobs"][0]["pipeline_identifier"] == "bulk-rnaseq"
 
 
 async def test_dependency_install_conflict_uses_typed_code(

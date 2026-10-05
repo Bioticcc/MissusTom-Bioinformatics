@@ -71,7 +71,14 @@ async def validation_events(
     task = asyncio.create_task(asyncio.to_thread(run))
     try:
         while True:
-            event = await events.get()
+            try:
+                event = await asyncio.wait_for(events.get(), timeout=30)
+            except TimeoutError:
+                # Individual filesystem/reference checks can legitimately take
+                # minutes. A heartbeat preserves the streaming connection and
+                # tells the operator that the backend worker still exists.
+                yield {"type": "progress", "message": "Validation is still running…"}
+                continue
             yield event
             if event["type"] in {"result", "error"}:
                 break

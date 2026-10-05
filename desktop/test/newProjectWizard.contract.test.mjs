@@ -153,6 +153,11 @@ test("wizard UI encodes production bulk controls", () => {
   assert.match(wizardSource, /backendBlocksProjectActions/);
   assert.match(wizardSource, /disabled=\{backendBlocksProjectActions && index > step\}/);
   assert.match(wizardSource, /!isOntPipeline && healthReady && !bulkCompatError/);
+  assert.match(wizardSource, /Backend busy/);
+  assert.doesNotMatch(wizardSource, /Compatible Bulk backend connected/);
+  assert.match(wizardSource, /Jump to latest/);
+  assert.match(wizardSource, /validationFollow/);
+  assert.match(wizardSource, /busy === "plan"/);
 });
 
 test("project preflight uses an operation-specific timeout and keeps timeout errors distinct", () => {

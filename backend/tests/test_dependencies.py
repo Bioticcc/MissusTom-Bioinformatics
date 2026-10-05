@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -47,6 +48,48 @@ def test_status_reports_missing_requirements_without_marker_trust(tmp_path, monk
     assert status.installable is True
     assert status.manual_requirements == []
     assert "data.table" in ONT_R_PACKAGES
+
+
+def test_requirement_probe_is_cached_deduplicated_and_invalidated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = DependencyInstaller(state_directory=tmp_path / "dependencies")
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def requirement(name: str, _pipeline: str, _managed: bool) -> DependencyRequirement:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        entered.set()
+        release.wait(timeout=2)
+        return DependencyRequirement(name=name, installed=True, detail="ok")
+
+    monkeypatch.setattr(installer, "_tool_requirement", requirement)
+    monkeypatch.setattr(
+        installer,
+        "_r_requirement",
+        lambda _pipeline, _managed, _packages, name: DependencyRequirement(
+            name=name, installed=True, detail="ok"
+        ),
+    )
+    first = threading.Thread(target=installer._requirements, args=("bulk-rnaseq",))
+    second = threading.Thread(target=installer._requirements, args=("bulk-rnaseq",))
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert calls == len(dependencies._TOOL_CATALOG["bulk-rnaseq"])
+    installer._requirements("bulk-rnaseq")
+    assert calls == len(dependencies._TOOL_CATALOG["bulk-rnaseq"])
+    installer._invalidate_probe("bulk-rnaseq")
+    installer._requirements("bulk-rnaseq")
+    assert calls == 2 * len(dependencies._TOOL_CATALOG["bulk-rnaseq"])
 
 
 def test_ont_installation_status_is_available_with_pinned_dorado_digest(

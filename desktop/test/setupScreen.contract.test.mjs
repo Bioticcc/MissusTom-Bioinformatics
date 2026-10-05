@@ -21,6 +21,8 @@ test("setup restores completed and running debug jobs", () => {
   assert.match(setupSource, /fixtures/);
   assert.match(setupSource, /setLiveJob\(restored\)/);
   assert.match(setupSource, /Local setup section in Step 1/);
+  assert.match(setupSource, /dependencies\/jobs\/active/);
+  assert.doesNotMatch(setupSource, /setDependencyInstallActive/);
 });
 
 test("setup and validation expose debug terminals while work is active", () => {

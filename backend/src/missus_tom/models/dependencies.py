@@ -43,6 +43,13 @@ class DependencyStatus(BaseModel):
     job: DependencyInstallJob | None = None
 
 
+class DependencyJobStatus(BaseModel):
+    """Cheap lifecycle state; it must not trigger runtime verification."""
+
+    active: bool = False
+    jobs: list[DependencyInstallJob] = Field(default_factory=list)
+
+
 class DependencyInstallRequest(BaseModel):
     """Explicit acknowledgement prevents a cross-site simple POST from installing tools."""
 

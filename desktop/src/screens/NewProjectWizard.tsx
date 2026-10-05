@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, bulkProductionBackendError, streamProjectValidation } from "../api";
 import { inferAutomaticSettings, type AutomaticSettingsResult } from "../automaticSettings";
 import { APP_VERSION } from "../appVersion";
@@ -237,8 +237,15 @@ export function NewProjectWizard({
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [automaticSettings, setAutomaticSettings] = useState<AutomaticSettingsResult | null>(null);
   const validationController = useRef<AbortController | null>(null);
+  const validationFollow = useRef(true);
+  const validationLogRef = useRef<HTMLPreElement | null>(null);
+  const [validationFollowing, setValidationFollowing] = useState(true);
   useEffect(() => () => validationController.current?.abort(), []);
   const [validationDebug, setValidationDebug] = useState<string[]>([]);
+  useLayoutEffect(() => {
+    const element = validationLogRef.current;
+    if (element && validationFollow.current) element.scrollTop = element.scrollHeight;
+  }, [validationDebug]);
   const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
@@ -254,18 +261,24 @@ export function NewProjectWizard({
 
   useEffect(() => {
     let live = true;
-    void apiRequest<HealthStatus>("/health")
-      .then((payload) => {
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const payload = await apiRequest<HealthStatus>("/health", undefined, { requestKind: "short" });
         if (!live) return;
         setBackendHealth(payload);
-        setHealthReady(true);
-      })
-      .catch(() => {
+      } catch {
         if (!live) return;
         setBackendHealth(null);
-        setHealthReady(true);
-      });
-    return () => { live = false; };
+      } finally {
+        if (live) {
+          setHealthReady(true);
+          timer = window.setTimeout(() => void refresh(), 5_000);
+        }
+      }
+    };
+    void refresh();
+    return () => { live = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, []);
   const steps = useMemo(
     () => (isOntPipeline ? ontSteps : bulkSteps).map((label, index) => (
@@ -297,6 +310,8 @@ export function NewProjectWizard({
     setValidationDebug([]);
     setValidation(null);
     setValidatedManifest(null);
+    validationFollow.current = true;
+    setValidationFollowing(true);
     setSavedPath("");
   };
 
@@ -910,24 +925,52 @@ export function NewProjectWizard({
     }
     setBusy("save");
     setError("");
+    setSavedPath("");
+    const plannedManifest = { ...validatedManifest, pipeline_status: "planned" as const };
     try {
-      const plannedManifest = { ...validatedManifest, pipeline_status: "planned" as const };
       const saved = await apiRequest<{ manifest_path: string }>("/api/v1/projects/save", {
         method: "POST",
         body: JSON.stringify(plannedManifest),
-      });
-      const plan = await apiRequest<RunPlan>("/api/v1/runs/plan", {
-        method: "POST",
-        body: JSON.stringify({ manifest: plannedManifest }),
-      });
+      }, { requestKind: "long", timeoutMessage: "Saving the manifest took too long. Check Recent projects before retrying." });
       setSavedPath(saved.manifest_path);
+      setBusy("plan");
+      let plan: RunPlan;
+      try {
+        plan = await apiRequest<RunPlan>("/api/v1/runs/plan", {
+          method: "POST",
+          body: JSON.stringify({ manifest: plannedManifest }),
+        }, { requestKind: "long", timeoutMessage: "The manifest was saved, but run-plan generation is still taking too long. Retry building the plan from the saved project." });
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "Run-plan generation failed.";
+        setError(`Manifest saved at ${saved.manifest_path}. Run-plan generation failed: ${message}`);
+        return;
+      }
       onProjectReady(plannedManifest, plan);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Project save failed");
+      setError(reason instanceof Error ? `Manifest save failed: ${reason.message}` : "Manifest save failed.");
     } finally {
       setBusy("");
     }
   };
+
+  const validationTerminal = validationDebug.length > 0 && <div className="validation-debug-terminal" role="status">
+    <div className="debug-terminal-heading">
+      <strong>Validation progress</strong>
+      {busy === "validate" && <span>Running…</span>}
+      {!validationFollowing && <button type="button" className="text-button" onClick={() => {
+        validationFollow.current = true;
+        setValidationFollowing(true);
+        const element = validationLogRef.current;
+        if (element) element.scrollTop = element.scrollHeight;
+      }}>Jump to latest</button>}
+    </div>
+    <pre ref={validationLogRef} onScroll={(event) => {
+      const element = event.currentTarget;
+      const following = element.scrollHeight - element.scrollTop - element.clientHeight <= 8;
+      validationFollow.current = following;
+      setValidationFollowing(following);
+    }}>{validationDebug.join("\n")}</pre>
+  </div>;
 
   const applyDesignAssignment = () => {
     const search = assignmentSearch.trim();
@@ -1215,7 +1258,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
-            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation progress</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}</pre></div>}
+            {validationTerminal}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );
@@ -1270,7 +1313,7 @@ export function NewProjectWizard({
             <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
-            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
+            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || busy === "plan" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : busy === "plan" ? "Building run plan…" : "Save manifest & build run plan"}</button></div>
           </section>
         );
         return (
@@ -1278,7 +1321,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
-            {validationDebug.length > 0 && <div className="validation-debug-terminal" role="status"><div className="debug-terminal-heading"><strong>Validation progress</strong>{busy === "validate" && <span>Running…</span>}</div><pre>{validationDebug.join("\n")}</pre></div>}
+            {validationTerminal}
             <CheckList checks={validation?.checks ?? []} />
           </section>
         );
@@ -1289,7 +1332,7 @@ export function NewProjectWizard({
             <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Analysis-only (existing Kallisto results)" : "FASTQ quantification"}</dd><dt>Reference mode</dt><dd>{bulkReferenceMode}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType} · paired-end · {options.strandedness}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM · {options.maxParallelTasks} parallel task(s)</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
-            <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : "Save manifest & build run plan"}</button></div>
+            <div className="save-panel"><div><strong>Save manifest</strong><p>FASTQ files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || busy === "plan" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : busy === "plan" ? "Building run plan…" : "Save manifest & build run plan"}</button></div>
           </section>
         );
     }
@@ -1317,7 +1360,7 @@ export function NewProjectWizard({
         </ol>
         <div>
           {bulkHealthPending && <div className="info-banner" role="status"><strong>Checking backend compatibility…</strong><span>Bulk project validation and saving will become available after the local backend reports its capabilities and matching build revision.</span></div>}
-          {!isOntPipeline && healthReady && !bulkCompatError && <div className="success-message" role="status">Compatible Bulk backend connected.</div>}
+          {!isOntPipeline && healthReady && !bulkCompatError && <p className="field-help" role="status">{backendHealth?.activity?.state === "busy" ? `Backend busy — ${backendHealth.activity.operation ?? "working"}.` : "Backend ready."}</p>}
           {bulkCompatError && <div className="inline-error" role="alert"><strong>Incompatible or unavailable backend</strong><span>{bulkCompatError}</span></div>}
           {error && <div className="inline-error" role="alert"><strong>Error</strong><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
           {renderStep()}

@@ -67,7 +67,7 @@ test("apiRequest times out while a response body is still pending", async () => 
     const request = apiRequest("/pending");
     await bodyPending;
     timers.fireTimer();
-    await assert.rejects(request, (error) => error instanceof ApiError && error.message.includes("did not respond within 15 seconds"));
+    await assert.rejects(request, (error) => error instanceof ApiError && error.message.includes("timed out after 30 seconds"));
   } finally {
     globalThis.fetch = previousFetch;
     timers.restore();

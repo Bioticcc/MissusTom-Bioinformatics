@@ -140,6 +140,7 @@ _DOCKER_IMAGES: Final[tuple[str, ...]] = (
     "quay.io/biocontainers/kallisto@sha256:7615f563aa2948fd087f7e4a666e252f275c60b2070729bc9a3804c8873527e5",
 )
 _ACTIVE = {DependencyInstallStatus.RUNNING}
+_PROBE_CACHE_SECONDS: Final = 300
 _BULK_LOCK_PACKAGES: Final[tuple[str, ...]] = (
     "nextflow",
     "openjdk",
@@ -321,6 +322,9 @@ class DependencyInstaller:
         self._run_lock_descriptors: dict[str, int] = {}
         self._jobs: dict[str, DependencyInstallJob] = {}
         self._probe_cache: dict[str, tuple[float, list[DependencyRequirement]]] = {}
+        self._probe_generation: dict[str, int] = {pipeline: 0 for pipeline in _PIPELINES}
+        self._probing: set[str] = set()
+        self._probe_condition = threading.Condition(self._lock)
         self._recover_jobs()
 
     def status(self, pipeline_identifier: str) -> DependencyStatus:
@@ -345,6 +349,18 @@ class DependencyInstaller:
             manual_requirements=manual_requirements,
             job=self._job_for_pipeline(pipeline_identifier),
         )
+
+    def active_jobs(self) -> list[DependencyInstallJob]:
+        """Return installer lifecycle state without starting any tool process."""
+        with self._lock:
+            return [
+                job.model_copy(deep=True) for job in self._jobs.values() if job.status in _ACTIVE
+            ]
+
+    def _invalidate_probe(self, pipeline_identifier: str) -> None:
+        with self._probe_condition:
+            self._probe_generation[pipeline_identifier] += 1
+            self._probe_cache.pop(pipeline_identifier, None)
 
     def install(self, pipeline_identifier: str) -> DependencyInstallJob:
         self._validate_pipeline(pipeline_identifier)
@@ -414,29 +430,47 @@ class DependencyInstaller:
 
     def _requirements(self, pipeline_identifier: str) -> list[DependencyRequirement]:
         self._validate_pipeline(pipeline_identifier)
-        cached = self._probe_cache.get(pipeline_identifier)
-        if cached and time.monotonic() - cached[0] < 5:
-            return [requirement.model_copy(deep=True) for requirement in cached[1]]
+        with self._probe_condition:
+            cached = self._probe_cache.get(pipeline_identifier)
+            if cached and time.monotonic() - cached[0] < _PROBE_CACHE_SECONDS:
+                return [requirement.model_copy(deep=True) for requirement in cached[1]]
+            while pipeline_identifier in self._probing:
+                self._probe_condition.wait()
+                cached = self._probe_cache.get(pipeline_identifier)
+                if cached:
+                    return [requirement.model_copy(deep=True) for requirement in cached[1]]
+            self._probing.add(pipeline_identifier)
+            probe_generation = self._probe_generation[pipeline_identifier]
+
         managed = _managed_bin(pipeline_identifier).is_dir()
-        with ThreadPoolExecutor(max_workers=len(_TOOL_CATALOG[pipeline_identifier])) as pool:
-            items = list(
-                pool.map(
-                    lambda tool: self._tool_requirement(tool, pipeline_identifier, managed),
-                    _TOOL_CATALOG[pipeline_identifier],
+        try:
+            with ThreadPoolExecutor(max_workers=len(_TOOL_CATALOG[pipeline_identifier])) as pool:
+                items = list(
+                    pool.map(
+                        lambda tool: self._tool_requirement(tool, pipeline_identifier, managed),
+                        _TOOL_CATALOG[pipeline_identifier],
+                    )
                 )
-            )
-        if pipeline_identifier == "ont-analysis":
-            items.append(
-                self._r_requirement(pipeline_identifier, managed, ONT_R_PACKAGES, "ONT R packages")
-            )
-        elif pipeline_identifier == "bulk-rnaseq":
-            items.append(
-                self._r_requirement(
-                    pipeline_identifier, managed, BULK_R_PACKAGES, "Bulk R packages"
+            if pipeline_identifier == "ont-analysis":
+                items.append(
+                    self._r_requirement(
+                        pipeline_identifier, managed, ONT_R_PACKAGES, "ONT R packages"
+                    )
                 )
-            )
-        self._probe_cache[pipeline_identifier] = (time.monotonic(), items)
-        return [requirement.model_copy(deep=True) for requirement in items]
+            elif pipeline_identifier == "bulk-rnaseq":
+                items.append(
+                    self._r_requirement(
+                        pipeline_identifier, managed, BULK_R_PACKAGES, "Bulk R packages"
+                    )
+                )
+            with self._probe_condition:
+                if self._probe_generation[pipeline_identifier] == probe_generation:
+                    self._probe_cache[pipeline_identifier] = (time.monotonic(), items)
+            return [requirement.model_copy(deep=True) for requirement in items]
+        finally:
+            with self._probe_condition:
+                self._probing.discard(pipeline_identifier)
+                self._probe_condition.notify_all()
 
     def _tool_requirement(
         self, name: str, pipeline_identifier: str, managed: bool
@@ -607,7 +641,6 @@ class DependencyInstaller:
         try:
             self._log(job, "Starting dependency installation.")
             self._install_environment(job)
-            self._probe_cache.pop(job.pipeline_identifier, None)
             job.status = DependencyInstallStatus.SUCCEEDED
             job.message = "Local dependencies verified"
             self._log(job, "Dependency installation completed and was verified.")
@@ -619,6 +652,9 @@ class DependencyInstaller:
             )
             self._log(job, f"Installation failed: {exc}")
         finally:
+            # Installation may atomically activate (or clean up) a runtime even
+            # when it fails. Discard both old and in-flight probe observations.
+            self._invalidate_probe(job.pipeline_identifier)
             job.finished_at = datetime.now(UTC)
             job.current_stage = ""
             try:
@@ -633,28 +669,25 @@ class DependencyInstaller:
         self._safe_directory(root.parent)
         self._safe_directory(root)
         self._safe_directory(root / "staging")
-        staging = Path(mkdtemp(prefix=f".{job.pipeline_identifier}-", dir=root / "staging"))
         environment = root / "environments" / job.job_identifier / "environment"
+        # Native Bulk now includes R/Bioconductor as well as the scientific CLI tools.
+        minimum_free = 20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 15 * 1024**3
+        disk = inspect_storage(root)
+        install_free = admission_free_bytes(disk, strict=True)
+        if install_free is None:
+            raise RuntimeError(
+                "installation cannot confirm Windows host free space on the dependency "
+                "filesystem (WSL virtual disk reporting is not sufficient)"
+            )
+        if install_free < minimum_free:
+            raise RuntimeError(
+                f"installation needs at least {minimum_free // 1024**3} GiB free "
+                f"on the dependency filesystem ({disk.path}, measurement={disk.measurement})"
+                + (f". {disk.warning}" if disk.warning else "")
+            )
+        staging = Path(mkdtemp(prefix=f".{job.pipeline_identifier}-", dir=root / "staging"))
         try:
             activated = False
-            # Native Bulk now includes R/Bioconductor as well as the scientific CLI tools.
-            minimum_free = (
-                20 * 1024**3 if job.pipeline_identifier == "ont-analysis" else 15 * 1024**3
-            )
-            disk = inspect_storage(root)
-            install_free = admission_free_bytes(disk, strict=True)
-            if install_free is None:
-                raise RuntimeError(
-                    "installation cannot confirm Windows host free space on the dependency "
-                    "filesystem (WSL virtual disk reporting is not sufficient)"
-                )
-            if install_free < minimum_free:
-                raise RuntimeError(
-                    f"installation needs at least {minimum_free // 1024**3} GiB free "
-                    f"on the dependency filesystem ({disk.path}, "
-                    f"measurement={disk.measurement})"
-                    + (f". {disk.warning}" if disk.warning else "")
-                )
             mamba = self._ensure_micromamba(staging, job)
             self._safe_directory(environment.parent)
             if job.pipeline_identifier == "bulk-rnaseq":

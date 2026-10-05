@@ -5,6 +5,8 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -44,6 +46,62 @@ ONT_PROJECT_DIRECTORIES = (
     "logs",
 )
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+_RECENT_VALIDATION_SECONDS = 300
+_MAX_RECENT_VALIDATIONS = 64
+_recent_validations: dict[str, tuple[float, ProjectValidationResult]] = {}
+_recent_validations_lock = threading.RLock()
+
+
+def _validation_key(manifest: ProjectManifest) -> str:
+    payload = manifest.model_dump(mode="json")
+    # This local display field changes from draft to planned immediately before
+    # saving; it has no preflight meaning. All inputs/resources remain keyed.
+    payload.pop("pipeline_status", None)
+    paths = [*manifest.reference_resources.values()]
+    for sample in manifest.samples:
+        paths.extend(sample.r1_files)
+        paths.extend(sample.r2_files)
+        paths.extend(sample.ont_bam_files)
+        if sample.abundance_tsv:
+            paths.append(sample.abundance_tsv)
+
+    def path_state(raw_path: str) -> tuple[str, int | None, int | None]:
+        try:
+            state = Path(raw_path).stat()
+            return raw_path, state.st_size, state.st_mtime_ns
+        except OSError:
+            return raw_path, None, None
+
+    # Keep reuse safe when the same manifest names a file that has since been
+    # replaced or edited. Metadata checks are far cheaper than re-parsing a
+    # large reference but force fresh validation on normal filesystem changes.
+    payload["_validation_path_state"] = sorted(path_state(path) for path in set(paths))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def remember_validation(result: ProjectValidationResult) -> None:
+    with _recent_validations_lock:
+        now = time.monotonic()
+        expired = [
+            key
+            for key, (created, _) in _recent_validations.items()
+            if now - created > _RECENT_VALIDATION_SECONDS
+        ]
+        for key in expired:
+            _recent_validations.pop(key, None)
+        if len(_recent_validations) >= _MAX_RECENT_VALIDATIONS:
+            oldest = min(_recent_validations, key=lambda key: _recent_validations[key][0])
+            _recent_validations.pop(oldest, None)
+        _recent_validations[_validation_key(result.manifest)] = (now, result.model_copy(deep=True))
+
+
+def recent_validation(manifest: ProjectManifest) -> ProjectValidationResult | None:
+    with _recent_validations_lock:
+        cached = _recent_validations.get(_validation_key(manifest))
+        if cached is None or time.monotonic() - cached[0] > _RECENT_VALIDATION_SECONDS:
+            _recent_validations.pop(_validation_key(manifest), None)
+            return None
+        return cached[1].model_copy(deep=True)
 
 
 def validate_project(
@@ -197,8 +255,11 @@ def save_project(
     *,
     history_store: ProjectHistoryStore | None = None,
     adapter: object | None = None,
+    validation: ProjectValidationResult | None = None,
 ) -> ProjectSaveResult:
-    validation = validate_project(manifest, adapter=adapter)
+    # The route may supply a short-lived, exact manifest result produced by the
+    # validation stream. Run admission always validates afresh.
+    validation = validation or validate_project(manifest, adapter=adapter)
     if not validation.valid:
         blocking = [
             check.message for check in validation.checks if check.status == CheckStatus.BLOCKING

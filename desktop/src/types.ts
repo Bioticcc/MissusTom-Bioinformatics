@@ -13,6 +13,26 @@ export interface HealthStatus {
   manifest_schema_versions?: string[];
   bulk_pipeline_versions?: string[];
   capabilities?: Partial<HealthCapabilities>;
+  activity?: { state: "idle" | "busy"; operation?: string | null };
+}
+
+export interface DependencyJobStatus {
+  active: boolean;
+  jobs: PipelineDependencyJob[];
+}
+
+export interface BackendDiagnostics {
+  process_id: number;
+  base_url: string;
+  version: string;
+  build_revision: string;
+  health: string;
+  dependency_install_jobs: PipelineDependencyJob[];
+  active_workflow_runs: Array<{ job_identifier: string; pipeline_identifier: string; status: string; current_stage: string | null }>;
+  active_operations: Array<{ operation: string; started_at?: string; elapsed_ms?: number }>;
+  last_successful_health_response: string | null;
+  recent_requests: Array<{ path: string; status_code: number; duration_ms: number; completed_at: string }>;
+  slow_requests: Array<{ path: string; status_code: number; duration_ms: number; completed_at: string }>;
 }
 
 export type ViewId = "dashboard" | "setup" | "wizard" | "run-plan" | "jobs" | "results" | "settings";

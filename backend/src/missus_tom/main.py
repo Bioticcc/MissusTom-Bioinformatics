@@ -16,6 +16,7 @@ from missus_tom.config import settings
 from missus_tom.logging_config import configure_logging
 from missus_tom.models.common import ApiResponse, ErrorDetail
 from missus_tom.models.errors import ApiCodedError
+from missus_tom.services.observability import backend_observability, request_timer
 
 configure_logging()
 
@@ -45,6 +46,16 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 app.include_router(router)
+
+
+@app.middleware("http")
+async def record_request_timing(request: Request, call_next: Any) -> Any:
+    started = request_timer()
+    response = await call_next(request)
+    backend_observability.record_request(
+        request.url.path, response.status_code, (request_timer() - started) * 1000
+    )
+    return response
 
 
 def _error_response(status_code: int, errors: list[ErrorDetail]) -> JSONResponse:

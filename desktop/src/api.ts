@@ -3,12 +3,17 @@ import { BUILD_REVISION, DEVELOPMENT_BUILD_REVISION } from "./appVersion";
 import type { ApiEnvelope, HealthStatus } from "./types";
 
 const BROWSER_API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
-const REQUEST_TIMEOUT_MS = 15_000;
+export const SHORT_REQUEST_TIMEOUT_MS = 5_000;
+export const STANDARD_REQUEST_TIMEOUT_MS = 30_000;
+export const LONG_REQUEST_TIMEOUT_MS = 120_000;
 export const PROJECT_VALIDATION_TIMEOUT_MS = 120_000;
+
+export type ApiRequestKind = "short" | "standard" | "long";
 
 export type ApiRequestOptions = {
   timeoutMs?: number;
   timeoutMessage?: string;
+  requestKind?: ApiRequestKind;
 };
 
 export type BackendStatus = {
@@ -36,7 +41,7 @@ export function selectApiBaseUrl(
 export async function resolveApiBaseUrl(): Promise<string> {
   if (import.meta.env.VITE_API_BASE_URL) return BROWSER_API_BASE;
   if (!isDesktopShell()) return BROWSER_API_BASE;
-  backendBasePromise ??= invoke<BackendStatus>("backend_status")
+  const pending = backendBasePromise ??= invoke<BackendStatus>("backend_status")
     .then((status) => {
       if (status.packaged && !status.ready) {
         const detail = status.startup_error || "The packaged backend did not become ready.";
@@ -45,7 +50,29 @@ export async function resolveApiBaseUrl(): Promise<string> {
       }
       return selectApiBaseUrl(BROWSER_API_BASE, status);
     });
-  return backendBasePromise;
+  try {
+    return await pending;
+  } catch (reason) {
+    // A sidecar commonly reports not-ready while it is still binding its port.
+    // Do not let one transient Tauri result poison every later API call.
+    if (backendBasePromise === pending) backendBasePromise = undefined;
+    throw reason;
+  }
+}
+
+function timeoutFor(options: ApiRequestOptions): number {
+  if (options.timeoutMs !== undefined) return options.timeoutMs;
+  if (options.requestKind === "short") return SHORT_REQUEST_TIMEOUT_MS;
+  if (options.requestKind === "long") return LONG_REQUEST_TIMEOUT_MS;
+  return STANDARD_REQUEST_TIMEOUT_MS;
+}
+
+async function resolveWithin(signal: AbortSignal): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const abort = () => reject(new DOMException("Request aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    void resolveApiBaseUrl().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 export async function getBackendStatus(): Promise<BackendStatus | undefined> {
@@ -112,8 +139,8 @@ export async function apiRequest<T>(
   }
 
   const controller = new AbortController();
-  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const timeoutMessage = options.timeoutMessage ?? `The local backend did not respond within ${timeoutMs / 1000} seconds. Try again.`;
+  const timeoutMs = timeoutFor(options);
+  const timeoutMessage = options.timeoutMessage ?? `The local backend request timed out after ${timeoutMs / 1000} seconds. The operation may still be running.`;
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const abortFromCaller = () => controller.abort();
   init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
@@ -122,7 +149,7 @@ export async function apiRequest<T>(
   try {
     let response: Response;
     try {
-      const apiBase = await resolveApiBaseUrl();
+      const apiBase = await resolveWithin(controller.signal);
       response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal });
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
@@ -176,13 +203,18 @@ export async function streamProjectValidation(
   resetTimeout();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    const apiBase = await resolveApiBaseUrl();
+    const apiBase = await resolveWithin(controller.signal);
     const response = await fetch(`${apiBase}/api/v1/projects/validate/stream`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(manifest), signal: controller.signal,
     });
     if (!response.ok) {
-      const envelope = await response.json() as ApiEnvelope<never>;
+      let envelope: ApiEnvelope<never> | undefined;
+      try {
+        envelope = await response.json() as ApiEnvelope<never>;
+      } catch {
+        throw new ApiError(`Validation request failed with an invalid response (${response.status}).`, [], response.status);
+      }
       throw new ApiError(envelope.errors?.map((error) => error.message).join("; ") || `Validation request failed (${response.status}).`, [], response.status);
     }
     if (!response.body) throw new ApiError("The backend did not provide a validation stream.");
@@ -198,7 +230,12 @@ export async function streamProjectValidation(
       if (done && pending.trim()) { lines.push(pending); pending = ""; }
       for (const line of lines) {
         if (!line.trim()) continue;
-        const event = JSON.parse(line) as import("./types").ValidationEvent;
+        let event: import("./types").ValidationEvent;
+        try {
+          event = JSON.parse(line) as import("./types").ValidationEvent;
+        } catch {
+          throw new ApiError("The backend returned an invalid validation event.");
+        }
         if (event.type === "progress" && typeof event.message === "string") onProgress(event.message);
         else if (event.type === "error" && typeof event.message === "string") throw new ApiError(event.message);
         else if (event.type === "result" && typeof event.result?.valid === "boolean" && Array.isArray(event.result.checks) && event.result.manifest) return event.result;

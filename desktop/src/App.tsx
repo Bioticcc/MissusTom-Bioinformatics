@@ -11,7 +11,7 @@ import { TitleBar } from "./components/TitleBar";
 import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
 import { selectActiveRun } from "./runOverlayState";
 import { loadSetupState, resetSetupState } from "./setupState";
-import type { HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
+import type { DependencyJobStatus, HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
 import { APP_VERSION, formatBuildLabel } from "./appVersion";
 
 const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
@@ -41,14 +41,15 @@ export default function App() {
 
   useEffect(() => {
     let live = true;
-    void apiRequest<HealthStatus>("/health")
+    const controller = new AbortController();
+    void apiRequest<HealthStatus>("/health", { signal: controller.signal }, { requestKind: "short" })
       .then((payload) => {
         if (live) setHealth(payload);
       })
       .catch(() => {
         if (live) setHealth(null);
       });
-    return () => { live = false; };
+    return () => { live = false; controller.abort(); };
   }, []);
 
   useEffect(() => {
@@ -106,12 +107,10 @@ export default function App() {
     const refresh = async () => {
       controller = new AbortController();
       try {
-        const statuses = await Promise.all(
-          ["bulk-rnaseq", "ont-analysis"].map((pipeline) => apiRequest<{ job: { status: string } | null }>(
-            `/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller?.signal },
-          )),
+        const status = await apiRequest<DependencyJobStatus>(
+          "/api/v1/dependencies/jobs/active", { signal: controller.signal }, { requestKind: "short" },
         );
-        if (live && !controller.signal.aborted) await setDependencyInstallActive(statuses.some((status) => status.job?.status === "running"));
+        if (live && !controller.signal.aborted) await setDependencyInstallActive(status.active);
       } catch {
         // Preserve the last native busy state when status cannot be confirmed.
       } finally {
