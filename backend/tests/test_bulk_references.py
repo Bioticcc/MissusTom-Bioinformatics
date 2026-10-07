@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
 
 from missus_tom.models.manifest import BulkReferenceMode, ProjectManifest
+from missus_tom.services import bulk_references as references_module
 from missus_tom.services.bulk_references import (
     BulkReferenceError,
     BulkReferenceManager,
@@ -353,6 +356,359 @@ def test_kallisto_index_cache_reuse(tmp_path: Path, compressed: bool) -> None:
     assert first.kallisto_index == second.kallisto_index
     assert first.index_identity == second.index_identity
     assert Path(first.kallisto_index).read_text(encoding="utf-8") == "idx"
+
+
+def test_metadata_cache_hit_never_hashes_or_parses_unchanged_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+
+    first = manager.prepare(manifest)
+    monkeypatch.setattr(
+        manager,
+        "_sha256_file",
+        lambda _path: pytest.fail("cache hit must not hash a source reference"),
+    )
+    monkeypatch.setattr(
+        references_module,
+        "parse_gtf_transcript_records",
+        lambda *_args, **_kwargs: pytest.fail("cache hit must not parse the GTF"),
+    )
+
+    second = manager.prepare(manifest)
+
+    assert second.transcript_to_gene == first.transcript_to_gene
+    assert second.annotation_identity == first.annotation_identity
+
+
+@pytest.mark.parametrize("change", ["size", "mtime", "ctime"])
+def test_metadata_cache_invalidates_changed_gtf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    manager.prepare(manifest)
+    original_hash = manager._sha256_file
+    hashes: list[Path] = []
+
+    def record_hash(path: Path) -> str:
+        hashes.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(manager, "_sha256_file", record_hash)
+    if change == "size":
+        gtf.write_text(gtf.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    elif change == "mtime":
+        state = gtf.stat()
+        os.utime(gtf, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
+    else:
+        state = gtf.stat()
+        gtf.chmod(state.st_mode | stat.S_IXUSR)
+        assert gtf.stat().st_ctime_ns != state.st_ctime_ns
+        assert gtf.stat().st_mtime_ns == state.st_mtime_ns
+        assert gtf.stat().st_size == state.st_size
+
+    manager.prepare(manifest)
+
+    assert gtf in hashes
+
+
+def test_concurrent_metadata_cache_miss_prepares_reference_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    calls = 0
+    calls_lock = threading.Lock()
+    original_parse = references_module.parse_gtf_transcript_records
+
+    def count_parse(*args: object, **kwargs: object):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(references_module, "parse_gtf_transcript_records", count_parse)
+    results: list[str] = []
+    failures: list[BaseException] = []
+
+    def prepare() -> None:
+        try:
+            prepared = BulkReferenceManager(cache_root=tmp_path / "cache").prepare(manifest)
+            results.append(prepared.transcript_to_gene)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    workers = [threading.Thread(target=prepare) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=3)
+
+    assert not failures
+    assert len(results) == 2
+    assert calls == 1
+
+
+def test_corrupt_metadata_index_forces_safe_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    manager.prepare(manifest)
+    manager._metadata_index_path().write_text("not json\n", encoding="utf-8")
+    parses = 0
+    original_parse = references_module.parse_gtf_transcript_records
+
+    def count_parse(*args: object, **kwargs: object):
+        nonlocal parses
+        parses += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(references_module, "parse_gtf_transcript_records", count_parse)
+
+    manager.prepare(manifest)
+
+    assert parses == 1
+    assert json.loads(manager._metadata_index_path().read_text(encoding="utf-8"))["entries"]
+
+
+def test_authoritative_mapping_does_not_hash_optional_gtf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    mapping = tmp_path / "transcript_to_gene.tsv"
+    index = tmp_path / "transcripts.idx"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    mapping.write_text("transcript_id\tgene_id\nENST000001\tENSG000001\n", encoding="utf-8")
+    index.write_text("index", encoding="utf-8")
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {
+                "transcriptome_fasta": str(fasta),
+                "annotation_gtf": str(gtf),
+                "transcript_to_gene": str(mapping),
+                "kallisto_index": str(index),
+            },
+            reference_mode="existing-index",
+        )
+    )
+    original_hash = manager._sha256_file
+
+    def reject_gtf_hash(path: Path) -> str:
+        if path.resolve() == gtf.resolve():
+            pytest.fail("authoritative mapping path must not hash optional GTF")
+        return original_hash(path)
+
+    monkeypatch.setattr(manager, "_sha256_file", reject_gtf_hash)
+
+    prepared = manager.prepare(manifest)
+
+    assert prepared.transcript_to_gene == str(mapping.resolve())
+
+
+def test_analysis_only_authoritative_mapping_does_not_hash_optional_gtf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gtf = tmp_path / "annotation.gtf"
+    mapping = tmp_path / "transcript_to_gene.tsv"
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    mapping.write_text("transcript_id\tgene_id\nENST000001\tENSG000001\n", encoding="utf-8")
+    abundance = tmp_path / "inputs" / "sample_a" / "abundance.tsv"
+    abundance.parent.mkdir(parents=True, exist_ok=True)
+    abundance.write_text(
+        "target_id\tlength\teff_length\test_counts\ttpm\nENST000001\t100\t80\t10\t1\n",
+        encoding="utf-8",
+    )
+    payload = _manifest_payload(
+        tmp_path,
+        {"transcript_to_gene": str(mapping), "annotation_gtf": str(gtf)},
+        parameters={"start_stage": "analysis"},
+    )
+    payload["samples"][0]["r1_files"] = []
+    payload["samples"][0]["r2_files"] = []
+    payload["samples"][0]["abundance_tsv"] = str(abundance)
+    manifest = ProjectManifest.model_validate(payload)
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    original_hash = manager._sha256_file
+
+    def reject_gtf_hash(path: Path) -> str:
+        if path.resolve() == gtf.resolve():
+            pytest.fail("analysis-only authoritative mapping must not hash optional GTF")
+        return original_hash(path)
+
+    monkeypatch.setattr(manager, "_sha256_file", reject_gtf_hash)
+    monkeypatch.setattr(
+        references_module,
+        "parse_gtf_transcript_records",
+        lambda *_args, **_kwargs: pytest.fail(
+            "analysis-only authoritative mapping must not parse optional GTF"
+        ),
+    )
+
+    prepared = manager.prepare(manifest)
+
+    assert prepared.analysis_only is True
+    assert prepared.transcript_to_gene == str(mapping.resolve())
+
+
+def test_stale_metadata_with_missing_artifact_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    prepared = manager.prepare(manifest)
+    mapping_dir = Path(prepared.transcript_to_gene).parent
+    for child in mapping_dir.iterdir():
+        child.unlink()
+    parses = 0
+    original_parse = references_module.parse_gtf_transcript_records
+
+    def count_parse(*args: object, **kwargs: object):
+        nonlocal parses
+        parses += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(references_module, "parse_gtf_transcript_records", count_parse)
+
+    rebuilt = manager.prepare(manifest)
+
+    assert parses == 1
+    assert Path(rebuilt.transcript_to_gene).is_file()
+    assert Path(rebuilt.transcript_to_gene).stat().st_size > 0
+
+
+def test_metadata_entry_without_annotation_identity_is_not_a_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    manager = BulkReferenceManager(cache_root=tmp_path / "cache")
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    manager.prepare(manifest)
+    index_path = manager._metadata_index_path()
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    assert payload["entries"]
+    for entry in payload["entries"].values():
+        entry.pop("annotation_identity", None)
+    index_path.write_text(json.dumps(payload), encoding="utf-8")
+    parses = 0
+    original_parse = references_module.parse_gtf_transcript_records
+
+    def count_parse(*args: object, **kwargs: object):
+        nonlocal parses
+        parses += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(references_module, "parse_gtf_transcript_records", count_parse)
+
+    manager.prepare(manifest)
+
+    assert parses == 1
+
+
+def test_kallisto_version_change_invalidates_metadata_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fasta = tmp_path / "transcripts.fa"
+    gtf = tmp_path / "annotation.gtf"
+    _write_fasta(fasta, ["ENST000001"])
+    _write_gtf(gtf, [("ENST000001", "ENSG000001", "protein_coding", "GeneA")])
+    kallisto = tmp_path / "kallisto.sh"
+    kallisto.write_text(
+        "#!/bin/sh\n"
+        'output=""\n'
+        'for arg in "$@"; do\n'
+        '  if [ "$prev" = "-i" ]; then output="$arg"; fi\n'
+        '  prev="$arg"\n'
+        "done\n"
+        'printf "idx" > "$output"\n',
+        encoding="utf-8",
+    )
+    kallisto.chmod(kallisto.stat().st_mode | stat.S_IXUSR)
+    manifest = ProjectManifest.model_validate(
+        _manifest_payload(
+            tmp_path,
+            {"transcriptome_fasta": str(fasta), "annotation_gtf": str(gtf)},
+        )
+    )
+    first = BulkReferenceManager(
+        cache_root=tmp_path / "cache",
+        kallisto=KallistoRuntime(executable=kallisto, version="0.51.0-test"),
+    )
+    first.prepare(manifest)
+    second = BulkReferenceManager(
+        cache_root=tmp_path / "cache",
+        kallisto=KallistoRuntime(executable=kallisto, version="0.52.0-test"),
+    )
+    hashes: list[Path] = []
+    original_hash = second._sha256_file
+
+    def record_hash(path: Path) -> str:
+        hashes.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(second, "_sha256_file", record_hash)
+
+    second.prepare(manifest)
+
+    assert gtf in hashes
 
 
 def test_incomplete_cache_is_not_reused(tmp_path: Path) -> None:

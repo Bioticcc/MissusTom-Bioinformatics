@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import time
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -12,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from missus_tom.api import routes
 from missus_tom.main import app
 from missus_tom.models.demos import DemoPrepareStatus
+from missus_tom.models.run import RunRecord, RunStatus
 from missus_tom.services.demos import DemoService
 
 pytestmark = pytest.mark.anyio
@@ -243,11 +246,25 @@ async def test_validate_save_and_plan_endpoints(
     assert plan_data["command_preview"][-2:] == ["--start_stage", "quantification"]
     assert len(plan_data["stages"]) == 9
 
+    expected_record = RunRecord(
+        job_identifier="test-start-record",
+        project_identifier=manifest_payload["project_identifier"],
+        project_name=manifest_payload["project_name"],
+        status=RunStatus.QUEUED,
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project-output" / "logs" / "run.log"),
+        results_directory=str(tmp_path / "project-output" / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+    )
+    start_run = Mock(return_value=expected_record)
+    monkeypatch.setattr(routes.run_manager, "start", start_run)
     start = await client.post(
         "/api/v1/runs/start", json={"manifest": manifest_payload, "resume": True}
     )
-    assert start.status_code == 409
-    assert start.json()["errors"][0]["message"]
+    assert start.status_code == 200
+    assert start.json()["data"]["job_identifier"] == expected_record.job_identifier
+    start_run.assert_called_once()
 
 
 async def test_run_start_rejects_unknown_start_stage(

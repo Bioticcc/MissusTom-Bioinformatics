@@ -36,6 +36,8 @@ _FAILED_MARKER: Final = "failed.json"
 _INDEX_FILENAME: Final = "transcripts.idx"
 _MAPPING_FILENAME: Final = "transcript_to_gene.tsv"
 _BUILD_LOG: Final = "build.log"
+_METADATA_INDEX_FILENAME: Final = "reference-metadata-v1.json"
+_METADATA_INDEX_VERSION: Final = "1"
 PRODUCTION_PIPELINE_VERSION: Final = "0.5.0"
 LEGACY_PIPELINE_VERSIONS: Final = frozenset({"0.4.0", "0.3.0-full-demo"})
 SUPPORTED_PIPELINE_VERSIONS: Final = frozenset(
@@ -771,6 +773,198 @@ class BulkReferenceManager:
         return sha256_file(path, cancellation_check=self._cancellation_check)
 
     @staticmethod
+    def _source_metadata(path: Path) -> dict[str, object]:
+        resolved = path.resolve(strict=True)
+        state = resolved.stat()
+        return {
+            "path": str(resolved),
+            "size": state.st_size,
+            "mtime_ns": state.st_mtime_ns,
+            "ctime_ns": state.st_ctime_ns,
+        }
+
+    def _metadata_index_path(self) -> Path:
+        return self._cache_root / _METADATA_INDEX_FILENAME
+
+    def _metadata_key(
+        self,
+        *,
+        mode: BulkReferenceMode,
+        analysis_only: bool,
+        gtf_path: Path,
+        fasta_path: Path | None,
+        index_path: Path | None,
+    ) -> tuple[str, dict[str, object]]:
+        metadata: dict[str, object] = {
+            "cache_schema_version": _METADATA_INDEX_VERSION,
+            "normalization_version": NORMALIZATION_VERSION,
+            "reference_mode": mode.value,
+            "analysis_only": analysis_only,
+            "annotation_gtf": self._source_metadata(gtf_path),
+            "transcriptome_fasta": self._source_metadata(fasta_path)
+            if fasta_path and fasta_path.is_file()
+            else None,
+            "kallisto_index": self._source_metadata(index_path)
+            if index_path and index_path.is_file()
+            else None,
+            "kallisto_version": self._kallisto.version if self._kallisto else None,
+        }
+        encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), metadata
+
+    @contextmanager
+    def _source_preparation_lock(
+        self,
+        *,
+        mode: BulkReferenceMode,
+        analysis_only: bool,
+        gtf_path: Path | None,
+        fasta_path: Path | None,
+        index_path: Path | None,
+    ) -> Iterator[None]:
+        if gtf_path is None or not gtf_path.is_file():
+            yield
+            return
+        key, _ = self._metadata_key(
+            mode=mode,
+            analysis_only=analysis_only,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        )
+        with _cache_lock(self._cache_root / "preparation" / key, **self._lock_kwargs()):
+            yield
+
+    def _read_metadata_index(self) -> dict[str, object]:
+        path = self._metadata_index_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"version": _METADATA_INDEX_VERSION, "entries": {}}
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _METADATA_INDEX_VERSION
+            or not isinstance(payload.get("entries"), dict)
+        ):
+            return {"version": _METADATA_INDEX_VERSION, "entries": {}}
+        return payload
+
+    def _write_metadata_index(self, payload: Mapping[str, object]) -> None:
+        path = self._metadata_index_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        with temporary.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+
+    def _cached_prepared_references(
+        self,
+        *,
+        mode: BulkReferenceMode,
+        analysis_only: bool,
+        gtf_path: Path,
+        fasta_path: Path | None,
+        index_path: Path | None,
+    ) -> PreparedBulkReferences | None:
+        key, metadata = self._metadata_key(
+            mode=mode,
+            analysis_only=analysis_only,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        )
+        with _cache_lock(self._cache_root / "metadata", **self._lock_kwargs()):
+            payload = self._read_metadata_index()
+            entries = payload["entries"]
+            assert isinstance(entries, dict)
+            entry = entries.get(key)
+            if not isinstance(entry, dict) or entry.get("metadata") != metadata:
+                return None
+            annotation_identity = entry.get("annotation_identity")
+            if not isinstance(annotation_identity, str):
+                return None
+            mapping_dir = self._cache_root / "transcript_to_gene" / annotation_identity
+            if not _cache_is_usable(
+                mapping_dir, artifact_name=_MAPPING_FILENAME, identity=annotation_identity
+            ):
+                entries.pop(key, None)
+                self._write_metadata_index(payload)
+                return None
+            index_identity = entry.get("index_identity")
+            if (
+                mode == BulkReferenceMode.BUILD
+                and self._kallisto is not None
+                and (
+                    not isinstance(index_identity, str)
+                    or not _cache_is_usable(
+                        self._cache_root / "kallisto_index" / index_identity,
+                        artifact_name=_INDEX_FILENAME,
+                        identity=index_identity,
+                    )
+                )
+            ):
+                entries.pop(key, None)
+                self._write_metadata_index(payload)
+                return None
+            overlap = _cached_overlap(mapping_dir)
+            return PreparedBulkReferences(
+                reference_mode=mode,
+                analysis_only=analysis_only,
+                kallisto_index=(
+                    str(
+                        (
+                            self._cache_root / "kallisto_index" / index_identity / _INDEX_FILENAME
+                        ).resolve()
+                    )
+                    if mode == BulkReferenceMode.BUILD and isinstance(index_identity, str)
+                    else str(index_path.resolve())
+                    if index_path
+                    else None
+                ),
+                transcript_to_gene=str((mapping_dir / _MAPPING_FILENAME).resolve()),
+                index_identity=index_identity if isinstance(index_identity, str) else None,
+                annotation_identity=annotation_identity,
+                annotation_gtf=str(gtf_path.resolve()),
+                transcriptome_fasta=str(fasta_path.resolve()) if fasta_path else None,
+                fasta_id_policy=overlap.policy if overlap else None,
+                overlap=overlap,
+                cache_root=str(self._cache_root),
+            )
+
+    def _publish_cached_references(
+        self,
+        prepared: PreparedBulkReferences,
+        *,
+        mode: BulkReferenceMode,
+        analysis_only: bool,
+        gtf_path: Path,
+        fasta_path: Path | None,
+        index_path: Path | None,
+    ) -> None:
+        if prepared.annotation_identity is None:
+            return
+        key, metadata = self._metadata_key(
+            mode=mode,
+            analysis_only=analysis_only,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        )
+        with _cache_lock(self._cache_root / "metadata", **self._lock_kwargs()):
+            payload = self._read_metadata_index()
+            entries = payload["entries"]
+            assert isinstance(entries, dict)
+            entries[key] = {
+                "metadata": metadata,
+                "annotation_identity": prepared.annotation_identity,
+                "index_identity": prepared.index_identity,
+            }
+            self._write_metadata_index(payload)
+
+    @staticmethod
     def _run_command(
         command: Sequence[str],
         environment: Mapping[str, str] | None,
@@ -808,41 +1002,44 @@ class BulkReferenceManager:
             Path(resources["transcriptome_fasta"]) if resources.get("transcriptome_fasta") else None
         )
 
-        if analysis_only:
-            prepared = self._prepare_analysis_only(
-                mode=mode,
+        gtf_path = Path(supplied_gtf) if supplied_gtf else None
+        index_path = Path(resources["kallisto_index"]) if resources.get("kallisto_index") else None
+        with self._source_preparation_lock(
+            mode=mode,
+            analysis_only=analysis_only,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        ):
+            if analysis_only:
+                prepared = self._prepare_analysis_only(
+                    mode=mode,
+                    supplied_mapping=Path(supplied_mapping) if supplied_mapping else None,
+                    supplied_gtf=gtf_path,
+                    fasta_path=fasta_path,
+                )
+                validate_mapping_abundance_overlap(
+                    Path(prepared.transcript_to_gene),
+                    [
+                        (sample.sample_id, Path(sample.abundance_tsv))
+                        for sample in manifest.samples
+                        if sample.included and sample.abundance_tsv
+                    ],
+                )
+                return prepared
+
+            if mode == BulkReferenceMode.BUILD:
+                return self._prepare_build_mode(
+                    fasta_path=_require_file(fasta_path, "transcriptome_fasta"),
+                    gtf_path=_require_file(gtf_path, "annotation_gtf"),
+                )
+
+            return self._prepare_existing_index_mode(
+                index_path=_require_file(index_path, "kallisto_index"),
                 supplied_mapping=Path(supplied_mapping) if supplied_mapping else None,
-                supplied_gtf=Path(supplied_gtf) if supplied_gtf else None,
+                supplied_gtf=gtf_path,
                 fasta_path=fasta_path,
             )
-            validate_mapping_abundance_overlap(
-                Path(prepared.transcript_to_gene),
-                [
-                    (sample.sample_id, Path(sample.abundance_tsv))
-                    for sample in manifest.samples
-                    if sample.included and sample.abundance_tsv
-                ],
-            )
-            return prepared
-
-        if mode == BulkReferenceMode.BUILD:
-            return self._prepare_build_mode(
-                fasta_path=_require_file(fasta_path, "transcriptome_fasta"),
-                gtf_path=_require_file(
-                    Path(supplied_gtf) if supplied_gtf else None,
-                    "annotation_gtf",
-                ),
-            )
-
-        return self._prepare_existing_index_mode(
-            index_path=_require_file(
-                Path(resources["kallisto_index"]) if resources.get("kallisto_index") else None,
-                "kallisto_index",
-            ),
-            supplied_mapping=Path(supplied_mapping) if supplied_mapping else None,
-            supplied_gtf=Path(supplied_gtf) if supplied_gtf else None,
-            fasta_path=fasta_path,
-        )
 
     def _prepare_analysis_only(
         self,
@@ -878,6 +1075,15 @@ class BulkReferenceManager:
             )
 
         gtf_path = _require_file(supplied_gtf, "annotation_gtf or transcript_to_gene")
+        cached = self._cached_prepared_references(
+            mode=mode,
+            analysis_only=True,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=None,
+        )
+        if cached is not None:
+            return cached
         gtf_sha = self._sha256_file(gtf_path)
         fasta_sha = self._sha256_file(fasta_path) if fasta_path and fasta_path.is_file() else None
         identity = compute_annotation_identity(
@@ -900,7 +1106,7 @@ class BulkReferenceManager:
                 expected_metadata=mapping_metadata,
             ):
                 overlap = _cached_overlap(cache_dir)
-                return PreparedBulkReferences(
+                prepared = PreparedBulkReferences(
                     reference_mode=mode,
                     analysis_only=True,
                     transcript_to_gene=str(artifact.resolve()),
@@ -911,6 +1117,15 @@ class BulkReferenceManager:
                     overlap=overlap,
                     cache_root=str(self._cache_root),
                 )
+                self._publish_cached_references(
+                    prepared,
+                    mode=mode,
+                    analysis_only=True,
+                    gtf_path=gtf_path,
+                    fasta_path=fasta_path,
+                    index_path=None,
+                )
+                return prepared
 
             if fasta_path and fasta_path.is_file():
                 overlap, records = self._normalize_with_fasta(fasta_path, gtf_path)
@@ -940,7 +1155,7 @@ class BulkReferenceManager:
                     "overlap": overlap.model_dump(mode="json") if overlap else None,
                 },
             )
-        return PreparedBulkReferences(
+        prepared = PreparedBulkReferences(
             reference_mode=mode,
             analysis_only=True,
             transcript_to_gene=str(artifact.resolve()),
@@ -951,8 +1166,26 @@ class BulkReferenceManager:
             overlap=overlap,
             cache_root=str(self._cache_root),
         )
+        self._publish_cached_references(
+            prepared,
+            mode=mode,
+            analysis_only=True,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=None,
+        )
+        return prepared
 
     def _prepare_build_mode(self, *, fasta_path: Path, gtf_path: Path) -> PreparedBulkReferences:
+        cached = self._cached_prepared_references(
+            mode=BulkReferenceMode.BUILD,
+            analysis_only=False,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=None,
+        )
+        if cached is not None:
+            return cached
         fasta_sha = self._sha256_file(fasta_path)
         gtf_sha = self._sha256_file(gtf_path)
         overlap, records = self._normalize_with_fasta(fasta_path, gtf_path)
@@ -1017,7 +1250,7 @@ class BulkReferenceManager:
                         identity=index_identity,
                     )
 
-        return PreparedBulkReferences(
+        prepared = PreparedBulkReferences(
             reference_mode=BulkReferenceMode.BUILD,
             analysis_only=False,
             kallisto_index=str(index_path.resolve()) if index_path else None,
@@ -1030,6 +1263,15 @@ class BulkReferenceManager:
             annotation_gtf=str(gtf_path.resolve()),
             cache_root=str(self._cache_root),
         )
+        self._publish_cached_references(
+            prepared,
+            mode=BulkReferenceMode.BUILD,
+            analysis_only=False,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=None,
+        )
+        return prepared
 
     def _prepare_existing_index_mode(
         self,
@@ -1053,9 +1295,10 @@ class BulkReferenceManager:
                 fasta_sha256=self._sha256_file(fasta_path)
                 if fasta_path and fasta_path.is_file()
                 else None,
-                gtf_sha256=self._sha256_file(supplied_gtf)
-                if supplied_gtf and supplied_gtf.is_file()
-                else None,
+                # A supplied transcript-to-gene table is authoritative in this
+                # branch.  An optional GTF is retained for provenance only and
+                # must not trigger a multi-gigabyte scan on every run.
+                gtf_sha256=None,
                 supplied_mapping_sha256=mapping_sha,
             )
             return PreparedBulkReferences(
@@ -1070,6 +1313,15 @@ class BulkReferenceManager:
             )
 
         gtf_path = _require_file(supplied_gtf, "annotation_gtf or transcript_to_gene")
+        cached = self._cached_prepared_references(
+            mode=BulkReferenceMode.EXISTING_INDEX,
+            analysis_only=False,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        )
+        if cached is not None:
+            return cached
         gtf_sha = self._sha256_file(gtf_path)
         fasta_sha = self._sha256_file(fasta_path) if fasta_path and fasta_path.is_file() else None
         annotation_identity = compute_annotation_identity(
@@ -1122,7 +1374,7 @@ class BulkReferenceManager:
             else:
                 overlap = _cached_overlap(mapping_dir)
 
-        return PreparedBulkReferences(
+        prepared = PreparedBulkReferences(
             reference_mode=BulkReferenceMode.EXISTING_INDEX,
             analysis_only=False,
             kallisto_index=str(index_path.resolve()),
@@ -1134,6 +1386,15 @@ class BulkReferenceManager:
             overlap=overlap,
             cache_root=str(self._cache_root),
         )
+        self._publish_cached_references(
+            prepared,
+            mode=BulkReferenceMode.EXISTING_INDEX,
+            analysis_only=False,
+            gtf_path=gtf_path,
+            fasta_path=fasta_path,
+            index_path=index_path,
+        )
+        return prepared
 
     def _normalize_with_fasta(
         self,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { LiveCommandLog } from "../components/LiveCommandLog";
-import { openDirectory } from "../native";
+import { isDesktopShell, openDirectory } from "../native";
 import type { RunLog, RunRecord, RunStatus } from "../types";
 
 const pollableStatuses = new Set<RunStatus>(["queued", "preparing", "running", "cancelling"]);
@@ -17,8 +17,23 @@ function needsStatusRefresh(run: RunRecord) {
   return pollableStatuses.has(run.status) || run.holds_admission;
 }
 
-export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
-  const [runs, setRuns] = useState<RunRecord[]>(activeRun ? [activeRun] : []);
+function withActiveRun(records: RunRecord[], activeRun: RunRecord | null) {
+  if (!activeRun) return records;
+  if (records.some((run) => run.job_identifier === activeRun.job_identifier)) return records;
+  return [activeRun, ...records];
+}
+
+export function Jobs({
+  activeRun,
+  polledRuns,
+}: {
+  activeRun: RunRecord | null;
+  polledRuns: RunRecord[] | null;
+}) {
+  const desktop = isDesktopShell();
+  const [runs, setRuns] = useState<RunRecord[]>(
+    polledRuns === null ? (activeRun ? [activeRun] : []) : withActiveRun(polledRuns, activeRun),
+  );
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
   const [lastOutputByJob, setLastOutputByJob] = useState<Record<string, string | null>>({});
@@ -47,7 +62,18 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
   }), []);
 
   useEffect(() => {
+    if (!desktop || polledRuns === null) return;
+    setRuns(withActiveRun(polledRuns, activeRun));
+    setError("");
+  }, [activeRun, desktop, polledRuns]);
+
+  useEffect(() => {
     mounted.current = true;
+    if (desktop) {
+      return () => {
+        mounted.current = false;
+      };
+    }
     let timer: number | undefined;
     let controller: AbortController | undefined;
     const refresh = async () => {
@@ -58,7 +84,9 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
         priorStatuses.current = Object.fromEntries(records.map((record) => [record.job_identifier, record.status]));
         setRuns(records);
         setError("");
-        if (mounted.current && records.some(needsStatusRefresh)) timer = window.setTimeout(() => void refresh(), POLL_MS);
+        if (mounted.current && records.some(needsStatusRefresh)) {
+          timer = window.setTimeout(() => void refresh(), POLL_MS);
+        }
       } catch (reason) {
         if (mounted.current && !controller.signal.aborted) {
           setError(reason instanceof Error ? reason.message : "Jobs could not be loaded.");
@@ -72,7 +100,7 @@ export function Jobs({ activeRun }: { activeRun: RunRecord | null }) {
       controller?.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, []);
+  }, [desktop]);
 
   const cancel = async (identifier: string) => {
     setCancelling((current) => new Set(current).add(identifier));

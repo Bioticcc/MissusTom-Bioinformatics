@@ -34,6 +34,7 @@ export default function App() {
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
+  const [polledRuns, setPolledRuns] = useState<RunRecord[] | null>(null);
   const [runPollError, setRunPollError] = useState("");
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const runLifecycleGeneration = useRef(0);
@@ -69,6 +70,7 @@ export default function App() {
     let controller: AbortController | undefined;
     let timer: number | undefined;
     const refresh = async () => {
+      let hasActive = false;
       const generation = runLifecycleGeneration.current;
       controller = new AbortController();
       try {
@@ -79,6 +81,8 @@ export default function App() {
           || controller.signal.aborted
           || generation !== runLifecycleGeneration.current
         ) return;
+        hasActive = Boolean(active);
+        setPolledRuns(runs);
         setActiveRun(active);
         setRunPollError("");
         if (active) runStartPending.current = false;
@@ -92,7 +96,12 @@ export default function App() {
       } catch (reason) {
         if (live && !controller.signal.aborted) setRunPollError(reason instanceof Error ? reason.message : "Run status could not be refreshed.");
       } finally {
-        if (live && !controller?.signal.aborted) timer = window.setTimeout(() => void refresh(), 2_000);
+        if (live && !controller?.signal.aborted) {
+          timer = window.setTimeout(
+            () => void refresh(),
+            hasActive || runStartPending.current ? 2_000 : 7_000,
+          );
+        }
       }
     };
     void refresh();
@@ -211,7 +220,7 @@ export default function App() {
             onStarted={runStarted}
           />
         )}
-        {activeView === "jobs" && <Jobs activeRun={activeRun} />}
+        {activeView === "jobs" && <Jobs activeRun={activeRun} polledRuns={polledRuns} />}
         {activeView === "results" && <Results activeRun={activeRun} />}
         {activeView === "settings" && <Settings onResetSetup={() => { resetSetupState(window.localStorage); setSetupRequired(true); setActiveView("setup"); }} isRunActive={Boolean(activeRun)} />}
         </main>

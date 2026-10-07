@@ -26,11 +26,8 @@ from missus_tom.services.bulk_references import (
     KallistoRuntime,
     PreparedBulkReferences,
     ReferenceCommandRunner,
-    assess_fasta_gtf_overlap,
     infer_bulk_reference_mode,
-    iter_fasta_transcript_ids,
     legacy_biomart_migration_message,
-    parse_gtf_transcript_records,
     read_supplied_transcript_to_gene,
 )
 from missus_tom.services.dependencies import bulk_lock_provenance, runtime_environment, runtime_tool
@@ -522,7 +519,6 @@ class BulkRnaSeqAdapter(PipelineAdapter):
 
         supplied_mapping = resources.get("transcript_to_gene")
         supplied_gtf = resources.get("annotation_gtf")
-        supplied_fasta = resources.get("transcriptome_fasta")
         supplied_index = resources.get("kallisto_index")
 
         if supplied_mapping:
@@ -530,20 +526,11 @@ class BulkRnaSeqAdapter(PipelineAdapter):
                 read_supplied_transcript_to_gene(Path(supplied_mapping))
             except BulkReferenceError as exc:
                 raise ValueError(str(exc)) from exc
-        if supplied_gtf:
-            records = parse_gtf_transcript_records(Path(supplied_gtf))
-            if not records:
-                raise ValueError(
-                    "annotation_gtf does not contain usable transcript_id and gene_id attributes"
-                )
-            if supplied_fasta and Path(supplied_fasta).is_file():
-                fasta_ids = iter_fasta_transcript_ids(Path(supplied_fasta))
-                overlap = assess_fasta_gtf_overlap(fasta_ids=fasta_ids, gtf_records=records)
-                if overlap.overlap_fraction < 0.95:
-                    raise ValueError(
-                        "transcriptome FASTA and annotation GTF appear incompatible "
-                        f"({overlap.overlap_fraction:.1%} identifier overlap)"
-                    )
+        # Full GTF/FASTA compatibility parsing is intentionally deferred to
+        # prepare_run_references.  That worker owns a persisted RunRecord,
+        # reports its preparation stage, honours cancellation, and reuses the
+        # normalized reference cache.  Never read a large annotation here:
+        # validate_execution is also used by run admission.
 
         if analysis_only:
             if not supplied_mapping and not supplied_gtf:

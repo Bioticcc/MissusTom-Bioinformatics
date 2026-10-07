@@ -110,6 +110,7 @@ class RunManager:
         self._threads: dict[str, threading.Thread] = {}
         self._watchdogs: dict[str, threading.Thread] = {}
         self._finalizing: set[str] = set()
+        self._prelaunch_finishing: set[str] = set()
         self._lock = threading.RLock()
         self._recover_records()
 
@@ -134,7 +135,12 @@ class RunManager:
         adapter = self._adapter_for(manifest)
         if getattr(adapter, "requires_resume", False) and not resume:
             raise ValueError("this pipeline requires resume-enabled execution")
-        adapter.validate_execution(manifest, start_stage=start_stage)
+        # This is intentionally limited to the saved-manifest identity check.
+        # It protects the path/manifest boundary before locks or state files are
+        # written, without reading reference or sample data in the request.
+        validator = getattr(adapter, "validate_saved_manifest", None)
+        if callable(validator):
+            validator(manifest)
         job_identifier = str(uuid4())
         root = Path(manifest.output_directory)
         command = adapter.construct_command(manifest, start_stage=start_stage)
@@ -168,20 +174,13 @@ class RunManager:
                     resume_from_run_name=resume_from_run_name,
                 )
             locks = self._acquire_locks(root, job_identifier)
-            validator = getattr(adapter, "validate_saved_manifest", None)
-            try:
-                if callable(validator):
-                    validator(manifest)
-            except Exception:
-                locks.close()
-                raise
             record = RunRecord(
                 job_identifier=job_identifier,
                 project_identifier=str(manifest.project_identifier),
                 project_name=manifest.project_name,
                 pipeline_identifier=manifest.pipeline_identifier,
                 status=RunStatus.QUEUED,
-                current_stage="Waiting for local runner",
+                current_stage="Queued for execution validation",
                 command=command,
                 log_path=str(root / "logs" / f"run-{job_identifier}.log"),
                 results_directory=str(root / "results"),
@@ -203,7 +202,7 @@ class RunManager:
                 persisted = True
                 thread = threading.Thread(
                     target=self._run,
-                    args=(job_identifier,),
+                    args=(job_identifier, manifest),
                     name=f"missus-tom-run-{job_identifier}",
                     daemon=False,
                 )
@@ -253,6 +252,10 @@ class RunManager:
             if record.status == RunStatus.CANCELLING:
                 return record.model_copy(deep=True)
             was_interrupted = record.status == RunStatus.INTERRUPTED
+            cancelling_during_validation = record.current_stage in {
+                "Queued for execution validation",
+                "Validating execution",
+            }
             record.status = RunStatus.CANCELLING
             record.current_stage = "Stopping controlled workflow process"
             record.error_message = reason
@@ -285,6 +288,16 @@ class RunManager:
                 "No verified process or containment identity was persisted; "
                 "manual recovery is required.",
             )
+            return self.get(job_identifier)
+        elif containment_scope_id is None and cancelling_during_validation:
+            # Validation has no child process yet, so cancellation may release
+            # admission immediately. Re-read the stage first: the worker can
+            # enter the containment handoff after the snapshot above, and that
+            # handoff must keep admission until the scope is registered and
+            # stopped.
+            pending_record = self._claim_cancelled_before_launch(job_identifier)
+            if pending_record is not None:
+                self._finish_cancelled_before_launch(pending_record)
             return self.get(job_identifier)
 
         if (
@@ -404,10 +417,12 @@ class RunManager:
                     return artifacts
         return artifacts
 
-    def _run(self, job_identifier: str) -> None:
+    def _run(self, job_identifier: str, manifest: ProjectManifest | None = None) -> None:
         try:
             with self._lock:
                 record = self._records[job_identifier]
+                if not record.holds_admission or record.status == RunStatus.CANCELLED:
+                    return
                 if record.status == RunStatus.CANCELLING:
                     self._finish_cancelled_before_launch(record)
                     return
@@ -423,6 +438,28 @@ class RunManager:
                     record.current_stage = "Preparing workflow inputs"
                 record.started_at = record.started_at or datetime.now(UTC)
                 self._persist(record)
+
+            if not self._validate_execution_before_launch(job_identifier, adapter, manifest):
+                return
+
+            with self._lock:
+                record = self._records[job_identifier]
+                if not record.holds_admission or record.status == RunStatus.CANCELLED:
+                    return
+                if record.status == RunStatus.CANCELLING:
+                    # Cancel won before this handoff. Do not start a scope.
+                    cancel_before_containment = True
+                else:
+                    cancel_before_containment = False
+                    # Once this stage is persisted, cancellation must not
+                    # release admission until containment is registered and
+                    # stopped. Cancel re-reads this stage before finishing.
+                    record.current_stage = "Starting containment"
+                    self._persist(record)
+
+            if cancel_before_containment:
+                self._finish_cancelled_before_launch(record)
+                return
 
             try:
                 self._start_native_containment_if_needed(job_identifier)
@@ -450,6 +487,8 @@ class RunManager:
             with self._lock:
                 record = self._records[job_identifier]
                 adapter = self._adapter_for_record(record)
+                if not record.holds_admission or record.status == RunStatus.CANCELLED:
+                    return
                 if record.status == RunStatus.CANCELLING:
                     self._finish_cancelled_before_launch(record)
                     return
@@ -482,6 +521,39 @@ class RunManager:
             with self._lock:
                 self._processes.pop(job_identifier, None)
                 self._threads.pop(job_identifier, None)
+
+    def _validate_execution_before_launch(
+        self,
+        job_identifier: str,
+        adapter: PipelineAdapter,
+        manifest: ProjectManifest | None,
+    ) -> bool:
+        """Run potentially slow admission checks only after a record is durable."""
+        with self._lock:
+            record = self._records[job_identifier]
+            if not record.holds_admission or record.status == RunStatus.CANCELLED:
+                return False
+            if record.status == RunStatus.CANCELLING:
+                self._finish_cancelled_before_launch(record)
+                return False
+            record.current_stage = "Validating execution"
+            self._persist(record)
+            start_stage = record.start_stage
+            project_root = Path(record.results_directory).parent
+
+        manifest = manifest or read_project_manifest(
+            project_root / "input_manifest" / "project_manifest.json"
+        )
+        adapter.validate_execution(manifest, start_stage=start_stage)
+
+        with self._lock:
+            record = self._records[job_identifier]
+            if not record.holds_admission or record.status == RunStatus.CANCELLED:
+                return False
+            if record.status == RunStatus.CANCELLING:
+                self._finish_cancelled_before_launch(record)
+                return False
+        return True
 
     def _launch_workflow_runner(self, job_identifier: str, adapter: PipelineAdapter) -> int:
         with self._lock:
@@ -716,22 +788,59 @@ class RunManager:
             f"{terminal_message} at {self._format_log_timestamp(record.finished_at)}.\n",
         )
 
+    def _claim_cancelled_before_launch(self, job_identifier: str) -> RunRecord | None:
+        """Claim a pre-containment cancellation, or leave the handoff to the worker."""
+        with self._lock:
+            record = self._records.get(job_identifier)
+            if record is None or not record.holds_admission:
+                return None
+            if record.status != RunStatus.CANCELLING:
+                return None
+            if (
+                record.current_stage == "Starting containment"
+                or record.containment_scope_id is not None
+                or job_identifier in self._containment_sessions
+                or job_identifier in self._processes
+                or job_identifier in self._preparation_processes
+            ):
+                return None
+            record.current_stage = "Cancelled before launch"
+            self._persist_safely(record)
+            return record
+
     def _finish_cancelled_before_launch(self, record: RunRecord) -> None:
         job_identifier = record.job_identifier
-        if not self._stop_containment(job_identifier):
-            self._mark_cleanup_unconfirmed(
-                job_identifier, "resource containment scope did not become inactive"
-            )
-            return
-        record.status = RunStatus.CANCELLED
-        record.current_stage = "Cancelled before launch"
-        record.finished_at = datetime.now(UTC)
-        record.holds_admission = False
-        self._clear_persisted_process_identity(record)
-        record.execution_phase = RunExecutionPhase.QUEUED
-        self._persist_safely(record)
-        self._append_terminal_log_marker(record)
-        self._release_locks(job_identifier)
+        with self._lock:
+            current = self._records.get(job_identifier)
+            if (
+                current is None
+                or not current.holds_admission
+                or job_identifier in self._prelaunch_finishing
+            ):
+                return
+            self._prelaunch_finishing.add(job_identifier)
+        try:
+            if not self._stop_containment(job_identifier):
+                self._mark_cleanup_unconfirmed(
+                    job_identifier, "resource containment scope did not become inactive"
+                )
+                return
+            with self._lock:
+                current = self._records.get(job_identifier)
+                if current is None or not current.holds_admission:
+                    return
+                current.status = RunStatus.CANCELLED
+                current.current_stage = "Cancelled before launch"
+                current.finished_at = datetime.now(UTC)
+                current.holds_admission = False
+                self._clear_persisted_process_identity(current)
+                current.execution_phase = RunExecutionPhase.QUEUED
+                self._persist_safely(current)
+                self._append_terminal_log_marker(current)
+                self._release_locks(job_identifier)
+        finally:
+            with self._lock:
+                self._prelaunch_finishing.discard(job_identifier)
 
     def _prepare_bulk_references_if_needed(
         self, job_identifier: str, adapter: PipelineAdapter
@@ -746,7 +855,10 @@ class RunManager:
 
         with self._lock:
             record = self._records[job_identifier]
-            if record.status == RunStatus.CANCELLING:
+            if not record.holds_admission or record.status in {
+                RunStatus.CANCELLING,
+                RunStatus.CANCELLED,
+            }:
                 return
             record.current_stage = "Preparing references"
             self._persist(record)
@@ -821,7 +933,11 @@ class RunManager:
     def _reference_cancel_requested(self, job_identifier: str) -> bool:
         with self._lock:
             record = self._records.get(job_identifier)
-            return record is None or record.status == RunStatus.CANCELLING
+            return (
+                record is None
+                or not record.holds_admission
+                or record.status in {RunStatus.CANCELLING, RunStatus.CANCELLED}
+            )
 
     def _reference_command_runner(
         self,
@@ -1412,6 +1528,11 @@ class RunManager:
                 process.wait(timeout=KILL_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             return False
+        finally:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    with suppress(OSError):
+                        stream.close()
         return not self._process_group_exists(process.pid)
 
     def _schedule_recovered_workflow_resume(self, record: RunRecord) -> None:

@@ -424,22 +424,11 @@ def get_bulk_rnaseq_demo_project() -> ApiResponse[HumanDemoProject]:
 
 @router.post(f"{settings.api_prefix}/runs/start", response_model=ApiResponse[RunRecord])
 def post_run_start(request: RunStartRequest) -> ApiResponse[RunRecord]:
-    adapter = _adapter_for(request.manifest)
-    validation_manifest = request.manifest.model_copy(
-        update={
-            "parameters": {
-                **request.manifest.parameters,
-                "start_stage": request.start_stage.value,
-            }
-        }
-    )
-    checks = adapter.validate_project(validation_manifest)
-    blocking = [check.message for check in checks if check.status.value == "blocking_failure"]
-    if blocking:
-        raise HTTPException(
-            status_code=409,
-            detail="Run has blocking validation failures: " + "; ".join(blocking),
-        )
+    # Detailed validation belongs to the persisted run worker.  In particular,
+    # Bulk reference compatibility may require reading a multi-gigabyte GTF;
+    # doing that here leaves the operator with no authoritative job to inspect
+    # or cancel if the request times out.
+    _adapter_for(request.manifest)
     try:
         record = run_manager.start(
             request.manifest,

@@ -20,7 +20,7 @@ from missus_tom.models.run import RunExecutionPhase, RunRecord, RunStartStage, R
 from missus_tom.pipeline_adapters.bulk_rnaseq import BulkRnaSeqAdapter
 from missus_tom.services import runs as runs_module
 from missus_tom.services.projects import ProjectHistoryStore, save_project
-from missus_tom.services.run_containment import ScopeState, ScopeStatus
+from missus_tom.services.run_containment import ContainmentProbeResult, ScopeState, ScopeStatus
 from missus_tom.services.runs import ProcessIdentity, RunManager
 
 
@@ -64,6 +64,23 @@ class SleepingAdapter(StubAdapter):
             "-c",
             "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
         ]
+
+
+class SlowValidationAdapter(StubAdapter):
+    def __init__(self, root: Path, entered: threading.Event, release: threading.Event) -> None:
+        super().__init__(root)
+        self.entered = entered
+        self.release = release
+
+    def validate_execution(
+        self,
+        _manifest: ProjectManifest,
+        *,
+        start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+    ) -> None:
+        del start_stage
+        self.entered.set()
+        assert self.release.wait(timeout=2)
 
 
 class HeartbeatAdapter(StubAdapter):
@@ -164,6 +181,180 @@ def wait_for_status(manager: RunManager, job_identifier: str, status: RunStatus)
             return record
         time.sleep(0.01)
     pytest.fail(f"run did not reach {status}")
+
+
+def test_start_persists_visible_run_before_slow_execution_validation(
+    tmp_path: Path, manifest_payload: dict[str, Any]
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    entered, release = threading.Event(), threading.Event()
+    manager = RunManager(
+        SlowValidationAdapter(tmp_path, entered, release),
+        registry_directory=tmp_path / "state",
+    )  # type: ignore[arg-type]
+
+    started_at = time.monotonic()
+    started = manager.start(manifest)
+
+    assert time.monotonic() - started_at < 0.5
+    assert entered.wait(timeout=1)
+    visible = manager.get(started.job_identifier)
+    assert visible.status == RunStatus.PREPARING
+    assert visible.current_stage == "Validating execution"
+    assert visible.holds_admission is True
+    assert (tmp_path / "state" / f"{started.job_identifier}.json").is_file()
+
+    release.set()
+    assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.COMPLETED
+
+
+def test_execution_validation_failure_remains_a_visible_failed_run(
+    tmp_path: Path, manifest_payload: dict[str, Any]
+) -> None:
+    class FailingValidationAdapter(StubAdapter):
+        def validate_execution(
+            self,
+            _manifest: ProjectManifest,
+            *,
+            start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+        ) -> None:
+            del start_stage
+            raise ValueError("annotation compatibility failed")
+
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    manager = RunManager(FailingValidationAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+
+    started = manager.start(manifest)
+    failed = wait_for_terminal(manager, started.job_identifier)
+
+    assert failed.status == RunStatus.FAILED
+    assert failed.current_stage == "Failed to start"
+    assert failed.error_message == "annotation compatibility failed"
+    assert failed.holds_admission is False
+
+
+def test_cancel_during_execution_validation_releases_admission(
+    tmp_path: Path, manifest_payload: dict[str, Any]
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    entered, release = threading.Event(), threading.Event()
+    manager = RunManager(
+        SlowValidationAdapter(tmp_path, entered, release),
+        registry_directory=tmp_path / "state",
+    )  # type: ignore[arg-type]
+
+    started = manager.start(manifest)
+    assert entered.wait(timeout=1)
+
+    cancelled = manager.cancel(started.job_identifier)
+    assert cancelled.status == RunStatus.CANCELLED
+    assert cancelled.holds_admission is False
+    assert manager._locks == {}
+
+    release.set()
+    assert manager.get(started.job_identifier).status == RunStatus.CANCELLED
+
+
+def test_validation_cancel_does_not_start_containment_after_the_snapshot(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    entered, release = threading.Event(), threading.Event()
+    manager = RunManager(
+        SlowValidationAdapter(tmp_path, entered, release),
+        registry_directory=tmp_path / "state",
+    )  # type: ignore[arg-type]
+    worker_settled = threading.Event()
+    started_containment: list[str] = []
+    original_claim = RunManager._claim_cancelled_before_launch
+    original_finish = RunManager._finish_cancelled_before_launch
+
+    def observe_finish(self: RunManager, record: RunRecord) -> None:
+        worker_settled.set()
+        original_finish(self, record)
+
+    def release_worker_before_claim(self: RunManager, job_identifier: str) -> RunRecord | None:
+        release.set()
+        assert worker_settled.wait(timeout=2)
+        return original_claim(self, job_identifier)
+
+    def reject_containment(self: RunManager, job_identifier: str) -> None:
+        started_containment.append(job_identifier)
+        worker_settled.set()
+
+    monkeypatch.setattr(RunManager, "_finish_cancelled_before_launch", observe_finish)
+    monkeypatch.setattr(RunManager, "_claim_cancelled_before_launch", release_worker_before_claim)
+    monkeypatch.setattr(RunManager, "_start_native_containment_if_needed", reject_containment)
+
+    started = manager.start(manifest)
+    assert entered.wait(timeout=1)
+    manager.cancel(started.job_identifier)
+
+    assert started_containment == []
+    terminal = wait_for_terminal(manager, started.job_identifier)
+    assert terminal.status == RunStatus.CANCELLED
+    assert terminal.holds_admission is False
+    again = manager.start(manifest)
+    assert again.job_identifier != started.job_identifier
+    release.set()
+    assert wait_for_terminal(manager, again.job_identifier).status == RunStatus.COMPLETED
+
+
+def test_validation_handoff_persists_starting_containment_before_running(
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HoldAfterValidationAdapter(SlowValidationAdapter):
+        def construct_command(
+            self,
+            _manifest: ProjectManifest,
+            *,
+            start_stage: RunStartStage = RunStartStage.QUANTIFICATION,
+        ) -> list[str]:
+            del start_stage
+            return [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    entered, release = threading.Event(), threading.Event()
+    manager = RunManager(
+        HoldAfterValidationAdapter(tmp_path, entered, release),
+        registry_directory=tmp_path / "state",
+    )  # type: ignore[arg-type]
+    observed: list[tuple[RunStatus, str | None]] = []
+    original_start = RunManager._start_native_containment_if_needed
+
+    def capture_start(self: RunManager, job_identifier: str) -> None:
+        record = self.get(job_identifier)
+        observed.append((record.status, record.current_stage))
+        original_start(self, job_identifier)
+
+    monkeypatch.setattr(
+        runs_module,
+        "probe_native_containment",
+        lambda: ContainmentProbeResult(available=True, message="stub"),
+    )
+    monkeypatch.setattr(RunManager, "_start_native_containment_if_needed", capture_start)
+
+    started = manager.start(manifest)
+    assert entered.wait(timeout=1)
+    release.set()
+    running = wait_for_status(manager, started.job_identifier, RunStatus.RUNNING)
+    assert observed == [(RunStatus.PREPARING, "Starting containment")]
+    assert running.current_stage == "Workflow runner"
+    manager.cancel(started.job_identifier)
+    assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.CANCELLED
 
 
 def test_run_log_offset_read(tmp_path: Path, manifest_payload: dict[str, Any]) -> None:
@@ -869,10 +1060,17 @@ def test_unreaped_assignment_failure_keeps_identity_and_admission(
             manager._persist(record)
 
     monkeypatch.setattr(manager, "_start_native_containment_if_needed", start_containment)
-    monkeypatch.setattr(manager, "_terminate_and_reap_process_group", lambda _process: False)
+    unreaped_processes: list[subprocess.Popen[str]] = []
+
+    def leave_unreaped(process: subprocess.Popen[str]) -> bool:
+        unreaped_processes.append(process)
+        return False
+
+    monkeypatch.setattr(manager, "_terminate_and_reap_process_group", leave_unreaped)
     monkeypatch.setattr(manager, "_stop_containment", lambda _job_identifier: True)
     started = manager.start(manifest)
     process_id: int | None = None
+    process: subprocess.Popen[str] | None = None
     try:
         interrupted = wait_for_status(manager, started.job_identifier, RunStatus.INTERRUPTED)
         process_id = interrupted.process_id
@@ -883,6 +1081,10 @@ def test_unreaped_assignment_failure_keeps_identity_and_admission(
         with pytest.raises(ValueError, match="another workflow job is active"):
             manager.start(manifest)
     finally:
+        with manager._lock:
+            process = manager._processes.get(
+                started.job_identifier
+            ) or manager._preparation_processes.get(started.job_identifier)
         if process_id is None:
             with manager._lock:
                 record = manager._records.get(started.job_identifier)
@@ -890,6 +1092,15 @@ def test_unreaped_assignment_failure_keeps_identity_and_admission(
         if process_id is not None:
             with suppress(ProcessLookupError):
                 os.killpg(process_id, signal.SIGKILL)
+        if process is not None:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+        for unreaped in unreaped_processes:
+            with suppress(subprocess.TimeoutExpired):
+                unreaped.wait(timeout=2)
+            for stream in (unreaped.stdout, unreaped.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def test_sigkill_escalation_stops_stubborn_descendant_group(

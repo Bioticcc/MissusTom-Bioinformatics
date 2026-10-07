@@ -241,6 +241,10 @@ def _terminate_owned_process(process: subprocess.Popen[str] | None) -> None:
             process.kill()
     with suppress(OSError, subprocess.TimeoutExpired):
         process.wait(timeout=5)
+    for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+        if stream is not None:
+            with suppress(OSError):
+                stream.close()
 
 
 def _cleanup_containment_probe(
@@ -478,6 +482,7 @@ class RunContainmentSession:
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 detail = (process.stderr.read() if process.stderr else "").strip()
+                _terminate_owned_process(process)
                 raise ValueError(
                     "Could not start the resource containment scope"
                     + (f": {detail}" if detail else "")
@@ -487,13 +492,11 @@ class RunContainmentSession:
                 break
             time.sleep(0.05)
         if cgroup is None:
-            process.kill()
-            process.wait(timeout=5)
+            _terminate_owned_process(process)
             raise ValueError("Started containment scope but could not resolve its cgroup path")
         procs = Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.procs"
         if not procs.is_file():
-            process.kill()
-            process.wait(timeout=5)
+            _terminate_owned_process(process)
             raise ValueError(f"Containment cgroup.procs is not accessible: {procs}")
         return cls(properties.scope_unit, keeper_process=process, cgroup_procs=procs)
 
@@ -504,7 +507,12 @@ class RunContainmentSession:
             raise ValueError(f"Could not assign process {process_id} to containment scope") from exc
 
     def stop(self, *, grace_seconds: float = 10.0) -> bool:
-        return stop_scope_unit(self.scope_unit, grace_seconds=grace_seconds)
+        stopped = stop_scope_unit(self.scope_unit, grace_seconds=grace_seconds)
+        if stopped:
+            # The scope stop also ends the keeper process launched by start().
+            # Reap it so its stderr pipe cannot survive the session.
+            _terminate_owned_process(self._keeper_process)
+        return stopped
 
     def is_inactive(self) -> bool:
         return scope_status(self.scope_unit).state == ScopeState.INACTIVE

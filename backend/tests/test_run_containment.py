@@ -313,13 +313,42 @@ def test_cancellation_stops_scope(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(run_containment.subprocess, "run", fake_run)
     monkeypatch.setattr(run_containment, "_scope_processes", lambda _cgroup: ())
+    keeper = Mock(poll=lambda: 0, stdout=None, stderr=None)
     session = RunContainmentSession(
         "missus-tom-run-test.scope",
-        keeper_process=Mock(poll=lambda: None),
+        keeper_process=keeper,
         cgroup_procs=Path("/tmp/unused"),
     )
     assert session.stop(grace_seconds=0.1) is True
     assert any(call[:3] == ["systemctl", "--user", "stop"] for call in calls)
+    keeper.wait.assert_called_once_with(timeout=5)
+
+
+def test_failed_scope_start_reaps_keeper(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[str] = []
+
+    class _Stream(io.StringIO):
+        def close(self) -> None:
+            closed.append("stderr")
+            super().close()
+
+    stderr = _Stream("scope failed\n")
+    process = Mock(poll=lambda: 1, stderr=stderr, stdout=None, pid=5)
+    process.wait.return_value = 1
+    monkeypatch.setattr(run_containment, "require_native_containment", lambda: None)
+    monkeypatch.setattr(run_containment.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(ValueError, match="scope failed"):
+        RunContainmentSession.start(
+            "failed-start",
+            memory_gb=1,
+            cpus=1,
+            max_parallel_tasks=1,
+        )
+
+    process.wait.assert_called_once_with(timeout=5)
+    assert closed == ["stderr"]
+    process.kill.assert_not_called()
 
 
 def test_scope_status_distinguishes_inactive_active_and_unqueryable(
@@ -466,15 +495,11 @@ def test_linux_descendants_join_capped_scope() -> None:
         assert child_cgroup is not None
         assert child_cgroup == scope_cgroup or str(child_cgroup).startswith(str(scope_cgroup))
     finally:
-        subprocess.run(
-            ["systemctl", "--user", "stop", session.scope_id],
-            check=False,
-            timeout=15,
-            shell=False,
-        )
+        session.stop(grace_seconds=15)
         if "child" in locals() and child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+        run_containment._terminate_owned_process(session._keeper_process)
 
 
 @pytest.mark.skipif(
