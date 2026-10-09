@@ -35,7 +35,7 @@ def test_scope_command_and_property_construction() -> None:
     assert properties.scope_unit == "missus-tom-run-job12345678.scope"
     assert properties.memory_max_bytes == memory_limit_bytes(8.0)
     assert properties.cpu_quota == "400%"
-    assert properties.tasks_max == 64
+    assert properties.tasks_max == 640
     command = build_scope_command(properties)
     assert command[:4] == ["systemd-run", "--user", "--scope", f"--unit={properties.scope_unit}"]
     assert "-p" in command
@@ -45,6 +45,15 @@ def test_scope_command_and_property_construction() -> None:
 def test_cpu_quota_conversion() -> None:
     assert cpu_quota_for_cpus(1) == "100%"
     assert cpu_quota_for_cpus(4) == "400%"
+
+
+def test_tasks_max_keeps_nextflow_runtime_headroom_at_single_task_concurrency() -> None:
+    single = build_scope_properties("single", memory_gb=16, cpus=4, max_parallel_tasks=1)
+    larger = build_scope_properties("larger", memory_gb=64, cpus=16, max_parallel_tasks=4)
+
+    assert single.tasks_max == 512
+    assert single.tasks_max > 32
+    assert larger.tasks_max == 1280
 
 
 def test_memory_limit_conversion() -> None:
@@ -393,7 +402,7 @@ def test_scope_status_treats_nonempty_inactive_scope_as_active(
     assert "2 process" in status.message
 
 
-def test_scope_status_requires_readable_cgroup_for_known_unit(
+def test_scope_status_accepts_removed_cgroup_after_systemd_confirms_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -403,8 +412,20 @@ def test_scope_status_requires_readable_cgroup_for_known_unit(
             [], 3, stdout="inactive\n", stderr=""
         ),
     )
-    monkeypatch.setattr(run_containment, "_control_group_for_unit", lambda _unit: "/test")
-    monkeypatch.setattr(run_containment, "_scope_processes", lambda _cgroup: None)
+    monkeypatch.setattr(run_containment, "_control_group_for_unit", lambda _unit: None)
+
+    assert scope_status("test.scope").state == ScopeState.INACTIVE
+
+
+def test_scope_status_keeps_active_scope_without_queryable_cgroup_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_containment.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+    )
+    monkeypatch.setattr(run_containment, "_control_group_for_unit", lambda _unit: None)
 
     assert scope_status("test.scope").state == ScopeState.UNQUERYABLE
 

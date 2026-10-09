@@ -17,6 +17,10 @@ if [[ ! -d "${resource_root}" ]]; then
   echo "Resource root is not a directory: ${resource_root}" >&2
   exit 2
 fi
+if [[ ! -s "${resource_root}/resources/locks/bulk-rnaseq-linux-64.lock" ]]; then
+  echo "Packaged Bulk dependency lock is missing: ${resource_root}/resources/locks/bulk-rnaseq-linux-64.lock" >&2
+  exit 2
+fi
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/missus-tom-sidecar-smoke.XXXXXX")
 state_directory="${temporary_root}/state"

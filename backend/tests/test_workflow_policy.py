@@ -1,8 +1,181 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import textwrap
 from pathlib import Path
+
+import pytest
+
+
+def _read_mapping_with_workflow_function(mapping_path: Path) -> subprocess.CompletedProcess[str]:
+    repository_root = Path(__file__).resolve().parents[2]
+    analysis_path = repository_root / "workflows" / "bulk_rnaseq" / "bin" / "bulk_rnaseq_analysis.R"
+    code = textwrap.dedent(
+        """
+        expressions <- parse(file = commandArgs(trailingOnly = TRUE)[[1]])
+        environment <- new.env(parent = globalenv())
+        for (expression in expressions) {
+          if (
+            is.call(expression) &&
+            identical(expression[[1]], as.name("<-")) &&
+            is.symbol(expression[[2]]) &&
+            as.character(expression[[2]]) %in% c("progress_message", "read_transcript_to_gene")
+          ) {
+            eval(expression, environment)
+          }
+        }
+        mapping <- environment$read_transcript_to_gene(commandArgs(trailingOnly = TRUE)[[2]])
+        write.table(mapping, row.names = FALSE, quote = FALSE, sep = "\\t")
+        """
+    )
+    return subprocess.run(
+        ["Rscript", "-e", code, str(analysis_path), str(mapping_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+def test_directly_invoked_bulk_bin_helpers_are_executable() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    helpers = (
+        repository_root / "workflows" / "bulk_rnaseq" / "bin" / "bulk_rnaseq_analysis.R",
+        repository_root / "workflows" / "bulk_rnaseq" / "bin" / "run_with_timeout",
+    )
+    for helper in helpers:
+        assert helper.stat().st_mode & 0o111, helper
+
+
+def test_mapping_validation_uses_sorted_adjacent_checks_not_per_transcript_rescans() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    analysis = (
+        repository_root / "workflows" / "bulk_rnaseq" / "bin" / "bulk_rnaseq_analysis.R"
+    ).read_text(encoding="utf-8")
+
+    assert "for (tx in unique(mapping$transcript_id))" not in analysis
+    assert "mapping[mapping$transcript_id == tx" not in analysis
+    assert "ordered_transcripts <- transcript_id" in analysis
+    assert "ordered_genes <- gene_id" in analysis
+    assert "metadata_order <- order(transcript_id, values)" in analysis
+
+
+def test_analysis_script_emits_mapping_and_analysis_progress_messages() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    analysis = (
+        repository_root / "workflows" / "bulk_rnaseq" / "bin" / "bulk_rnaseq_analysis.R"
+    ).read_text(encoding="utf-8")
+
+    for message in (
+        "Loading transcript-to-gene mapping",
+        "Validating transcript-to-gene mapping",
+        "Transcript-to-gene mapping complete:",
+        "Importing Kallisto abundance tables",
+        "Running DESeq2 for %s (%s)",
+        "Computing rlog/PCA for %s (%s)",
+        "Writing figures and tables for %s (%s)",
+        "Analysis complete",
+    ):
+        assert message in analysis
+
+
+def test_mapping_reader_preserves_deterministic_deduplication_semantics(tmp_path: Path) -> None:
+    if shutil.which("Rscript") is None:
+        pytest.skip("Rscript unavailable")
+    mapping_path = tmp_path / "mapping.tsv"
+    mapping_path.write_text(
+        "transcript_id\tgene_id\tgene_name\tgene_biotype\n"
+        "TX_B\tG_B\tGeneB\tlncRNA\n"
+        "TX_A\tG_A\tGeneA\tprotein_coding\n"
+        "TX_B\tG_B\tGeneB\tlncRNA\n",
+        encoding="utf-8",
+    )
+
+    result = _read_mapping_with_workflow_function(mapping_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "transcript_id\tgene_id\tgene_name\tgene_biotype",
+        "TX_A\tG_A\tGeneA\tprotein_coding",
+        "TX_B\tG_B\tGeneB\tlncRNA",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_error"),
+    [
+        (
+            "TX_A\tG_A\tGeneA\tprotein_coding\nTX_A\tG_B\tGeneA\tprotein_coding\n",
+            "multiple gene_id",
+        ),
+        (
+            "TX_A\tG_A\tGeneA\tprotein_coding\nTX_A\tG_A\tGeneB\tprotein_coding\n",
+            "conflicting gene_name",
+        ),
+        (
+            "TX_A\tG_A\tGeneA\tprotein_coding\nTX_A\tG_A\tGeneA\tlncRNA\n",
+            "conflicting gene_biotype",
+        ),
+    ],
+)
+def test_mapping_reader_preserves_conflict_validation(
+    tmp_path: Path, rows: str, expected_error: str
+) -> None:
+    if shutil.which("Rscript") is None:
+        pytest.skip("Rscript unavailable")
+    mapping_path = tmp_path / "mapping.tsv"
+    mapping_path.write_text(
+        "transcript_id\tgene_id\tgene_name\tgene_biotype\n" + rows,
+        encoding="utf-8",
+    )
+
+    result = _read_mapping_with_workflow_function(mapping_path)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+def test_mapping_reader_preserves_transcript_biotype_conflict_validation(tmp_path: Path) -> None:
+    if shutil.which("Rscript") is None:
+        pytest.skip("Rscript unavailable")
+    mapping_path = tmp_path / "mapping.tsv"
+    mapping_path.write_text(
+        "transcript_id\tgene_id\tgene_name\tgene_biotype\ttranscript_biotype\n"
+        "TX_A\tG_A\tGeneA\tprotein_coding\tprotein_coding\n"
+        "TX_A\tG_A\tGeneA\tprotein_coding\tprocessed_transcript\n",
+        encoding="utf-8",
+    )
+
+    result = _read_mapping_with_workflow_function(mapping_path)
+
+    assert result.returncode != 0
+    assert "conflicting transcript_biotype" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_error"),
+    [
+        ("\tG_A\tGeneA\tprotein_coding\n", "empty transcript_id"),
+        ("TX_A\t\tGeneA\tprotein_coding\n", "empty gene_id"),
+    ],
+)
+def test_mapping_reader_preserves_required_identifier_validation(
+    tmp_path: Path, row: str, expected_error: str
+) -> None:
+    if shutil.which("Rscript") is None:
+        pytest.skip("Rscript unavailable")
+    mapping_path = tmp_path / "mapping.tsv"
+    mapping_path.write_text(
+        "transcript_id\tgene_id\tgene_name\tgene_biotype\n" + row,
+        encoding="utf-8",
+    )
+
+    result = _read_mapping_with_workflow_function(mapping_path)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
 
 
 def test_release_publish_job_targets_repository_without_checkout() -> None:

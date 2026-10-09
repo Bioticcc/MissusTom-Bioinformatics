@@ -242,8 +242,8 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
             await pollInstall(pipeline, controller.signal);
             status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
           }
-          if (status.missing.length === 0 || status.job?.status === "succeeded") {
-            current = record(current, pipeline, "dependencies", "complete", status.job?.message ?? "Dependencies are ready.");
+          if (status.missing.length === 0) {
+            current = record(current, pipeline, "dependencies", "complete", "Installed and verified.");
             continue;
           }
           const installJob = await apiRequest<NonNullable<PipelineDependencies["job"]>>(
@@ -254,9 +254,11 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
           await pollInstall(pipeline, controller.signal);
           status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
           syncDependencyLiveJob(pipeline, status.job);
-          current = status.job?.status === "succeeded"
-            ? record(current, pipeline, "dependencies", "complete", status.job.message)
-            : record(current, pipeline, "dependencies", "failed", status.job?.message ?? "Installation did not complete.");
+          current = status.job?.status === "succeeded" && status.missing.length === 0
+            ? record(current, pipeline, "dependencies", "complete", "Installed and verified.")
+            : record(current, pipeline, "dependencies", "failed", status.missing.length > 0
+              ? `Installation finished but verification still reports missing requirements: ${status.missing.join(", ")}.`
+              : status.job?.message ?? "Installation did not complete.");
         } catch (reason) {
           if (controller.signal.aborted) throw reason;
           const message = reason instanceof Error ? reason.message : "Dependency installation failed.";

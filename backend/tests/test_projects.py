@@ -143,15 +143,33 @@ async def test_project_history_and_open_api(
         assert opened.status_code == 200
         result = opened.json()["data"]
         assert result["manifest"]["project_identifier"] == manifest_payload["project_identifier"]
-        assert result["validation"]["valid"] is False
-        assert result["plan"]["execution_enabled"] is False
-        assert result["plan"]["warnings"]
+        assert result["validation"]["valid"] is True
+        assert result["validation"]["checks"][0]["check_id"] == "execution_validation"
         missing = await client.post(
             "/api/v1/projects/open", json={"manifest_path": str(tmp_path / "missing.json")}
         )
         assert missing.status_code == 404
         relative = await client.post("/api/v1/projects/open", json={"manifest_path": "x.json"})
         assert relative.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_project_open_defers_expensive_reference_validation(
+    tmp_path: Path, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path / "state"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        saved = await client.post("/api/v1/projects/save", json=manifest_payload)
+        path = saved.json()["data"]["manifest_path"]
+
+        def expensive_validation(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("project open must not run full project validation")
+
+        monkeypatch.setattr(routes, "validate_project", expensive_validation)
+        opened = await client.post("/api/v1/projects/open", json={"manifest_path": path})
+
+    assert opened.status_code == 200
+    assert opened.json()["data"]["validation"]["checks"][0]["status"] == "not_yet_configured"
 
 
 @pytest.mark.anyio

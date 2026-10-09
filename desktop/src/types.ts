@@ -292,6 +292,8 @@ export interface RunRecord {
   process_group_id: number | null;
   process_start_ticks: number | null;
   process_boot_id: string | null;
+  cleanup_warning: string | null;
+  cleanup_verified_at: string | null;
   holds_admission: boolean;
   container_cleanup_required: boolean;
   container_cleanup_verified_at: string | null;

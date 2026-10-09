@@ -111,6 +111,8 @@ class RunRecord(BaseModel):
     execution_phase: RunExecutionPhase = RunExecutionPhase.QUEUED
     containment_scope_id: str | None = None
     containment_cleanup_attempts: int = 0
+    cleanup_warning: str | None = None
+    cleanup_verified_at: datetime | None = None
     holds_admission: bool = False
     container_cleanup_required: bool = False
     container_cleanup_verified_at: datetime | None = None

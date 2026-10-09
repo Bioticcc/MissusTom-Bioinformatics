@@ -26,7 +26,7 @@
     "test:bundle": "node test/builtBundle.contract.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "tauri": "tauri",
-    "tauri:release": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-unknown-linux-gnu"
+    "tauri:release": "VITE_BUILD_REVISION=\"${VITE_BUILD_REVISION:-$(git rev-parse HEAD)}\" tauri build --config src-tauri/tauri.release.conf.json --target x86_64-unknown-linux-gnu"
   },
   "dependencies": {
     "@tauri-apps/api": "2.2.0",

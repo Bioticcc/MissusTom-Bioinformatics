@@ -1230,13 +1230,15 @@ def test_docker_cleanup_failure_holds_admission_and_retry_can_finish(
     )
 
     manager.cancel(started.job_identifier)
-    interrupted = wait_for_status(manager, started.job_identifier, RunStatus.INTERRUPTED)
+    interrupted = wait_for_status(manager, started.job_identifier, RunStatus.CANCELLED)
+    assert interrupted.finished_at is not None
     assert interrupted.holds_admission is True
     for _ in range(100):
         with manager._lock:
             if started.job_identifier not in manager._processes:
                 break
         time.sleep(0.01)
+    assert manager.get(started.job_identifier).cleanup_warning is not None
 
     monkeypatch.setattr(
         runs_module.subprocess,
@@ -1307,6 +1309,63 @@ def test_recovery_uses_persisted_containment_scope_without_leader_identity(
         assert recovered.containment_scope_id is None
     else:
         assert recovered.containment_scope_id == record.containment_scope_id
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected_status"),
+    [(1, RunStatus.FAILED), (0, RunStatus.COMPLETED)],
+)
+def test_recovery_finalizes_known_exit_after_scope_and_process_disappear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    expected_status: RunStatus,
+) -> None:
+    registry = tmp_path / "state"
+    registry.mkdir()
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="known exit",
+        status=RunStatus.INTERRUPTED,
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project" / "logs" / "run.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        exit_code=exit_code,
+        error_message="Backend restarted before this run reached a terminal state.",
+        execution_phase=RunExecutionPhase.WORKFLOW,
+        containment_scope_id="missus-tom-run-gone.scope",
+        holds_admission=True,
+        process_id=40351,
+        process_group_id=40351,
+        process_start_ticks=1,
+        process_boot_id="old",
+    )
+    (registry / f"{record.job_identifier}.json").write_text(
+        record.model_dump_json(), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runs_module, "scope_status", lambda _scope: ScopeStatus(ScopeState.INACTIVE, "absent")
+    )
+    monkeypatch.setattr(RunManager, "_identity_matches", lambda *_args: False)
+    monkeypatch.setattr(RunManager, "_process_group_exists", lambda *_args: False)
+
+    recovered = RunManager(StubAdapter(tmp_path), registry_directory=registry).get(
+        record.job_identifier
+    )  # type: ignore[arg-type]
+
+    assert recovered.status == expected_status
+    assert recovered.finished_at is not None
+    assert recovered.holds_admission is False
+    assert recovered.containment_scope_id is None
+    assert recovered.process_id is None
+    assert recovered.process_group_id is None
+    assert recovered.container_cleanup_verified_at is not None
+    if exit_code:
+        assert recovered.error_message == "Workflow runner exited with status 1"
+    else:
+        assert recovered.error_message is None
 
 
 def test_recovered_scope_without_leader_can_be_cancelled(
@@ -1395,6 +1454,68 @@ def test_stop_containment_preserves_scope_and_admission_until_retry_succeeds(
     assert manager._stop_containment(record.job_identifier) is True
     assert record.containment_scope_id is None
     assert record.containment_cleanup_attempts == 2
+
+
+def test_workflow_failure_keeps_terminal_time_and_primary_error_when_cleanup_is_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="failed workflow",
+        status=RunStatus.RUNNING,
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project" / "logs" / "run.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+    )
+    manager._records[record.job_identifier] = record
+    monkeypatch.setattr(manager, "_cleanup_owned_containers", lambda _identifier: True)
+    monkeypatch.setattr(manager, "_stop_containment", lambda _identifier: False)
+
+    manager._finalize_process(record.job_identifier, 1)
+
+    failed = manager.get(record.job_identifier)
+    assert failed.status == RunStatus.FAILED
+    assert failed.current_stage == "Nextflow failed"
+    assert failed.error_message == "Workflow runner exited with status 1"
+    assert failed.finished_at is not None
+    assert failed.cleanup_warning == "resource containment scope did not become inactive"
+    assert failed.holds_admission is True
+
+
+def test_retry_cleanup_releases_admission_without_erasing_workflow_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="retry cleanup",
+        status=RunStatus.FAILED,
+        current_stage="Nextflow failed",
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project" / "logs" / "run.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        exit_code=1,
+        error_message="Workflow runner exited with status 1",
+        cleanup_warning="resource containment scope did not become inactive",
+        holds_admission=True,
+    )
+    manager._records[record.job_identifier] = record
+    monkeypatch.setattr(manager, "_cleanup_owned_containers", lambda _identifier: True)
+    monkeypatch.setattr(manager, "_stop_containment", lambda _identifier: True)
+
+    recovered = manager.cancel(record.job_identifier)
+
+    assert recovered.status == RunStatus.FAILED
+    assert recovered.finished_at == record.finished_at
+    assert recovered.cleanup_warning is None
+    assert recovered.holds_admission is False
 
 
 def test_recovered_dead_leader_allows_only_labelled_container_cleanup(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -149,6 +150,32 @@ def test_kallisto_readiness_uses_version_subcommand(monkeypatch: pytest.MonkeyPa
 
     assert requirement.installed is True
     assert run.call_args.args[0] == ["/managed/bin/kallisto", "version"]
+
+
+def test_tool_probe_reports_timeout_and_exit_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    installer = DependencyInstaller()
+    monkeypatch.setattr(dependencies, "runtime_tool", lambda *_: "/managed/bin/multiqc")
+    monkeypatch.setattr(dependencies, "runtime_environment", lambda _: {"PATH": "/managed/bin"})
+
+    monkeypatch.setattr(
+        dependencies.subprocess,
+        "run",
+        Mock(side_effect=subprocess.TimeoutExpired(["multiqc", "--version"], 3)),
+    )
+    timed_out = installer._tool_requirement("multiqc", "bulk-rnaseq", managed=True)
+    assert timed_out.installed is False
+    assert timed_out.detail == "/managed/bin/multiqc timed out after 3s"
+
+    monkeypatch.setattr(
+        dependencies.subprocess,
+        "run",
+        Mock(
+            return_value=SimpleNamespace(returncode=2, stdout="", stderr="missing shared library")
+        ),
+    )
+    failed = installer._tool_requirement("multiqc", "bulk-rnaseq", managed=True)
+    assert failed.installed is False
+    assert failed.detail == "/managed/bin/multiqc exited 2: missing shared library"
 
 
 def test_ont_installation_still_fails_closed_without_a_dorado_digest(

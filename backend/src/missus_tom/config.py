@@ -17,9 +17,8 @@ def read_build_revision() -> str:
     injected = os.getenv("MISSUS_TOM_BUILD_REVISION", "").strip()
     if injected:
         return injected
-    frozen_root = getattr(sys, "_MEIPASS", None)
-    if frozen_root:
-        packaged = Path(frozen_root) / "resources" / "build_revision.txt"
+    packaged = settings.packaged_resources_root / "build_revision.txt"
+    if packaged.is_file():
         try:
             value = packaged.read_text(encoding="utf-8").strip()
         except OSError:
@@ -70,14 +69,25 @@ class Settings:
 
     @property
     def resource_root(self) -> Path:
-        """Return the source tree or PyInstaller resource directory."""
+        """Return the bundle root containing workflows and other runtime assets."""
         configured = os.getenv("MISSUS_TOM_RESOURCE_ROOT")
         if configured:
             return Path(configured).expanduser().resolve(strict=False)
         frozen_root = getattr(sys, "_MEIPASS", None)
         if frozen_root:
-            return (Path(frozen_root) / "resources").resolve(strict=False)
+            return Path(frozen_root).resolve(strict=False)
         return Path(__file__).resolve().parents[3]
+
+    @property
+    def packaged_resources_root(self) -> Path:
+        """Return the directory that contains files staged beneath ``resources/``."""
+        frozen_root = getattr(sys, "_MEIPASS", None)
+        if frozen_root and not os.getenv("MISSUS_TOM_RESOURCE_ROOT"):
+            return (Path(frozen_root) / "resources").resolve(strict=False)
+        configured = os.getenv("MISSUS_TOM_RESOURCE_ROOT")
+        if configured:
+            return (Path(configured).expanduser() / "resources").resolve(strict=False)
+        return Path(__file__).resolve().parent / "resources"
 
     @property
     def ont_runner(self) -> Path | None:

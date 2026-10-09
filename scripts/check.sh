@@ -15,6 +15,7 @@ if [[ ! -d "${project_root}/desktop/node_modules" ]]; then
 fi
 
 cd "${project_root}/backend"
+"${project_root}/scripts/check-version-consistency.sh"
 "${venv_bin}/ruff" check . ../scripts/prepare_human_demo.py
 "${venv_bin}/ruff" format --check . ../scripts/prepare_human_demo.py
 "${venv_bin}/mypy" src

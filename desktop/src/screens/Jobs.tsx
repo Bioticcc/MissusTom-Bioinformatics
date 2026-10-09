@@ -122,13 +122,14 @@ export function Jobs({
       <section className="panel">
         {runs.length === 0 ? <div className="empty-state"><div className="empty-orbit" aria-hidden="true">◷</div><h2>No jobs</h2><p>No job records exist.</p></div> : <div className="job-list">
           {runs.map((run) => {
-            const retryCleanup = run.status === "interrupted" && run.holds_admission;
+            const retryCleanup = run.holds_admission && Boolean(run.cleanup_warning || run.finished_at);
             const busy = cancelling.has(run.job_identifier) || run.status === "cancelling";
             const logActive = pollableStatuses.has(run.status);
             return <article className="job-card" key={run.job_identifier}>
               <div className="section-heading"><div><h2>{run.project_name}</h2><p>{run.current_stage ?? "No stage reported"}</p></div><span className={`job-state state-${run.status}`}>{run.status}</span></div>
               <dl className="job-metadata"><dt>Started</dt><dd>{formatTime(run.started_at)}</dd><dt>Finished</dt><dd>{formatTime(run.finished_at)}</dd><dt>Pipeline</dt><dd>{run.pipeline_identifier === "ont-analysis" ? "ONT analysis" : run.pipeline_identifier === "bulk-rnaseq" ? "Bulk RNA-seq" : "Configured workflow"}</dd><dt>Run scope</dt><dd>{run.pipeline_identifier === "ont-analysis" ? "Configured ONT workflow" : run.start_stage === "analysis" ? "Analysis only" : "Quantification + analysis"}</dd><dt>Exit code</dt><dd>{run.exit_code ?? "—"}</dd></dl>
               {run.error_message && <p className="inline-error">{run.error_message}</p>}
+              {run.cleanup_warning && <p className="field-help">Cleanup warning: {run.cleanup_warning}</p>}
               {(cancellableStatuses.has(run.status) || retryCleanup) && <button type="button" className="button secondary" disabled={busy} onClick={() => void cancel(run.job_identifier)}>{busy ? "Cancelling…" : retryCleanup ? "Retry cleanup" : "Cancel"}</button>}
               {terminalStatuses.has(run.status) && <button type="button" className="button secondary" onClick={() => void openDirectory(run.results_directory).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "The output folder could not be opened."))}>Open output folder</button>}
               <LiveCommandLog
@@ -138,6 +139,7 @@ export function Jobs({
                 status={run.status}
                 stage={run.current_stage}
                 startedAt={run.started_at}
+                finishedAt={run.finished_at}
                 lastOutputAt={lastOutputByJob[run.job_identifier] ?? null}
                 fetchChunk={fetchRunLog(run.job_identifier)}
               />

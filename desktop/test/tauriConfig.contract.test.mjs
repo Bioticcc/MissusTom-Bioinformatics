@@ -5,6 +5,10 @@ import test from "node:test";
 const tauriConfig = JSON.parse(
   await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
 );
+const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const releaseConfig = JSON.parse(
+  await readFile(new URL("../src-tauri/tauri.release.conf.json", import.meta.url), "utf8"),
+);
 
 // Tauri 2's documented `bundle.category` values. Keep this list aligned with
 // https://v2.tauri.app/reference/config/#bundleconfig.category.
@@ -65,4 +69,16 @@ test("Main window uses frameless chrome with supported minimum size", () => {
   assert.equal(mainWindow.minWidth, 760);
   assert.equal(mainWindow.minHeight, 520);
   assert.equal(mainWindow.title, "Missus Tom");
+});
+
+test("local release builds inject the git revision used by frozen backend sidecars", () => {
+  assert.match(packageJson.scripts["tauri:release"], /VITE_BUILD_REVISION/);
+  assert.match(packageJson.scripts["tauri:release"], /git rev-parse HEAD/);
+});
+
+test("release package includes the backend build revision beside its runtime resources", () => {
+  assert.equal(
+    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/build_revision.txt"],
+    "resources/build_revision.txt",
+  );
 });

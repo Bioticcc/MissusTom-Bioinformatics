@@ -28,7 +28,16 @@ from uuid import uuid4
 
 _GIB = 1024**3
 
-TASKS_MAX_PER_PARALLEL_TASK = 32
+# TasksMax counts Linux tasks (threads as well as processes), unlike the
+# scientific workflow concurrency setting.  A Nextflow JVM needs a sizeable
+# control-plane budget before it launches one scientific task: JVM/Groovy/GPars
+# actors, executor and file-transfer pools, launcher shells, and tool threads.
+# Keep that runtime budget independent of workflow parallelism, then add bounded
+# capacity for CPU workers and each concurrently scheduled workflow task.
+TASKS_MAX_RUNTIME_BASELINE = 256
+TASKS_MAX_PER_CPU = 32
+TASKS_MAX_PER_PARALLEL_TASK = 128
+TASKS_MAX_CEILING = 4096
 SCOPE_UNIT_PREFIX = "missus-tom-run-"
 _PROBE_SCOPE_PREFIX = "missus-tom-probe-"
 _PROBE_READY_TIMEOUT_SECONDS = 15.0
@@ -83,7 +92,12 @@ def build_scope_properties(
         scope_unit=f"{SCOPE_UNIT_PREFIX}{sanitized}.scope",
         memory_max_bytes=memory_limit_bytes(memory_gb),
         cpu_quota=cpu_quota_for_cpus(cpus),
-        tasks_max=max(1, max_parallel_tasks) * TASKS_MAX_PER_PARALLEL_TASK,
+        tasks_max=min(
+            TASKS_MAX_CEILING,
+            TASKS_MAX_RUNTIME_BASELINE
+            + max(1, cpus) * TASKS_MAX_PER_CPU
+            + max(1, max_parallel_tasks) * TASKS_MAX_PER_PARALLEL_TASK,
+        ),
     )
 
 
@@ -370,8 +384,11 @@ def scope_status(scope_unit: str) -> ScopeStatus:
         )
     control_group = _control_group_for_unit(scope_unit)
     if control_group is None:
-        if output == "unknown":
-            return ScopeStatus(ScopeState.INACTIVE, "scope is absent")
+        # Transient scopes are commonly removed immediately after they stop.
+        # A systemd-confirmed inactive/failed/absent unit has no cgroup left to
+        # inspect, which is a clean terminal state rather than an uncertainty.
+        if recognized_inactive:
+            return ScopeStatus(ScopeState.INACTIVE, f"scope is {output or 'absent'}")
         return ScopeStatus(
             ScopeState.UNQUERYABLE,
             f"scope is {output or 'reported'} but its cgroup could not be queried",

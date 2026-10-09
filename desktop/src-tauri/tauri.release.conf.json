@@ -9,7 +9,8 @@
     "resources": {
       "../../workflows": "workflows",
       "../../scripts/build-analysis-image.sh": "scripts/build-analysis-image.sh",
-      "../../backend/src/missus_tom/resources/locks": "resources/locks"
+      "../../backend/src/missus_tom/resources/locks": "resources/locks",
+      "../../backend/build/sidecar-resources/build_revision.txt": "resources/build_revision.txt"
     }
   }
 }

@@ -36,7 +36,7 @@ from missus_tom.models.manifest import (
     ProjectValidationResult,
 )
 from missus_tom.models.metadata import MetadataCsvRequest, MetadataCsvResult
-from missus_tom.models.preflight import SystemPreflightResult
+from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
 from missus_tom.models.projects import ProjectOpenRequest, ProjectOpenResult, ProjectSummary
 from missus_tom.models.run import (
     HumanDemoProject,
@@ -268,15 +268,22 @@ def post_project_open(request: ProjectOpenRequest) -> ApiResponse[ProjectOpenRes
     try:
         manifest = open_project(Path(request.manifest_path))
         adapter = _adapter_for(manifest)
-        validation = validate_project(manifest, adapter=adapter)
         plan = adapter.construct_run_plan(manifest)
-        if not validation.valid:
-            plan.execution_enabled = False
-            plan.warnings.extend(
-                check.message
-                for check in validation.checks
-                if check.status.value == "blocking_failure"
-            )
+        validation = ProjectValidationResult(
+            valid=True,
+            manifest=manifest,
+            checks=[
+                PreflightCheck(
+                    check_id="execution_validation",
+                    label="Execution validation",
+                    status=CheckStatus.NOT_CONFIGURED,
+                    message=(
+                        "Full input and reference validation is deferred until validation or run "
+                        "preparation, where progress and cancellation are visible."
+                    ),
+                )
+            ],
+        )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404, detail="The saved project file is unavailable"

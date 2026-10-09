@@ -16,6 +16,7 @@ def test_resource_root_uses_explicit_environment_value(
     monkeypatch.setenv("MISSUS_TOM_RESOURCE_ROOT", str(resources))
 
     assert settings.resource_root == resources.resolve()
+    assert settings.packaged_resources_root == resources.resolve() / "resources"
 
 
 def test_resource_root_uses_pyinstaller_resource_directory_when_frozen(
@@ -24,7 +25,22 @@ def test_resource_root_uses_pyinstaller_resource_directory_when_frozen(
     monkeypatch.delenv("MISSUS_TOM_RESOURCE_ROOT", raising=False)
     monkeypatch.setattr(config_module.sys, "_MEIPASS", str(tmp_path), raising=False)
 
-    assert settings.resource_root == tmp_path / "resources"
+    assert settings.resource_root == tmp_path
+    assert settings.packaged_resources_root == tmp_path / "resources"
+
+
+def test_packaged_resource_root_matches_the_tauri_bundle_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle_root = tmp_path / "Missus Tom"
+    lock = bundle_root / "resources" / "locks" / "bulk-rnaseq-linux-64.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("@EXPLICIT\n", encoding="utf-8")
+    monkeypatch.setenv("MISSUS_TOM_RESOURCE_ROOT", str(bundle_root))
+
+    from missus_tom.services.dependencies import bulk_conda_lock_path
+
+    assert bulk_conda_lock_path() == lock
 
 
 @pytest.mark.parametrize(

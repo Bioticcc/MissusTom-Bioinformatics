@@ -40,6 +40,11 @@ if (!is.finite(q_value) || q_value <= 0 || q_value > 1) stop("Adjusted p-value m
 if (!is.finite(lfc_threshold) || lfc_threshold < 0) stop("Absolute log2 fold change must be non-negative")
 if (is.na(minimum_group_size) || minimum_group_size < 2) stop("Minimum group size must be at least 2")
 
+progress_message <- function(...) {
+  message(...)
+  flush.console()
+}
+
 for (directory in c("differential_expression", "figures", "tables")) {
   dir.create(file.path(output_root, directory), recursive = TRUE, showWarnings = FALSE)
 }
@@ -72,6 +77,7 @@ if (!all(requested_interventions %in% unique(samples$intervention))) {
 }
 
 read_transcript_to_gene <- function(path) {
+  progress_message("Loading transcript-to-gene mapping")
   mapping <- read.delim(path, stringsAsFactors = FALSE, check.names = FALSE)
   required <- c("transcript_id", "gene_id")
   if (!all(required %in% colnames(mapping))) {
@@ -88,38 +94,64 @@ read_transcript_to_gene <- function(path) {
   if (nrow(mapping) == 0) stop("Transcript-to-gene mapping contains no usable rows")
   mapping <- mapping[order(mapping$transcript_id, mapping$gene_id), , drop = FALSE]
   mapping <- mapping[!duplicated(mapping), , drop = FALSE]
+
+  progress_message("Validating transcript-to-gene mapping")
+  transcript_id <- mapping$transcript_id
+  gene_id <- mapping$gene_id
+  # mapping is already ordered by transcript_id and gene_id above, so one
+  # adjacent comparison detects every transcript-to-gene conflict.
+  ordered_transcripts <- transcript_id
+  ordered_genes <- gene_id
+  conflicting_gene_rows <- which(
+    ordered_transcripts[-1] == ordered_transcripts[-length(ordered_transcripts)] &
+      ordered_genes[-1] != ordered_genes[-length(ordered_genes)]
+  )
+  if (length(conflicting_gene_rows) > 0) {
+    tx <- ordered_transcripts[[conflicting_gene_rows[[1]] + 1]]
+    gene_ids <- unique(gene_id[transcript_id == tx])
+    stop(
+      paste(
+        "Transcript",
+        tx,
+        "maps to multiple gene_id values:",
+        paste(gene_ids, collapse = ", ")
+      )
+    )
+  }
+
   optional_meta <- intersect(c("gene_name", "gene_biotype", "transcript_biotype"), colnames(mapping))
-  for (tx in unique(mapping$transcript_id)) {
-    rows <- mapping[mapping$transcript_id == tx, , drop = FALSE]
-    gene_ids <- unique(rows$gene_id)
-    if (length(gene_ids) != 1) {
+  for (column in optional_meta) {
+    values <- ifelse(is.na(mapping[[column]]), "", as.character(mapping[[column]]))
+    metadata_order <- order(transcript_id, values)
+    ordered_transcripts <- transcript_id[metadata_order]
+    ordered_values <- values[metadata_order]
+    conflicting_metadata_rows <- which(
+      ordered_transcripts[-1] == ordered_transcripts[-length(ordered_transcripts)] &
+        ordered_values[-1] != ordered_values[-length(ordered_values)]
+    )
+    if (length(conflicting_metadata_rows) > 0) {
+      tx <- ordered_transcripts[[conflicting_metadata_rows[[1]] + 1]]
+      conflicting_values <- unique(values[transcript_id == tx])
       stop(
         paste(
           "Transcript",
           tx,
-          "maps to multiple gene_id values:",
-          paste(gene_ids, collapse = ", ")
+          "has conflicting",
+          column,
+          "values:",
+          paste(conflicting_values, collapse = ", ")
         )
       )
     }
-    for (column in optional_meta) {
-      values <- unique(ifelse(is.na(rows[[column]]), "", as.character(rows[[column]])))
-      if (length(values) > 1) {
-        stop(
-          paste(
-            "Transcript",
-            tx,
-            "has conflicting",
-            column,
-            "values:",
-            paste(values, collapse = ", ")
-          )
-        )
-      }
-    }
   }
   mapping <- mapping[!duplicated(mapping$transcript_id), , drop = FALSE]
-  mapping[order(mapping$transcript_id), , drop = FALSE]
+  mapping <- mapping[order(mapping$transcript_id), , drop = FALSE]
+  progress_message(sprintf(
+    "Transcript-to-gene mapping complete: %d transcripts / %d genes",
+    nrow(mapping),
+    length(unique(mapping$gene_id))
+  ))
+  mapping
 }
 
 mapping_table <- read_transcript_to_gene(mapping_path)
@@ -199,6 +231,7 @@ write.table(
 
 quant_files <- samples$abundance_tsv
 names(quant_files) <- samples$sample_id
+progress_message("Importing Kallisto abundance tables")
 txi <- tximport(
   quant_files,
   type = "kallisto",
@@ -419,6 +452,7 @@ run_deseq_robust <- function(dds) {
 
 for (comparison_index in seq_len(nrow(comparisons))) {
   comparison_id <- comparisons$comparison_id[[comparison_index]]
+  progress_message(sprintf("Preparing comparison %s", comparison_id))
   case_group <- comparisons$numerator[[comparison_index]]
   reference_group <- comparisons$denominator[[comparison_index]]
   intervention_filter <- comparisons$intervention[[comparison_index]]
@@ -526,6 +560,14 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       )
       next
     }
+    progress_label <- switch(
+      analysis_name,
+      all_genes = "all genes",
+      mRNA = "mRNA",
+      lncRNA = "lncRNA",
+      analysis_name
+    )
+    progress_message(sprintf("Running DESeq2 for %s (%s)", progress_label, comparison_id))
     dds <- run_deseq_robust(dds)
     raw_result <- results(dds, contrast = contrast, alpha = q_value)
     result <- lfcShrink(dds, contrast = contrast, res = raw_result, type = "normal")
@@ -548,6 +590,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       "_lfc", format(lfc_threshold, trim = TRUE, scientific = FALSE)
     )
 
+    progress_message(sprintf("Writing figures and tables for %s (%s)", progress_label, comparison_id))
     write.table(result_df, file.path(de_dir, "full_results.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
     write.table(
       significant,
@@ -602,6 +645,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       col.names = NA
     )
 
+    progress_message(sprintf("Computing rlog/PCA for %s (%s)", progress_label, comparison_id))
     rld <- rlog(dds, blind = FALSE, fitType = "mean")
     rlog_matrix <- assay(rld)
     write.table(
@@ -1017,3 +1061,4 @@ write.table(
   quote = FALSE,
   row.names = FALSE
 )
+progress_message("Analysis complete")

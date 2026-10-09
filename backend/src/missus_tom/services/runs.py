@@ -249,22 +249,53 @@ class RunManager:
                 raise KeyError("job was not found")
             if not record.holds_admission:
                 raise ValueError(f"job is already {record.status.value}")
-            if record.status == RunStatus.CANCELLING:
+            retry_terminal_cleanup = record.finished_at is not None and record.status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }
+            if retry_terminal_cleanup:
+                # Do not erase the completed execution outcome merely to retry
+                # containment verification.
+                pass
+            elif record.status == RunStatus.CANCELLING:
                 return record.model_copy(deep=True)
             was_interrupted = record.status == RunStatus.INTERRUPTED
             cancelling_during_validation = record.current_stage in {
                 "Queued for execution validation",
                 "Validating execution",
             }
-            record.status = RunStatus.CANCELLING
-            record.current_stage = "Stopping controlled workflow process"
-            record.error_message = reason
-            self._persist_safely(record)
-            process = self._processes.get(job_identifier)
-            preparation_process = self._preparation_processes.get(job_identifier)
-            identity = self._identities.get(job_identifier) or self._identity_from_record(record)
-            phase = record.execution_phase
-            containment_scope_id = record.containment_scope_id
+            if retry_terminal_cleanup:
+                process = preparation_process = identity = None
+                containment_scope_id = record.containment_scope_id
+            else:
+                record.status = RunStatus.CANCELLING
+                record.current_stage = "Stopping controlled workflow process"
+                record.error_message = reason
+                self._persist_safely(record)
+                process = self._processes.get(job_identifier)
+                preparation_process = self._preparation_processes.get(job_identifier)
+                identity = self._identities.get(job_identifier) or self._identity_from_record(
+                    record
+                )
+                phase = record.execution_phase
+                containment_scope_id = record.containment_scope_id
+        if retry_terminal_cleanup:
+            if self._cleanup_owned_containers(job_identifier) and self._stop_containment(
+                job_identifier
+            ):
+                with self._lock:
+                    record = self._records[job_identifier]
+                    record.cleanup_warning = None
+                    record.cleanup_verified_at = datetime.now(UTC)
+                    record.container_cleanup_verified_at = datetime.now(UTC)
+                    record.holds_admission = False
+                    self._clear_persisted_process_identity(record)
+                    self._persist_safely(record)
+                    self._release_locks(job_identifier)
+            else:
+                self._mark_cleanup_unconfirmed(job_identifier)
+            return self.get(job_identifier)
 
         if preparation_process is not None:
             self._signal_process_group(preparation_process, signal.SIGTERM)
@@ -652,8 +683,26 @@ class RunManager:
             if not record.holds_admission:
                 return
             record.exit_code = exit_code
-            cancelling = record.status == RunStatus.CANCELLING
+            # A controlled cancellation can race with the runner reaper after
+            # SIGTERM has already produced its conventional negative exit code.
+            cancelling = record.status == RunStatus.CANCELLING or exit_code < 0
             process_group_id = record.process_group_id
+            # Execution has ended even if later containment verification needs
+            # recovery. Persist that immutable outcome before cleanup so a
+            # cleanup warning cannot replace the actual workflow failure.
+            record.finished_at = record.finished_at or datetime.now(UTC)
+            if cancelling:
+                record.status = RunStatus.CANCELLED
+                record.current_stage = "Cancelled"
+            elif exit_code == 0:
+                record.status = RunStatus.COMPLETED
+                record.current_stage = "Completed"
+            else:
+                record.status = RunStatus.FAILED
+                record.current_stage = "Nextflow failed"
+                record.error_message = f"Workflow runner exited with status {exit_code}"
+            self._persist_safely(record)
+            self._append_terminal_log_marker(record)
         if process_group_id is not None and self._process_group_exists(process_group_id):
             with suppress(ProcessLookupError):
                 os.killpg(process_group_id, signal.SIGTERM)
@@ -680,22 +729,11 @@ class RunManager:
                 return
             self._clear_persisted_process_identity(record)
             record.execution_phase = RunExecutionPhase.QUEUED
-            finished_at = datetime.now(UTC)
-            record.finished_at = finished_at
             record.container_cleanup_verified_at = datetime.now(UTC)
+            record.cleanup_verified_at = datetime.now(UTC)
+            record.cleanup_warning = None
             record.holds_admission = False
-            if cancelling:
-                record.status = RunStatus.CANCELLED
-                record.current_stage = "Cancelled"
-            elif exit_code == 0:
-                record.status = RunStatus.COMPLETED
-                record.current_stage = "Completed"
-            else:
-                record.status = RunStatus.FAILED
-                record.current_stage = "Failed"
-                record.error_message = f"Workflow runner exited with status {exit_code}"
             self._persist_safely(record)
-            self._append_terminal_log_marker(record)
             self._release_locks(job_identifier)
 
     def _wait_for_process_with_monitor(
@@ -1211,11 +1249,19 @@ class RunManager:
             record = self._records.get(job_identifier)
             if record is None:
                 return
-            record.status = RunStatus.INTERRUPTED
-            record.current_stage = "Cleanup could not be confirmed"
-            record.error_message = (
-                message or "Owned Docker container cleanup could not be confirmed"
-            )
+            warning = message or "Owned Docker container cleanup could not be confirmed"
+            if record.finished_at is not None and record.status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                # Keep the completed execution outcome visible. Admission stays
+                # held until an authoritative retry/reconciliation proves cleanup.
+                record.cleanup_warning = warning
+            else:
+                record.status = RunStatus.INTERRUPTED
+                record.current_stage = "Cleanup could not be confirmed"
+                record.error_message = warning
             record.holds_admission = True
             self._persist_safely(record)
 
@@ -1740,28 +1786,53 @@ class RunManager:
                 ):
                     # This is the recovery equivalent of stop plus empty verification.
                     record.containment_scope_id = None
-                record.status = RunStatus.INTERRUPTED
-                record.current_stage = (
-                    "Interrupted before current host boot"
-                    if predates_current_boot
-                    else "Recovered after backend restart"
-                )
-                record.error_message = (
-                    (
-                        "This run predates the current host boot, so its local process tree "
-                        "cannot still exist. No run-labelled Docker containers were found."
-                        if record.container_cleanup_required
-                        else "This run predates the current host boot, so its local process "
-                        "tree cannot still exist. It has no persisted process identity."
+                known_terminal_exit = record.exit_code is not None and not holds_admission
+                if known_terminal_exit:
+                    # Older records may have missed the worker's final persist.
+                    # Recovery time is conservative but truthful: all owned work
+                    # was authoritatively absent when this backend observed it.
+                    record.status = (
+                        RunStatus.COMPLETED if record.exit_code == 0 else RunStatus.FAILED
                     )
-                    if predates_current_boot
-                    else (
-                        "A prior runner process may still be active; cancel this job to perform "
-                        "verified cleanup."
-                        if holds_admission
-                        else "Backend restarted before this run reached a terminal state."
+                    record.current_stage = (
+                        "Completed" if record.exit_code == 0 else "Nextflow failed"
                     )
-                )
+                    if not record.error_message or record.error_message.startswith(
+                        "Backend restarted before"
+                    ):
+                        record.error_message = (
+                            None
+                            if record.exit_code == 0
+                            else f"Workflow runner exited with status {record.exit_code}"
+                        )
+                    record.finished_at = record.finished_at or datetime.now(UTC)
+                    record.cleanup_warning = None
+                    record.cleanup_verified_at = datetime.now(UTC)
+                    record.container_cleanup_verified_at = datetime.now(UTC)
+                    self._clear_persisted_process_identity(record)
+                else:
+                    record.status = RunStatus.INTERRUPTED
+                    record.current_stage = (
+                        "Interrupted before current host boot"
+                        if predates_current_boot
+                        else "Recovered after backend restart"
+                    )
+                    record.error_message = (
+                        (
+                            "This run predates the current host boot, so its local process tree "
+                            "cannot still exist. No run-labelled Docker containers were found."
+                            if record.container_cleanup_required
+                            else "This run predates the current host boot, so its local process "
+                            "tree cannot still exist. It has no persisted process identity."
+                        )
+                        if predates_current_boot
+                        else (
+                            "A prior runner process may still be active; cancel this job "
+                            "to perform verified cleanup."
+                            if holds_admission
+                            else "Backend restarted before this run reached a terminal state."
+                        )
+                    )
                 record.holds_admission = holds_admission
                 if predates_current_boot:
                     record.finished_at = record.finished_at or boot_started_at

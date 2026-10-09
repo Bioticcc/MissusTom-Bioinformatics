@@ -35,6 +35,7 @@ export function LiveCommandLog({
   status,
   stage,
   startedAt,
+  finishedAt,
   lastOutputAt,
   pollMs = DEFAULT_POLL_MS,
   defaultExpanded = true,
@@ -46,6 +47,7 @@ export function LiveCommandLog({
   status?: string;
   stage?: string | null;
   startedAt?: string | null;
+  finishedAt?: string | null;
   lastOutputAt?: string | null;
   pollMs?: number;
   defaultExpanded?: boolean;
@@ -125,8 +127,11 @@ export function LiveCommandLog({
   }, [text]);
 
   const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+  const finishedMs = finishedAt ? Date.parse(finishedAt) : Number.NaN;
   const lastOutputMs = lastOutputAt ? Date.parse(lastOutputAt) : Number.NaN;
-  const elapsedMs = Number.isFinite(startedMs) ? now - startedMs : null;
+  const elapsedMs = Number.isFinite(startedMs)
+    ? (Number.isFinite(finishedMs) ? finishedMs : now) - startedMs
+    : null;
   const quietMs = Number.isFinite(lastOutputMs) ? now - lastOutputMs : null;
 
   const copy = async () => {

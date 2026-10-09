@@ -156,12 +156,7 @@ _BULK_LOCK_PACKAGES: Final[tuple[str, ...]] = (
 
 
 def bulk_conda_lock_path() -> Path:
-    source_path = (
-        Path(__file__).resolve().parents[1] / "resources" / "locks" / "bulk-rnaseq-linux-64.lock"
-    )
-    if source_path.is_file():
-        return source_path
-    return settings.resource_root / "locks" / "bulk-rnaseq-linux-64.lock"
+    return settings.packaged_resources_root / "locks" / "bulk-rnaseq-linux-64.lock"
 
 
 def _lock_package_versions(lock_path: Path) -> dict[str, str]:
@@ -492,9 +487,17 @@ class DependencyInstaller:
                     env=runtime_environment(pipeline_identifier),
                 )
                 available = completed.returncode == 0
-                detail = executable if available else f"{executable} did not run successfully"
-            except (OSError, subprocess.TimeoutExpired):
-                detail = f"{executable} could not be executed"
+                if available:
+                    detail = executable
+                else:
+                    output = (completed.stderr or completed.stdout or "").strip().replace("\n", " ")
+                    detail = f"{executable} exited {completed.returncode}"
+                    if output:
+                        detail += f": {output[:240]}"
+            except subprocess.TimeoutExpired:
+                detail = f"{executable} timed out after {probe_timeout}s"
+            except OSError as exc:
+                detail = f"{executable} could not be executed: {exc}"
         return DependencyRequirement(
             name=name,
             installed=available,

@@ -25,6 +25,13 @@ test("setup restores completed and running debug jobs", () => {
   assert.doesNotMatch(setupSource, /setDependencyInstallActive/);
 });
 
+test("setup requires fresh dependency verification after an installer job succeeds", () => {
+  assert.match(setupSource, /status\.job\?\.status === "succeeded" && status\.missing\.length === 0/);
+  assert.match(setupSource, /Installation finished but verification still reports missing requirements/);
+  assert.match(setupSource, /Installed and verified\./);
+  assert.doesNotMatch(setupSource, /status\.missing\.length === 0 \|\| status\.job\?\.status === "succeeded"/);
+});
+
 test("setup and validation expose debug terminals while work is active", () => {
   assert.match(setupSource, /Starting setup and waiting for the backend job/);
   assert.match(wizardSource, /validation-debug-terminal/);
