@@ -19,7 +19,7 @@ source_root = backend_root / "src"
 common = {
     "pathex": [str(source_root)],
     "binaries": [],
-    "datas": [(str(resource_stage), "resources")],
+    "datas": [(str(resource_stage), ".")],
     "hiddenimports": [],
     "hookspath": [],
     "hooksconfig": {},

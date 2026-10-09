@@ -140,6 +140,50 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
         str(repository_root / "backend" / "packaging" / "missus_tom_sidecars.spec"),
     ]
     assert not (repository_root / "desktop" / "src-tauri" / "binaries").exists()
+    staged_lock = (
+        repository_root
+        / "backend"
+        / "build"
+        / "sidecar-resources"
+        / "resources"
+        / "locks"
+        / "bulk-rnaseq-linux-64.lock"
+    )
+    assert staged_lock.read_bytes() == (lock_dir / staged_lock.name).read_bytes()
+    assert not (repository_root / "backend" / "build" / "sidecar-resources" / "locks").exists()
+
+
+def test_sidecar_build_rejects_missing_lock_after_clearing_old_stage(tmp_path: Path) -> None:
+    repository_root, script = _copy_build_script(tmp_path)
+    python = repository_root / "backend" / ".venv" / "bin" / "python"
+    invocation_log = tmp_path / "missing-lock-python.log"
+    _fake_python(python, import_succeeds=True)
+    staged_lock = (
+        repository_root
+        / "backend"
+        / "build"
+        / "sidecar-resources"
+        / "resources"
+        / "locks"
+        / "bulk-rnaseq-linux-64.lock"
+    )
+    staged_lock.parent.mkdir(parents=True)
+    staged_lock.write_text("stale lock\n", encoding="utf-8")
+
+    result = _run_script(
+        script,
+        tmp_path,
+        {"MISSUS_TOM_SIDECAR_TEST_LOG": str(invocation_log)},
+    )
+
+    assert result.returncode == 1
+    assert "Required explicit Bulk dependency lock is missing or invalid" in result.stderr
+    assert not staged_lock.exists()
+    assert invocation_log.read_text(encoding="utf-8").splitlines() == [
+        str(python),
+        "-c",
+        "import PyInstaller",
+    ]
 
 
 def test_sidecar_build_reports_missing_python_before_staging_resources(tmp_path: Path) -> None:

@@ -78,7 +78,11 @@ test("local release builds inject the git revision used by frozen backend sideca
 
 test("release package includes the backend build revision beside its runtime resources", () => {
   assert.equal(
-    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/build_revision.txt"],
+    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/resources/build_revision.txt"],
     "resources/build_revision.txt",
+  );
+  assert.equal(
+    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/resources/locks"],
+    "resources/locks",
   );
 });

@@ -33,13 +33,18 @@ fi
 
 resource_stage="${backend_root}/build/sidecar-resources"
 rm -rf "${resource_stage}"
+lock_source="${backend_root}/src/missus_tom/resources/locks/bulk-rnaseq-linux-64.lock"
+if [[ ! -s "${lock_source}" ]] || ! grep -qx '@EXPLICIT' "${lock_source}"; then
+  echo "Required explicit Bulk dependency lock is missing or invalid: ${lock_source}" >&2
+  exit 1
+fi
 mkdir -p "${resource_stage}/scripts"
 cp -a "${repository_root}/workflows" "${resource_stage}/workflows"
 cp -a "${repository_root}/scripts/build-analysis-image.sh" "${resource_stage}/scripts/"
-mkdir -p "${resource_stage}/locks"
-cp -a "${backend_root}/src/missus_tom/resources/locks/." "${resource_stage}/locks/"
+mkdir -p "${resource_stage}/resources/locks"
+cp -a "${backend_root}/src/missus_tom/resources/locks/." "${resource_stage}/resources/locks/"
 if git -C "${repository_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "${repository_root}" rev-parse HEAD > "${resource_stage}/build_revision.txt"
+  git -C "${repository_root}" rev-parse HEAD > "${resource_stage}/resources/build_revision.txt"
 fi
 
 export MISSUS_TOM_SIDECAR_TARGET="${target}"
