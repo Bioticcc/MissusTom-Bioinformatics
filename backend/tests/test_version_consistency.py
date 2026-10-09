@@ -14,4 +14,4 @@ def test_release_version_metadata_are_consistent() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "0.3.0-rc.28" in result.stdout
+    assert "0.3.0-rc.29" in result.stdout
