@@ -624,34 +624,19 @@ class RunManager:
                 working_directory = Path(workflow_directory).resolve(strict=True)
             if not working_directory.is_dir():
                 raise ValueError("pipeline adapter working directory is not a directory")
-            process = subprocess.Popen(
+            process = self._launch_contained_command(
+                job_identifier,
                 command,
                 cwd=working_directory,
                 env=environment,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
                 pass_fds=lock_descriptors,
             )
             with self._lock:
                 self._processes[job_identifier] = process
                 record = self._records[job_identifier]
                 self._persist_process_identity(job_identifier, record, process.pid)
-            try:
-                self._assign_containment_process(job_identifier, process.pid)
-            except ValueError as exc:
-                reaped = self._terminate_and_reap_process_group(process)
-                with self._lock:
-                    self._processes.pop(job_identifier, None)
-                if not reaped:
-                    self._mark_cleanup_unconfirmed(
-                        job_identifier,
-                        "workflow runner could not be assigned to resource containment "
-                        "and did not exit",
-                    )
-                    raise UnconfirmedCleanup(str(exc)) from exc
-                raise
             with self._lock:
                 record.execution_phase = RunExecutionPhase.WORKFLOW
                 if record.status == RunStatus.CANCELLING:
@@ -720,7 +705,7 @@ class RunManager:
             return
         if not self._stop_containment(job_identifier):
             self._mark_cleanup_unconfirmed(
-                job_identifier, "resource containment scope did not become inactive"
+                job_identifier, "resource containment slice did not become inactive"
             )
             return
         with self._lock:
@@ -860,7 +845,7 @@ class RunManager:
         try:
             if not self._stop_containment(job_identifier):
                 self._mark_cleanup_unconfirmed(
-                    job_identifier, "resource containment scope did not become inactive"
+                    job_identifier, "resource containment slice did not become inactive"
                 )
                 return
             with self._lock:
@@ -998,33 +983,18 @@ class RunManager:
                 self._persist(record)
             monitor = ResourceMonitor(project_root)
             memory_limit_bytes = int(memory_gb * 1024**3)
-            process = subprocess.Popen(
+            process = self._launch_contained_command(
+                job_identifier,
                 command_list,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 env=dict(environment) if environment is not None else None,
-                start_new_session=True,
                 pass_fds=lock_descriptors,
             )
             with self._lock:
                 self._preparation_processes[job_identifier] = process
                 record = self._records[job_identifier]
                 self._persist_process_identity(job_identifier, record, process.pid)
-            try:
-                self._assign_containment_process(job_identifier, process.pid)
-            except ValueError as exc:
-                reaped = self._terminate_and_reap_process_group(process)
-                with self._lock:
-                    self._preparation_processes.pop(job_identifier, None)
-                if not reaped:
-                    self._mark_cleanup_unconfirmed(
-                        job_identifier,
-                        "reference preparation could not be assigned to resource containment "
-                        "and did not exit",
-                    )
-                    raise UnconfirmedCleanup(str(exc)) from exc
-                raise
             term_sent_at: float | None = None
             stop_reason: str | None = None
             next_resource_check = time.monotonic() + CHECK_INTERVAL_SECONDS
@@ -1094,7 +1064,7 @@ class RunManager:
     def _fail_before_completion(self, job_identifier: str, message: str) -> None:
         if not self._stop_containment(job_identifier):
             self._mark_cleanup_unconfirmed(
-                job_identifier, "resource containment scope did not become inactive"
+                job_identifier, "resource containment slice did not become inactive"
             )
             return
         with self._lock:
@@ -1223,7 +1193,7 @@ class RunManager:
             return
         if not self._stop_containment(job_identifier):
             self._mark_cleanup_unconfirmed(
-                job_identifier, "resource containment scope did not become inactive"
+                job_identifier, "resource containment slice did not become inactive"
             )
             return
         if self._cleanup_owned_containers(job_identifier):
@@ -1491,12 +1461,39 @@ class RunManager:
             record.containment_scope_id = session.scope_id
             self._persist_safely(record)
 
-    def _assign_containment_process(self, job_identifier: str, process_id: int) -> None:
+    def _launch_contained_command(
+        self,
+        job_identifier: str,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        stdout: int | TextIO | None = None,
+        stderr: int | TextIO | None = None,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.Popen[str]:
         with self._lock:
             session = self._containment_sessions.get(job_identifier)
+            record = self._records[job_identifier]
         if session is None:
-            return
-        session.assign_process(process_id)
+            if record.containment_scope_id is not None:
+                raise ValueError(
+                    "Run containment is persisted but its launch session is unavailable"
+                )
+            return subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                start_new_session=True,
+                pass_fds=pass_fds,
+                shell=False,
+            )
+        return session.launch_command(
+            command, cwd=cwd, env=env, stdout=stdout, stderr=stderr, pass_fds=pass_fds
+        )
 
     def _stop_containment(self, job_identifier: str) -> bool:
         with self._lock:
@@ -1556,30 +1553,6 @@ class RunManager:
         }:
             return False
         return record.status == RunStatus.RUNNING
-
-    def _terminate_and_reap_process_group(self, process: subprocess.Popen[str]) -> bool:
-        """Close the post-Popen assignment window before admission can be released.
-
-        A killed leader remains visible to ``killpg`` until this parent reaps it.
-        Reap first, then require the rest of the process group to be gone.
-        """
-        self._signal_process_group(process, signal.SIGTERM)
-        if process.poll() is None and not self._wait_for_process_group_exit(
-            process.pid, TERM_GRACE_SECONDS
-        ):
-            self._signal_process_group(process, signal.SIGKILL)
-            self._wait_for_process_group_exit(process.pid, KILL_GRACE_SECONDS)
-        try:
-            if process.poll() is None:
-                process.wait(timeout=KILL_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            return False
-        finally:
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    with suppress(OSError):
-                        stream.close()
-        return not self._process_group_exists(process.pid)
 
     def _schedule_recovered_workflow_resume(self, record: RunRecord) -> None:
         job_identifier = record.job_identifier

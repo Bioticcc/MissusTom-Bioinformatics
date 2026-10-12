@@ -1,29 +1,24 @@
 """Linux-native hard resource containment for local workflow runs.
 
-Production starts one keeper scope per run and moves owned child processes into
-it by appending their PIDs to that scope's ``cgroup.procs`` file. The capability
-probe performs that same migration. A successful ``systemd-run --user --scope --
-true`` only proves that a transient scope can be created.
-
-Launching each owned command as the direct payload of ``systemd-run --user
---scope`` would place that process in the scope without a later cgroup
-migration, including on hosts that allow scope creation but reject
-``cgroup.procs`` writes. That launch shape is not used: preparation and the
-workflow are started as separate children of an existing scope, and only those
-owned PIDs may be moved into it.
+One limited systemd slice belongs to each run. A keeper keeps it active; every
+owned workload is the direct payload of a transient scope inside that slice.
+No process is migrated across cgroup hierarchies by Missus Tom.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import select
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TextIO
 from uuid import uuid4
 
 _GIB = 1024**3
@@ -41,7 +36,6 @@ TASKS_MAX_CEILING = 4096
 SCOPE_UNIT_PREFIX = "missus-tom-run-"
 _PROBE_SCOPE_PREFIX = "missus-tom-probe-"
 _PROBE_READY_TIMEOUT_SECONDS = 15.0
-_PROBE_MEMBERSHIP_TIMEOUT_SECONDS = 2.0
 _BUILD_LOG_PATTERN = re.compile(r"See (\S+build\.log)")
 
 
@@ -89,7 +83,7 @@ def build_scope_properties(
 ) -> ScopeProperties:
     sanitized = job_identifier.replace("-", "")
     return ScopeProperties(
-        scope_unit=f"{SCOPE_UNIT_PREFIX}{sanitized}.scope",
+        scope_unit=f"{SCOPE_UNIT_PREFIX}{sanitized}.slice",
         memory_max_bytes=memory_limit_bytes(memory_gb),
         cpu_quota=cpu_quota_for_cpus(cpus),
         tasks_max=min(
@@ -106,28 +100,36 @@ def build_scope_command(properties: ScopeProperties) -> list[str]:
         "systemd-run",
         "--user",
         "--scope",
-        f"--unit={properties.scope_unit}",
-        "-p",
-        f"MemoryMax={properties.memory_max_bytes}",
-        "-p",
-        f"CPUQuota={properties.cpu_quota}",
-        "-p",
-        f"TasksMax={properties.tasks_max}",
+        "--quiet",
+        "--collect",
+        f"--slice={properties.scope_unit}",
+        f"--unit={properties.scope_unit.removesuffix('.slice')}-keeper.scope",
         "--",
         "sleep",
         "infinity",
     ]
 
 
+def build_workload_command(slice_unit: str, command: list[str]) -> list[str]:
+    """Launch a payload through the same systemd path used by the probe."""
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        f"--slice={slice_unit}",
+        f"--unit={slice_unit.removesuffix('.slice')}-{uuid4().hex}.scope",
+        "--",
+        *command,
+    ]
+
+
 def native_containment_enablement_instructions() -> str:
     return (
-        "Enable delegated cgroup controllers for your user session so an owned child process "
-        "can be moved into a systemd user scope. Ensure XDG_RUNTIME_DIR is set, log in through "
-        "a systemd user session (not a bare SSH shell without lingering), and on WSL2 use "
-        "systemd=true in /etc/wsl.conf then restart WSL. A successful "
-        "'systemd-run --user --scope true' is not sufficient: the session must allow writing "
-        "that child's PID to the scope cgroup.procs file. Alternatively use the Docker "
-        "execution profile."
+        "Enable a systemd user session with delegated cpu, memory and pids controllers. "
+        "Ensure XDG_RUNTIME_DIR is set; on WSL2 use systemd=true in /etc/wsl.conf "
+        "and restart WSL. Alternatively use the Docker execution profile."
     )
 
 
@@ -146,58 +148,70 @@ def _containment_unavailable(message: str) -> ContainmentProbeResult:
     )
 
 
-def _assign_pid_to_cgroup_procs(cgroup_procs: Path, process_id: int) -> None:
-    """Append one owned PID to a cgroup.procs file.
-
-    Callers must pass a process they started. This never signals or adopts any
-    other process.
-    """
-    with cgroup_procs.open("a", encoding="utf-8") as handle:
-        handle.write(f"{process_id}\n")
-        handle.flush()
-
-
-def _cgroup_procs_file(control_group: str) -> Path | None:
-    cgroup_root = Path("/sys/fs/cgroup").resolve()
-    procs_path = (cgroup_root / control_group.lstrip("/") / "cgroup.procs").resolve()
+def _slice_limits_match(control_group: str, properties: ScopeProperties) -> bool:
+    root = Path("/sys/fs/cgroup").resolve()
+    group = (root / control_group.lstrip("/")).resolve()
+    if not group.is_relative_to(root):
+        return False
     try:
-        inside_root = procs_path.is_relative_to(cgroup_root)
-    except ValueError:
-        return None
-    if not inside_root or not procs_path.is_file():
-        return None
-    return procs_path
+        memory = int((group / "memory.max").read_text().strip())
+        tasks = int((group / "pids.max").read_text().strip())
+        cpu_budget, cpu_period = (group / "cpu.max").read_text().split()
+        return (
+            memory == properties.memory_max_bytes
+            and tasks == properties.tasks_max
+            and cpu_budget != "max"
+            and int(cpu_budget) * 100 == int(cpu_period) * int(properties.cpu_quota[:-1])
+        )
+    except (OSError, ValueError):
+        return False
 
 
-def _spawn_probe_scope(scope_unit: str) -> subprocess.Popen[str]:
-    return subprocess.Popen(
+def _set_slice_limits(properties: ScopeProperties, control_group: str) -> None:
+    completed = subprocess.run(
         [
-            "systemd-run",
+            "systemctl",
             "--user",
-            "--scope",
-            "--collect",
-            f"--unit={scope_unit}",
-            "--",
-            "sleep",
-            "30",
+            "set-property",
+            "--runtime",
+            properties.scope_unit,
+            f"MemoryMax={properties.memory_max_bytes}",
+            f"CPUQuota={properties.cpu_quota}",
+            f"TasksMax={properties.tasks_max}",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
+        timeout=10,
+        check=False,
         shell=False,
     )
+    if completed.returncode != 0 or not _slice_limits_match(control_group, properties):
+        raise ValueError(
+            "Systemd could not enforce the run slice CPU, memory and task limits: "
+            + (completed.stderr or "cgroup limit verification failed").strip()
+        )
 
 
-def _spawn_probe_child() -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        ["sleep", "30"],
-        stdin=subprocess.DEVNULL,
+def _start_keeper(properties: ScopeProperties) -> tuple[subprocess.Popen[str], str]:
+    process = subprocess.Popen(
+        build_scope_command(properties),
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
         shell=False,
     )
+    ready = _wait_for_probe_cgroup(properties.scope_unit, process)
+    if isinstance(ready, ContainmentProbeResult):
+        _terminate_owned_process(process)
+        raise ValueError(ready.message)
+    try:
+        _set_slice_limits(properties, ready)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        stop_scope_unit(properties.scope_unit)
+        _terminate_owned_process(process)
+        raise
+    return process, ready
 
 
 def _wait_for_probe_cgroup(
@@ -224,29 +238,6 @@ def _wait_for_probe_cgroup(
         time.sleep(0.05)
 
 
-def _process_belongs_to_cgroup(process_id: int, control_group: str) -> bool:
-    scope_path = Path("/sys/fs/cgroup") / control_group.lstrip("/")
-    deadline = time.monotonic() + _PROBE_MEMBERSHIP_TIMEOUT_SECONDS
-    while True:
-        try:
-            child_path = process_cgroup_path(process_id)
-            if child_path is not None and _path_is_within(child_path, scope_path):
-                return True
-        except OSError:
-            return False
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.05)
-
-
-def _path_is_within(child: Path, parent: Path) -> bool:
-    try:
-        child.resolve().relative_to(parent.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
-
-
 def _terminate_owned_process(process: subprocess.Popen[str] | None) -> None:
     if process is None:
         return
@@ -270,66 +261,56 @@ def _cleanup_containment_probe(
 ) -> None:
     """Stop only the probe scope and reap only the processes this probe started."""
     if stop_scope:
-        with suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                ["systemctl", "--user", "stop", scope_unit],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                shell=False,
-            )
+        stop_scope_unit(scope_unit)
     _terminate_owned_process(child)
     _terminate_owned_process(scope_process)
 
 
 def _probe_scope_assignment() -> ContainmentProbeResult:
-    """Create a disposable scope and migrate one harmless child into it.
-
-    This must not call ``RunContainmentSession.start`` or
-    ``require_native_containment``: those entry points invoke this probe.
-    """
-    scope_unit = f"{_PROBE_SCOPE_PREFIX}{uuid4().hex}.scope"
+    """Exercise the production slice and direct scoped payload launch."""
+    scope_unit = f"{_PROBE_SCOPE_PREFIX}{uuid4().hex}.slice"
+    properties = ScopeProperties(scope_unit, 256 * 1024**2, "100%", 128)
     scope_process: subprocess.Popen[str] | None = None
     child: subprocess.Popen[str] | None = None
     try:
-        try:
-            scope_process = _spawn_probe_scope(scope_unit)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return _containment_unavailable(f"systemd-run --user is unavailable: {exc}")
-        ready = _wait_for_probe_cgroup(scope_unit, scope_process)
-        if isinstance(ready, ContainmentProbeResult):
-            return ready
-        procs = _cgroup_procs_file(ready)
-        if procs is None:
+        scope_process, ready = _start_keeper(properties)
+        command = build_workload_command(
+            scope_unit,
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,time; "
+                "print(pathlib.Path('/proc/self/cgroup').read_text().strip(), flush=True); "
+                "time.sleep(30)",
+            ],
+        )
+        child_unit = next(
+            value.removeprefix("--unit=") for value in command if value.startswith("--unit=")
+        )
+        child = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            shell=False,
+        )
+        child_group = _wait_for_probe_cgroup(child_unit, child)
+        if isinstance(child_group, ContainmentProbeResult):
+            return child_group
+        if not Path(child_group).is_relative_to(Path(ready)):
+            return _containment_unavailable("The workload scope is outside the limited run slice.")
+        if child.stdout is None or not select.select([child.stdout], [], [], 5)[0]:
+            return _containment_unavailable("The scoped workload did not report its cgroup.")
+        reported = child.stdout.readline().strip().removeprefix("0::")
+        if reported != child_group:
             return _containment_unavailable(
-                "systemd-run --user created a scope, but its cgroup.procs file is not accessible."
-            )
-        try:
-            child = _spawn_probe_child()
-        except OSError as exc:
-            return _containment_unavailable(
-                f"Could not start a probe process for cgroup assignment: {exc}"
-            )
-        try:
-            _assign_pid_to_cgroup_procs(procs, child.pid)
-        except OSError as exc:
-            return _containment_unavailable(
-                "A systemd user scope was created, but this session cannot assign a "
-                f"process to that scope ({exc.__class__.__name__}: {exc}). Delegated "
-                "cgroup controllers are required before workflow processes can be moved "
-                "into the scope."
-            )
-        if not _process_belongs_to_cgroup(child.pid, ready):
-            return _containment_unavailable(
-                "A probe process was written to the scope cgroup.procs file, but its "
-                "cgroup membership could not be confirmed."
+                "The scoped workload's cgroup membership could not be confirmed."
             )
         return ContainmentProbeResult(
             available=True,
-            message=(
-                "systemd user scopes are available and can accept assigned workflow processes."
-            ),
+            message="Systemd can launch owned workloads inside a limited run slice.",
         )
     except Exception as exc:
         return _containment_unavailable(f"Native resource containment could not be verified: {exc}")
@@ -396,7 +377,23 @@ def scope_status(scope_unit: str) -> ScopeStatus:
     processes = _scope_processes(control_group)
     if processes is None:
         return ScopeStatus(ScopeState.UNQUERYABLE, "scope cgroup membership could not be read")
-    if processes:
+    if scope_unit.endswith(".slice"):
+        try:
+            events = (
+                Path("/sys/fs/cgroup") / control_group.lstrip("/") / "cgroup.events"
+            ).read_text()
+            populated = next(
+                line.split()[1] for line in events.splitlines() if line.startswith("populated ")
+            )
+        except (OSError, StopIteration, IndexError):
+            return ScopeStatus(
+                ScopeState.UNQUERYABLE, "slice descendant membership could not be read"
+            )
+        if populated not in {"0", "1"}:
+            return ScopeStatus(ScopeState.UNQUERYABLE, "invalid slice descendant membership")
+        if populated == "1":
+            return ScopeStatus(ScopeState.ACTIVE, "slice contains owned processes")
+    elif processes:
         return ScopeStatus(
             ScopeState.ACTIVE,
             f"scope cgroup contains {len(processes)} process(es)",
@@ -447,24 +444,40 @@ def stop_scope_unit(scope_unit: str, *, grace_seconds: float = 10.0) -> bool:
         deadline = time.monotonic() + grace_seconds
         while time.monotonic() < deadline:
             if scope_status(scope_unit).state == ScopeState.INACTIVE:
+                _revert_slice_properties(scope_unit)
                 return True
             time.sleep(0.1)
-    return scope_status(scope_unit).state == ScopeState.INACTIVE
+    inactive = scope_status(scope_unit).state == ScopeState.INACTIVE
+    if inactive:
+        _revert_slice_properties(scope_unit)
+    return inactive
+
+
+def _revert_slice_properties(unit: str) -> None:
+    if not unit.endswith(".slice"):
+        return
+    with suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            ["systemctl", "--user", "revert", unit],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            shell=False,
+        )
 
 
 class RunContainmentSession:
-    """One systemd user scope holding prep and workflow descendants."""
+    """One limited systemd user slice containing scoped prep and workflow."""
 
     def __init__(
         self,
         scope_unit: str,
         *,
         keeper_process: subprocess.Popen[str],
-        cgroup_procs: Path,
     ) -> None:
         self.scope_unit = scope_unit
         self._keeper_process = keeper_process
-        self._cgroup_procs = cgroup_procs
 
     @property
     def scope_id(self) -> str:
@@ -486,42 +499,31 @@ class RunContainmentSession:
             cpus=cpus,
             max_parallel_tasks=max_parallel_tasks,
         )
-        process = subprocess.Popen(
-            build_scope_command(properties),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        process, _ = _start_keeper(properties)
+        return cls(properties.scope_unit, keeper_process=process)
+
+    def launch_command(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        stdout: int | TextIO | None = None,
+        stderr: int | TextIO | None = None,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.Popen[str]:
+        """Start a child through systemd inside this run's limited slice."""
+        return subprocess.Popen(
+            build_workload_command(self.scope_unit, command),
+            cwd=cwd,
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
             text=True,
             start_new_session=True,
+            pass_fds=pass_fds,
             shell=False,
         )
-        deadline = time.monotonic() + 30.0
-        cgroup: str | None = None
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                detail = (process.stderr.read() if process.stderr else "").strip()
-                _terminate_owned_process(process)
-                raise ValueError(
-                    "Could not start the resource containment scope"
-                    + (f": {detail}" if detail else "")
-                )
-            cgroup = _control_group_for_unit(properties.scope_unit)
-            if cgroup is not None:
-                break
-            time.sleep(0.05)
-        if cgroup is None:
-            _terminate_owned_process(process)
-            raise ValueError("Started containment scope but could not resolve its cgroup path")
-        procs = Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.procs"
-        if not procs.is_file():
-            _terminate_owned_process(process)
-            raise ValueError(f"Containment cgroup.procs is not accessible: {procs}")
-        return cls(properties.scope_unit, keeper_process=process, cgroup_procs=procs)
-
-    def assign_process(self, process_id: int) -> None:
-        try:
-            _assign_pid_to_cgroup_procs(self._cgroup_procs, process_id)
-        except OSError as exc:
-            raise ValueError(f"Could not assign process {process_id} to containment scope") from exc
 
     def stop(self, *, grace_seconds: float = 10.0) -> bool:
         stopped = stop_scope_unit(self.scope_unit, grace_seconds=grace_seconds)
@@ -557,19 +559,6 @@ def _control_group_for_unit(unit: str) -> str | None:
         return None
     value = (completed.stdout or "").strip()
     return value or None
-
-
-def process_cgroup_path(process_id: int) -> Path | None:
-    try:
-        raw = Path(f"/proc/{process_id}/cgroup").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in raw.splitlines():
-        if line.startswith("0::"):
-            relative = line.removeprefix("0::").strip()
-            if relative:
-                return Path("/sys/fs/cgroup") / relative.lstrip("/")
-    return None
 
 
 def parse_build_log_path(message: str) -> Path | None:

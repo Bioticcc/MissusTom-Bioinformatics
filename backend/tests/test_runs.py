@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import sys
 import threading
 import time
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -969,71 +967,21 @@ def test_post_popen_persist_failure_stops_process_before_releasing_admission(
 
 
 @pytest.mark.parametrize("reference_preparation", [False, True])
-def test_containment_assignment_failure_reaps_term_ignoring_child(
+def test_local_run_launches_each_owned_command_through_containment(
     tmp_path: Path,
     manifest_payload: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     reference_preparation: bool,
 ) -> None:
-    class FailingContainment:
-        scope_id = "missus-tom-run-assignment.scope"
+    class DirectLaunchContainment:
+        scope_id = "missus-tom-run-direct.slice"
 
         def __init__(self) -> None:
-            self.process_ids: list[int] = []
+            self.commands: list[list[str]] = []
 
-        def assign_process(self, process_id: int) -> None:
-            self.process_ids.append(process_id)
-            raise ValueError("injected cgroup assignment failure")
-
-        def stop(self, *, grace_seconds: float = 10.0) -> bool:
-            return True
-
-    manifest_payload["output_directory"] = str(tmp_path / "project")
-    manifest = ProjectManifest.model_validate(manifest_payload)
-    if reference_preparation:
-        save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"))
-    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
-    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 0.1)
-    monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.1)
-    monkeypatch.setattr(
-        runs_module,
-        "scope_status",
-        lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
-    )
-    adapter = SlowReferenceAdapter(tmp_path) if reference_preparation else SleepingAdapter(tmp_path)
-    manager = RunManager(adapter, registry_directory=tmp_path / "state")  # type: ignore[arg-type]
-    containment = FailingContainment()
-
-    def start_containment(job_identifier: str) -> None:
-        with manager._lock:
-            manager._containment_sessions[job_identifier] = containment  # type: ignore[assignment]
-            record = manager._records[job_identifier]
-            record.containment_scope_id = containment.scope_id
-            manager._persist(record)
-
-    monkeypatch.setattr(manager, "_start_native_containment_if_needed", start_containment)
-    started = manager.start(manifest)
-    failed = wait_for_terminal(manager, started.job_identifier)
-
-    assert failed.status == RunStatus.FAILED
-    assert failed.holds_admission is False
-    assert failed.containment_scope_id is None
-    assert containment.process_ids
-    assert manager._process_group_exists(containment.process_ids[0]) is False
-
-
-@pytest.mark.parametrize("reference_preparation", [False, True])
-def test_unreaped_assignment_failure_keeps_identity_and_admission(
-    tmp_path: Path,
-    manifest_payload: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-    reference_preparation: bool,
-) -> None:
-    class FailingContainment:
-        scope_id = "missus-tom-run-orphan.scope"
-
-        def assign_process(self, process_id: int) -> None:
-            raise ValueError("injected cgroup assignment failure")
+        def launch_command(self, command: list[str], **kwargs: object) -> subprocess.Popen[str]:
+            self.commands.append(command)
+            return subprocess.Popen(command, **kwargs)
 
         def stop(self, *, grace_seconds: float = 10.0) -> bool:
             return True
@@ -1048,9 +996,9 @@ def test_unreaped_assignment_failure_keeps_identity_and_admission(
         "scope_status",
         lambda _scope_id: ScopeStatus(ScopeState.INACTIVE, "inactive"),
     )
-    adapter = SlowReferenceAdapter(tmp_path) if reference_preparation else SleepingAdapter(tmp_path)
+    adapter = ShortReferenceAdapter(tmp_path) if reference_preparation else StubAdapter(tmp_path)
     manager = RunManager(adapter, registry_directory=tmp_path / "state")  # type: ignore[arg-type]
-    containment = FailingContainment()
+    containment = DirectLaunchContainment()
 
     def start_containment(job_identifier: str) -> None:
         with manager._lock:
@@ -1060,47 +1008,12 @@ def test_unreaped_assignment_failure_keeps_identity_and_admission(
             manager._persist(record)
 
     monkeypatch.setattr(manager, "_start_native_containment_if_needed", start_containment)
-    unreaped_processes: list[subprocess.Popen[str]] = []
-
-    def leave_unreaped(process: subprocess.Popen[str]) -> bool:
-        unreaped_processes.append(process)
-        return False
-
-    monkeypatch.setattr(manager, "_terminate_and_reap_process_group", leave_unreaped)
-    monkeypatch.setattr(manager, "_stop_containment", lambda _job_identifier: True)
     started = manager.start(manifest)
-    process_id: int | None = None
-    process: subprocess.Popen[str] | None = None
-    try:
-        interrupted = wait_for_status(manager, started.job_identifier, RunStatus.INTERRUPTED)
-        process_id = interrupted.process_id
-        assert interrupted.holds_admission is True
-        assert interrupted.containment_scope_id == containment.scope_id
-        assert process_id is not None
-        assert "did not exit" in (interrupted.error_message or "")
-        with pytest.raises(ValueError, match="another workflow job is active"):
-            manager.start(manifest)
-    finally:
-        with manager._lock:
-            process = manager._processes.get(
-                started.job_identifier
-            ) or manager._preparation_processes.get(started.job_identifier)
-        if process_id is None:
-            with manager._lock:
-                record = manager._records.get(started.job_identifier)
-                process_id = record.process_id if record is not None else None
-        if process_id is not None:
-            with suppress(ProcessLookupError):
-                os.killpg(process_id, signal.SIGKILL)
-        if process is not None:
-            with suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=2)
-        for unreaped in unreaped_processes:
-            with suppress(subprocess.TimeoutExpired):
-                unreaped.wait(timeout=2)
-            for stream in (unreaped.stdout, unreaped.stderr):
-                if stream is not None:
-                    stream.close()
+    finished = wait_for_terminal(manager, started.job_identifier)
+    assert finished.status == RunStatus.COMPLETED
+    assert len(containment.commands) == (2 if reference_preparation else 1)
+    assert all(command[0] == sys.executable for command in containment.commands)
+    assert finished.containment_scope_id is None
 
 
 def test_sigkill_escalation_stops_stubborn_descendant_group(
@@ -1482,7 +1395,7 @@ def test_workflow_failure_keeps_terminal_time_and_primary_error_when_cleanup_is_
     assert failed.current_stage == "Nextflow failed"
     assert failed.error_message == "Workflow runner exited with status 1"
     assert failed.finished_at is not None
-    assert failed.cleanup_warning == "resource containment scope did not become inactive"
+    assert failed.cleanup_warning == "resource containment slice did not become inactive"
     assert failed.holds_admission is True
 
 
@@ -1503,7 +1416,7 @@ def test_retry_cleanup_releases_admission_without_erasing_workflow_failure(
         finished_at=datetime.now(UTC),
         exit_code=1,
         error_message="Workflow runner exited with status 1",
-        cleanup_warning="resource containment scope did not become inactive",
+        cleanup_warning="resource containment slice did not become inactive",
         holds_admission=True,
     )
     manager._records[record.job_identifier] = record
