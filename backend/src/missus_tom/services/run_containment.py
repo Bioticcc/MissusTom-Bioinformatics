@@ -277,11 +277,9 @@ def _probe_scope_assignment() -> ContainmentProbeResult:
         command = build_workload_command(
             scope_unit,
             [
-                sys.executable,
+                "/bin/sh",
                 "-c",
-                "import pathlib,time; "
-                "print(pathlib.Path('/proc/self/cgroup').read_text().strip(), flush=True); "
-                "time.sleep(30)",
+                "/bin/cat /proc/$$/cgroup && exec /bin/sleep 30",
             ],
         )
         child_unit = next(

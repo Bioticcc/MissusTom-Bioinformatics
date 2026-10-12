@@ -132,6 +132,34 @@ def test_probe_uses_direct_systemd_launch_when_raw_migration_is_denied(
     assert stopped and child.killed
 
 
+def test_probe_payload_works_when_backend_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A packaged backend executable cannot interpret Python's -c option."""
+    slice_group = "/user.slice/run.slice"
+    scope_group = slice_group + "/payload.scope"
+    child = _FakeProcess(202)
+    child.stdout = io.StringIO(f"0::{scope_group}\n")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(run_containment.sys, "executable", "/usr/bin/missus-tom-backend")
+    monkeypatch.setattr(
+        run_containment, "_start_keeper", lambda _properties: (_FakeProcess(101), slice_group)
+    )
+    monkeypatch.setattr(
+        run_containment, "_wait_for_probe_cgroup", lambda _unit, _process: scope_group
+    )
+    monkeypatch.setattr(run_containment.select, "select", lambda *_args: ([child.stdout], [], []))
+    monkeypatch.setattr(run_containment, "stop_scope_unit", lambda _unit: True)
+
+    def launch(command: list[str], **_kwargs: object) -> _FakeProcess:
+        commands.append(command)
+        return child
+
+    monkeypatch.setattr(run_containment.subprocess, "Popen", launch)
+    assert run_containment._probe_scope_assignment().available
+    assert commands[0][-3:-1] == ["/bin/sh", "-c"]
+    assert "/proc/$$/cgroup" in commands[0][-1]
+    assert "/usr/bin/missus-tom-backend" not in commands[0]
+
+
 def test_probe_rejects_workload_outside_slice(monkeypatch: pytest.MonkeyPatch) -> None:
     slice_group = "/user.slice/run.slice"
     child = _FakeProcess(202)
