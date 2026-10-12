@@ -15,6 +15,11 @@ desktop/*.tsbuildinfo
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 
+# Linux sidecar staging and packaged binaries
+/backend/build/
+/backend/dist/
+/desktop/src-tauri/binaries/
+
 # Local state and environment
 .env
 .missus-tom-data/
