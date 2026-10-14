@@ -247,31 +247,46 @@ fn sidecar_paths(executable_dir: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+#[cfg(test)]
 fn parse_health_response(response: &str) -> bool {
+    parse_backend_health(response).is_some()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BackendHealth {
+    version: String,
+    activity: String,
+    operation: Option<String>,
+}
+
+fn parse_backend_health(response: &str) -> Option<BackendHealth> {
     let Some((status_line, body)) = response.split_once("\r\n") else {
-        return false;
+        return None;
     };
     if !status_line.starts_with("HTTP/1.")
         || !status_line.split_whitespace().any(|part| part == "200")
     {
-        return false;
+        return None;
     }
     let Some((_, body)) = body.split_once("\r\n\r\n") else {
-        return false;
+        return None;
     };
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/status")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("ok")
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let data = value.get("data")?;
+    if data.get("status")?.as_str()? != "ok" || data.get("name")?.as_str()? != "Missus Tom" {
+        return None;
+    }
+    Some(BackendHealth {
+        version: data.get("version")?.as_str()?.to_string(),
+        activity: data.pointer("/activity/state")?.as_str()?.to_string(),
+        operation: data
+            .pointer("/activity/operation")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
-fn health_is_ready() -> bool {
+fn packaged_backend_health() -> Option<BackendHealth> {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
 
@@ -279,7 +294,7 @@ fn health_is_ready() -> bool {
         .parse()
         .expect("packaged API address is valid");
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(150)) else {
-        return false;
+        return None;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
@@ -287,10 +302,17 @@ fn health_is_ready() -> bool {
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .is_err()
     {
-        return false;
+        return None;
     }
     let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok() && parse_health_response(&response)
+    stream
+        .read_to_string(&mut response)
+        .ok()
+        .and_then(|_| parse_backend_health(&response))
+}
+
+fn health_is_ready() -> bool {
+    packaged_backend_health().is_some()
 }
 
 fn packaged_port_is_available() -> bool {
@@ -344,15 +366,25 @@ fn write_pid_file(path: &Path, pid: u32) -> Result<(), String> {
 }
 
 #[cfg(unix)]
+fn backend_path_matches(process_path: &Path, backend: &Path) -> bool {
+    process_path == backend
+        || process_path
+            .to_string_lossy()
+            .strip_suffix(" (deleted)")
+            .map(Path::new)
+            == Some(backend)
+}
+
+#[cfg(unix)]
 fn process_matches_backend(pid: u32, backend: &Path) -> bool {
     let process_path = PathBuf::from(format!("/proc/{pid}/exe"));
-    let Ok(process_path) = process_path.canonicalize() else {
+    let Ok(process_path) = std::fs::read_link(process_path) else {
         return false;
     };
     let Ok(backend) = backend.canonicalize() else {
         return false;
     };
-    process_path == backend
+    backend_path_matches(&process_path, &backend)
 }
 
 #[cfg(not(unix))]
@@ -423,7 +455,25 @@ fn request_backend_shutdown() -> bool {
         && response.split_whitespace().any(|part| part == "200")
 }
 
-fn clean_stale_backend(app_data_dir: &Path, backend: &Path) {
+fn stale_backend_is_safe_to_stop(health: Option<BackendHealth>) -> Result<(), String> {
+    let health = health.ok_or_else(|| {
+        "A previous Missus Tom backend was found, but its activity could not be verified. It was left running to avoid interrupting scientific work. Close the previous Missus Tom release, then reopen this version.".to_string()
+    })?;
+    if health.activity == "idle" {
+        return Ok(());
+    }
+    let operation = health
+        .operation
+        .as_deref()
+        .map(|operation| format!(" ({operation})"))
+        .unwrap_or_default();
+    Err(format!(
+        "Missus Tom {version} is still active{operation}. It was left running to avoid interrupting scientific work. Finish or cancel that work in the previous release, close it, then reopen this version.",
+        version = health.version,
+    ))
+}
+
+fn clean_stale_backend(app_data_dir: &Path, backend: &Path) -> Result<(), String> {
     let pid_path = app_data_dir.join(BACKEND_PID_FILE);
     let mut pids = std::fs::read_to_string(&pid_path)
         .ok()
@@ -434,6 +484,9 @@ fn clean_stale_backend(app_data_dir: &Path, backend: &Path) {
     if pids.is_empty() {
         pids = matching_backend_pids(backend);
     }
+    if !pids.is_empty() {
+        stale_backend_is_safe_to_stop(packaged_backend_health())?;
+    }
     for pid in pids {
         // The executable identity above is the ownership proof. Do not send an
         // HTTP shutdown request to the fixed port: it could belong to an
@@ -441,6 +494,7 @@ fn clean_stale_backend(app_data_dir: &Path, backend: &Path) {
         terminate_process(pid);
     }
     let _ = std::fs::remove_file(pid_path);
+    Ok(())
 }
 
 fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
@@ -476,7 +530,7 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
     writeln!(log, "\n--- Missus Tom backend startup ---").ok();
     writeln!(log, "Backend: {}", backend.display()).ok();
     writeln!(log, "API: {}", packaged_api_base()).ok();
-    clean_stale_backend(&app_data_dir, &backend);
+    clean_stale_backend(&app_data_dir, &backend)?;
     if !backend.is_file() || !ont_runner.is_file() {
         return Err(
             "Packaged backend sidecars are missing. Rebuild the Linux sidecars before bundling."
@@ -808,6 +862,10 @@ fn directory_opener(canonical: &Path, windows_path: Option<&str>) -> Command {
     }
 }
 
+fn directory_opener_waits_for_exit(windows_path: bool) -> bool {
+    !windows_path
+}
+
 fn open_directory_blocking(path: &str) -> Result<(), String> {
     let requested = Path::new(&path);
     if !requested.is_absolute() {
@@ -847,17 +905,22 @@ fn open_directory_blocking(path: &str) -> Result<(), String> {
     } else {
         None
     };
-    let program = if windows_path.is_some() {
-        "explorer.exe"
-    } else {
-        "xdg-open"
-    };
-    let status = directory_opener(&canonical, windows_path.as_deref())
+    if !directory_opener_waits_for_exit(windows_path.is_some()) {
+        // Explorer often hands the request to an existing Windows process and
+        // exits with a non-zero status even after opening the requested folder.
+        // A successful spawn is the WSL handoff contract; conversion and spawn
+        // failures above remain actionable errors.
+        directory_opener(&canonical, windows_path.as_deref())
+            .spawn()
+            .map_err(|error| format!("Could not start explorer.exe: {error}"))?;
+        return Ok(());
+    }
+    let status = directory_opener(&canonical, None)
         .status()
-        .map_err(|error| format!("Could not start {program}: {error}"))?;
+        .map_err(|error| format!("Could not start xdg-open: {error}"))?;
     if !status.success() {
         return Err(format!(
-            "{program} could not open the directory (exit status {status})."
+            "xdg-open could not open the directory (exit status {status})."
         ));
     }
     Ok(())
@@ -954,10 +1017,14 @@ pub fn run() {
 mod tests {
     use std::path::Path;
 
+    #[cfg(unix)]
+    use super::backend_path_matches;
     use super::{
-        bottom_left_overlay_position, directory_opener, enforce_export_extension, is_wsl_release,
-        parse_health_response, should_show_overlay, sidecar_paths, startup_decision,
-        validate_export_destination, write_export_atomically, StartupDecision, TextExportKind,
+        bottom_left_overlay_position, directory_opener, directory_opener_waits_for_exit,
+        enforce_export_extension, is_wsl_release, parse_backend_health, parse_health_response,
+        should_show_overlay, sidecar_paths, stale_backend_is_safe_to_stop, startup_decision,
+        validate_export_destination, write_export_atomically, BackendHealth, StartupDecision,
+        TextExportKind,
     };
 
     #[test]
@@ -997,6 +1064,46 @@ mod tests {
     }
 
     #[test]
+    fn wsl_explorer_handoff_does_not_wait_for_its_exit_status() {
+        assert!(!directory_opener_waits_for_exit(true));
+        assert!(directory_opener_waits_for_exit(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleted_previous_sidecar_path_is_still_recognized_as_owned() {
+        let backend = Path::new("/usr/bin/missus-tom-backend");
+        assert!(backend_path_matches(backend, backend));
+        assert!(backend_path_matches(
+            Path::new("/usr/bin/missus-tom-backend (deleted)"),
+            backend
+        ));
+        assert!(!backend_path_matches(
+            Path::new("/usr/bin/unrelated-service (deleted)"),
+            backend
+        ));
+    }
+
+    #[test]
+    fn busy_previous_backend_is_left_running_during_an_upgrade() {
+        let error = stale_backend_is_safe_to_stop(Some(BackendHealth {
+            version: "0.3.0-rc.32".to_string(),
+            activity: "busy".to_string(),
+            operation: Some("workflow: bulk-rnaseq running".to_string()),
+        }))
+        .expect_err("an active backend must never be terminated during an upgrade");
+        assert!(error.contains("0.3.0-rc.32 is still active"));
+        assert!(error.contains("workflow: bulk-rnaseq running"));
+        assert!(stale_backend_is_safe_to_stop(Some(BackendHealth {
+            version: "0.3.0-rc.32".to_string(),
+            activity: "idle".to_string(),
+            operation: None,
+        }))
+        .is_ok());
+        assert!(stale_backend_is_safe_to_stop(None).is_err());
+    }
+
+    #[test]
     fn overlay_position_uses_the_work_area_and_monitor_scale() {
         assert_eq!(
             bottom_left_overlay_position((-1920, 0), (1920, 1080), 1.0),
@@ -1017,14 +1124,21 @@ mod tests {
 
     #[test]
     fn health_response_requires_the_expected_api_envelope() {
-        assert!(parse_health_response(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"status\":\"ok\"}}"
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"name\":\"Missus Tom\",\"version\":\"0.3.0-rc.33\",\"status\":\"ok\",\"activity\":{\"state\":\"idle\",\"operation\":null}}}";
+        assert!(parse_health_response(response));
+        assert_eq!(
+            parse_backend_health(response),
+            Some(BackendHealth {
+                version: "0.3.0-rc.33".to_string(),
+                activity: "idle".to_string(),
+                operation: None,
+            })
+        );
+        assert!(!parse_health_response(
+            "HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"name\":\"Missus Tom\",\"status\":\"starting\"}}"
         ));
         assert!(!parse_health_response(
-            "HTTP/1.1 200 OK\r\n\r\n{\"data\":{\"status\":\"starting\"}}"
-        ));
-        assert!(!parse_health_response(
-            "HTTP/1.1 503 Service Unavailable\r\n\r\n{\"data\":{\"status\":\"ok\"}}"
+            "HTTP/1.1 503 Service Unavailable\r\n\r\n{\"data\":{\"name\":\"Missus Tom\",\"status\":\"ok\"}}"
         ));
     }
 
