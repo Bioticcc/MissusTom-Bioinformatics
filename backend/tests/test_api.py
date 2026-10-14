@@ -69,6 +69,28 @@ async def test_backend_shutdown_stops_owned_work(
     assert stopped is True
 
 
+async def test_cancel_endpoint_records_user_intent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    record = RunRecord(
+        job_identifier="run-123",
+        project_identifier="project-123",
+        project_name="Cancellation test",
+        status=RunStatus.CANCELLING,
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "run.log"),
+        results_directory=str(tmp_path / "results"),
+        created_at=datetime.now(UTC),
+    )
+    cancel = Mock(return_value=record)
+    monkeypatch.setattr(routes.run_manager, "cancel", cancel)
+
+    response = routes.post_run_cancel("run-123")
+
+    assert response.data is record
+    cancel.assert_called_once_with("run-123", reason="Cancelled by user")
+
+
 @pytest.mark.parametrize("origin", ("tauri://localhost", "http://tauri.localhost"))
 async def test_tauri_origin_preflight_is_allowed(client: AsyncClient, origin: str) -> None:
     response = await client.options(

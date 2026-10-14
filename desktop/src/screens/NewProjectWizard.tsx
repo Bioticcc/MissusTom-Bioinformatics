@@ -3,6 +3,7 @@ import { apiRequest, bulkProductionBackendError, streamProjectValidation } from 
 import { inferAutomaticSettings, type AutomaticSettingsResult } from "../automaticSettings";
 import { APP_VERSION } from "../appVersion";
 import { CheckList } from "../components/CheckList";
+import { loadProjectEditor, preserveExistingProject, type EditorOptions } from "../projectEditor";
 import { FolderPreview } from "../components/FolderPreview";
 import { PipelineDependencies } from "../components/PipelineDependencies";
 import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
@@ -24,7 +25,6 @@ import {
   STRANDEDNESS_KIT_HELP,
   STRANDEDNESS_UI_OPTIONS,
   validateComparisonSelection,
-  type BulkReferenceMode,
   type BulkStrandedness,
 } from "../newProjectWizardContract";
 import type {
@@ -70,43 +70,6 @@ interface DetailsState {
   projectName: string;
   inputDirectory: string;
   outputDirectory: string;
-}
-
-interface OptionsState {
-  organism: string;
-  referenceGenome: string;
-  annotationSource: string;
-  transcriptomeFasta: string;
-  annotationGtf: string;
-  transcriptToGene: string;
-  kallistoIndex: string;
-  referenceMode: BulkReferenceMode;
-  referenceFasta: string;
-  referenceFai: string;
-  minimap2Index: string;
-  gencodeGff3: string;
-  cpgIslands: string;
-  ccreTable: string;
-  intergenicBed: string;
-  ontInstrumentReport: string;
-  libraryType: string;
-  strandedness: BulkStrandedness;
-  executionProfile: "local" | "docker" | "apptainer";
-  cpus: number;
-  memoryGb: number;
-  maxParallelTasks: number;
-  minimumReadLength: number;
-  trimQuality: number;
-  adapterR1: string;
-  adapterR2: string;
-  minimumGroupSize: number;
-  adjustedPValue: number;
-  absoluteLog2FoldChange: number;
-  coverageWindowSize: number;
-  modkitFilterPercentile: number;
-  modkitMaxDepth: number;
-  explorationMinValidCoverage: number;
-  explorationMinFeatureCpgs: number;
 }
 
 interface MetadataImportStatus {
@@ -163,19 +126,13 @@ function normalizeDiscoveredSample(sample: ProposedSample): ProposedSample {
 
 export function NewProjectWizard({
   onProjectReady,
+  initialManifest,
 }: {
   onProjectReady: (manifest: ProjectManifest, plan: RunPlan) => void;
+  initialManifest?: ProjectManifest | null;
 }) {
   const [projectDefaults] = useState(loadProjectDefaults);
-  const [step, setStep] = useState(0);
-  const [pipelineIdentifier, setPipelineIdentifier] = useState<PipelineIdentifier>("bulk-rnaseq");
-  const [startStage, setStartStage] = useState<RunStartStage>("quantification");
-  const [details, setDetails] = useState<DetailsState>({
-    projectName: "",
-    inputDirectory: "",
-    outputDirectory: projectDefaults.projectParentDirectory ? `${projectDefaults.projectParentDirectory.replace(/[\\/]+$/, "")}/untitled-project` : "",
-  });
-  const [options, setOptions] = useState<OptionsState>({
+  const defaultOptions: EditorOptions = {
     organism: "Homo sapiens",
     referenceGenome: "GRCh38",
     annotationSource: "GENCODE",
@@ -210,10 +167,20 @@ export function NewProjectWizard({
     modkitMaxDepth: 60000,
     explorationMinValidCoverage: 10,
     explorationMinFeatureCpgs: 5,
+  };
+  const [initialEditor] = useState(() => initialManifest ? loadProjectEditor(initialManifest, defaultOptions) : null);
+  const [step, setStep] = useState(0);
+  const [pipelineIdentifier, setPipelineIdentifier] = useState<PipelineIdentifier>(initialManifest?.pipeline_identifier ?? "bulk-rnaseq");
+  const [startStage, setStartStage] = useState<RunStartStage>(initialEditor?.startStage ?? "quantification");
+  const [details, setDetails] = useState<DetailsState>(initialEditor?.details ?? {
+    projectName: "",
+    inputDirectory: "",
+    outputDirectory: projectDefaults.projectParentDirectory ? `${projectDefaults.projectParentDirectory.replace(/[\\/]+$/, "")}/untitled-project` : "",
   });
+  const [options, setOptions] = useState<EditorOptions>(initialEditor?.options ?? defaultOptions);
   const [discovery, setDiscovery] = useState<InputDiscoveryResult | null>(null);
-  const [samples, setSamples] = useState<ProposedSample[]>([]);
-  const [comparisons, setComparisons] = useState<Comparison[]>([]);
+  const [samples, setSamples] = useState<ProposedSample[]>(initialEditor?.samples ?? []);
+  const [comparisons, setComparisons] = useState<Comparison[]>(initialEditor?.comparisons ?? []);
   const [numerator, setNumerator] = useState("");
   const [denominator, setDenominator] = useState("");
   const [comparisonIntervention, setComparisonIntervention] = useState("");
@@ -246,9 +213,12 @@ export function NewProjectWizard({
     const element = validationLogRef.current;
     if (element && validationFollow.current) element.scrollTop = element.scrollHeight;
   }, [validationDebug]);
-  const [projectId, setProjectId] = useState<string>(() => crypto.randomUUID());
-  const [createdAt, setCreatedAt] = useState(() => new Date().toISOString());
+  const [projectId, setProjectId] = useState<string>(() => initialManifest?.project_identifier ?? crypto.randomUUID());
+  const [createdAt, setCreatedAt] = useState(() => initialManifest?.created_at ?? new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
+  const nativeExecutionUnavailable = validation?.checks.some(
+    (check) => check.check_id === "native_containment" && check.status !== "passed",
+  ) ?? false;
   const bulkCompatError = !isOntPipeline && healthReady
     ? bulkProductionBackendError(backendHealth)
     : null;
@@ -412,7 +382,7 @@ export function NewProjectWizard({
     }
   };
 
-  const updateOptions = <K extends keyof OptionsState>(key: K, value: OptionsState[K]) => {
+  const updateOptions = <K extends keyof EditorOptions>(key: K, value: EditorOptions[K]) => {
     setOptions((current) => ({ ...current, [key]: value }));
     invalidateValidation();
   };
@@ -651,7 +621,7 @@ export function NewProjectWizard({
       if (options.ontInstrumentReport.trim()) referenceResources.ont_instrument_report = options.ontInstrumentReport;
     }
 
-    return {
+    const draft: ProjectManifest = {
       schema_version: isOntPipeline ? ONT_MANIFEST_SCHEMA_VERSION : BULK_MANIFEST_SCHEMA_VERSION,
       project_name: details.projectName,
       project_identifier: projectId,
@@ -716,6 +686,7 @@ export function NewProjectWizard({
       application_version: backendHealth?.version ?? APP_VERSION,
       pipeline_status: "draft",
     };
+    return initialManifest ? preserveExistingProject(initialManifest, draft) : draft;
   };
 
   const exportSettings = async () => {
@@ -840,7 +811,7 @@ export function NewProjectWizard({
         current as unknown as Record<string, unknown>,
         imported.options as Record<string, unknown>,
         importedPipeline,
-      ) as unknown as OptionsState);
+      ) as unknown as EditorOptions);
       setSamples(importedSamples);
       setComparisons(importedComparisons);
       setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
@@ -1124,7 +1095,7 @@ export function NewProjectWizard({
             <div className="section-heading"><div><p className="eyebrow">Step 1</p><h2>Project details</h2></div></div>
             <p className="helper-copy">Choose where this project starts before selecting its input folder.</p>
             <p className="setup-guidance"><strong>Need another pipeline?</strong> You can install its requirements here from the Local setup section below without returning to first-launch setup.</p>
-            <fieldset className="run-mode-panel setup-mode-panel">
+            <fieldset className="run-mode-panel setup-mode-panel" disabled={Boolean(initialManifest)}>
               <legend>Pipeline</legend>
               <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
               <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse)</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
@@ -1200,7 +1171,7 @@ export function NewProjectWizard({
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<input value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)} /></label></div>
             <fieldset><legend>Alignment reference paths</legend><p className="helper-copy">Reference FASTA, its separately supplied FASTA index, and a matching minimap2 index are required for the ONT workflow.</p>{referenceFileField("Reference FASTA", "referenceFasta", "/references/GRCm38p6.fa", true)}{referenceFileField("Reference FASTA index (.fai)", "referenceFai", "/references/GRCm38p6.fa.fai", true)}{referenceFileField("minimap2 index", "minimap2Index", "/references/GRCm38p6.mmi", true)}</fieldset>
             <fieldset><legend>Coverage and methylation parameters</legend><p className="helper-copy">These settings are saved in the manifest. Changing them invalidates the affected stage outputs; scientific interpretation remains single-sample and descriptive.</p><div className="field-triple"><label>Window size (bases)<input type="number" min="1" step="1" value={options.coverageWindowSize} onChange={(event) => updateOptions("coverageWindowSize", Number(event.target.value))} /></label><label>Modkit filter percentile (less than 1)<input type="number" min="0" max="0.99" step="0.01" value={options.modkitFilterPercentile} onChange={(event) => updateOptions("modkitFilterPercentile", Number(event.target.value))} /></label><label>Maximum pileup depth<input type="number" min="1" max="60000" step="1" value={options.modkitMaxDepth} onChange={(event) => updateOptions("modkitMaxDepth", Number(event.target.value))} /></label></div><div className="field-pair"><label>Minimum valid CpG coverage<input type="number" min="1" step="1" value={options.explorationMinValidCoverage} onChange={(event) => updateOptions("explorationMinValidCoverage", Number(event.target.value))} /></label><label>Minimum measured CpGs per feature<input type="number" min="1" step="1" value={options.explorationMinFeatureCpgs} onChange={(event) => updateOptions("explorationMinFeatureCpgs", Number(event.target.value))} /></label></div></fieldset>
-            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local tools</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as EditorOptions["executionProfile"])}><option value="local">Local tools</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
           </section>
         );
         return (
@@ -1257,7 +1228,7 @@ export function NewProjectWizard({
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
-            {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
+            {validation && <div className={validation.valid && !nativeExecutionUnavailable ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? nativeExecutionUnavailable ? "Manifest valid; native execution unavailable" : "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
             {validationTerminal}
             <CheckList checks={validation?.checks ?? []} />
           </section>
@@ -1301,7 +1272,7 @@ export function NewProjectWizard({
               {startStage === "analysis" && <>{referenceFileField("Annotation GTF", "annotationGtf", "/references/annotation.gtf")}{referenceFileField("Transcript-to-gene mapping", "transcriptToGene", "/references/transcripts_to_genes.txt")}</>}
             </fieldset>
             <fieldset><legend>{startStage === "analysis" ? "Analysis" : "Trimming and analysis"}</legend>{startStage === "quantification" && <><div className="field-pair"><label>R1 adapter<input value={options.adapterR1} onChange={(event) => updateOptions("adapterR1", event.target.value)} /></label><label>R2 adapter<input value={options.adapterR2} onChange={(event) => updateOptions("adapterR2", event.target.value)} /></label></div><div className="field-pair"><label>Trim quality<input type="number" min="0" max="50" value={options.trimQuality} onChange={(event) => updateOptions("trimQuality", Number(event.target.value))} /></label><label>Minimum read length<input type="number" min="1" value={options.minimumReadLength} onChange={(event) => updateOptions("minimumReadLength", Number(event.target.value))} /></label></div></>}<div className="field-triple"><label>Minimum group size<input type="number" min="2" value={options.minimumGroupSize} onChange={(event) => updateOptions("minimumGroupSize", Number(event.target.value))} /></label><label>Adjusted p-value<input type="number" min="0" max="1" step="0.01" value={options.adjustedPValue} onChange={(event) => updateOptions("adjustedPValue", Number(event.target.value))} /></label><label>Absolute log2 fold change<input type="number" min="0" step="0.05" value={options.absoluteLog2FoldChange} onChange={(event) => updateOptions("absoluteLog2FoldChange", Number(event.target.value))} /></label></div></fieldset>
-            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as OptionsState["executionProfile"])}><option value="local">Local tools</option><option value="docker">Docker (regression)</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
+            <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as EditorOptions["executionProfile"])}><option value="local">Local tools</option><option value="docker">Docker (regression)</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
             <label>Maximum parallel tasks (workflow-wide)<input type="number" min="1" value={options.maxParallelTasks} onChange={(event) => updateOptions("maxParallelTasks", normalizeMaxParallelTasks(Number(event.target.value)))} /></label>
             <p className="field-help">CPU, RAM, and parallel task limits cover the workflow as a whole. Leave headroom for the desktop and other local work.</p>
           </section>
@@ -1320,7 +1291,7 @@ export function NewProjectWizard({
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
-            {validation && <div className={validation.valid ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
+            {validation && <div className={validation.valid && !nativeExecutionUnavailable ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? nativeExecutionUnavailable ? "Manifest valid; native execution unavailable" : "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
             {validationTerminal}
             <CheckList checks={validation?.checks ?? []} />
           </section>
@@ -1341,9 +1312,11 @@ export function NewProjectWizard({
   return (
     <div className="page-stack wizard-page">
       <header className="page-header">
-        <div><p className="eyebrow">New {isOntPipeline ? "ONT analysis" : "bulk RNA-seq"} project</p><h1>{details.projectName || "Untitled project"}</h1><p className="lede">Step {step + 1} of {steps.length} · {steps[step]}</p></div>
+        <div><p className="eyebrow">{initialManifest ? "Edit" : "New"} {isOntPipeline ? "ONT analysis" : "bulk RNA-seq"} project</p><h1>{details.projectName || "Untitled project"}</h1><p className="lede">Step {step + 1} of {steps.length} · {steps[step]}</p></div>
         <div className="page-header-actions"><button className="button secondary" type="button" onClick={() => void importSettings()} disabled={busy === "import-settings"}>{busy === "import-settings" ? "Importing…" : "Import settings"}</button><button className="button secondary" type="button" onClick={() => void exportSettings()} disabled={busy === "export-settings"}>{busy === "export-settings" ? "Exporting…" : "Export settings"}</button><span className="draft-chip">Unsaved</span><small>Exports include local paths and sample IDs.</small></div>
       </header>
+
+      {initialManifest && <div className="info-banner" role="status"><strong>Editing saved project</strong><span>Existing results and run history stay in place. Run project checks again before saving these settings and building a new run plan.</span></div>}
 
       {importPath && <div className="warning-list settings-export-success" role="status">Settings imported from <code>{importPath}</code>. Run validation again before saving.</div>}
       {exportPath && <div className="success-message settings-export-success" role="status">Settings exported to <code>{exportPath}</code></div>}

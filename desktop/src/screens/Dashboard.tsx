@@ -225,16 +225,6 @@ export function Dashboard({
         fetchChunk={fetchPrepareLog(prepareJob.job_identifier)}
       />}
 
-      <section className="development-banner" aria-label="Development notice">
-        <span className="notice-icon" aria-hidden="true">
-          i
-        </span>
-        <div>
-          <strong>Local pipeline workbench</strong>
-          <p>Create human bulk RNA-seq or mouse ONT analysis projects. The bulk RNA-seq demo uses local synthetic fixtures that support controlled execution when your environment is ready.</p>
-        </div>
-      </section>
-
       <div className="dashboard-grid">
         <section className="panel readiness-panel">
           <div className="section-heading">

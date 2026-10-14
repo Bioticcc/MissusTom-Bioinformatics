@@ -38,6 +38,7 @@ from missus_tom.services.bulk_references import (
     read_build_log_excerpt,
 )
 from missus_tom.services.dependencies import runtime_environment
+from missus_tom.services.nextflow_task_output import NextflowTaskOutput
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resource_monitor import CHECK_INTERVAL_SECONDS, ResourceMonitor
 from missus_tom.services.run_containment import (
@@ -58,7 +59,7 @@ ACTIVE_STATUSES = {
 TERM_GRACE_SECONDS = 10
 KILL_GRACE_SECONDS = 5
 DOCKER_COMMAND_TIMEOUT_SECONDS = 8
-HEARTBEAT_INTERVAL_SECONDS = 30 * 60
+HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,7 @@ class RunManager:
             try:
                 self._persist(record)
                 persisted = True
+                self._log_lifecycle(record, "Queued for execution validation")
                 thread = threading.Thread(
                     target=self._run,
                     args=(job_identifier, manifest),
@@ -273,6 +275,7 @@ class RunManager:
                 record.current_stage = "Stopping controlled workflow process"
                 record.error_message = reason
                 self._persist_safely(record)
+                self._log_lifecycle(record, "Stopping requested; controlled cleanup is in progress")
                 process = self._processes.get(job_identifier)
                 preparation_process = self._preparation_processes.get(job_identifier)
                 identity = self._identities.get(job_identifier) or self._identity_from_record(
@@ -281,6 +284,7 @@ class RunManager:
                 phase = record.execution_phase
                 containment_scope_id = record.containment_scope_id
         if retry_terminal_cleanup:
+            self._log_lifecycle(record, "Retrying process and container cleanup")
             if self._cleanup_owned_containers(job_identifier) and self._stop_containment(
                 job_identifier
             ):
@@ -292,6 +296,7 @@ class RunManager:
                     record.holds_admission = False
                     self._clear_persisted_process_identity(record)
                     self._persist_safely(record)
+                    self._log_lifecycle(record, "Cleanup verified; admission released")
                     self._release_locks(job_identifier)
             else:
                 self._mark_cleanup_unconfirmed(job_identifier)
@@ -449,7 +454,15 @@ class RunManager:
         return artifacts
 
     def _run(self, job_identifier: str, manifest: ProjectManifest | None = None) -> None:
+        stop_heartbeat = threading.Event()
         try:
+            with suppress(RuntimeError):
+                threading.Thread(
+                    target=self._preparation_heartbeat,
+                    args=(job_identifier, stop_heartbeat),
+                    name=f"missus-tom-preparation-heartbeat-{job_identifier}",
+                    daemon=True,
+                ).start()
             with self._lock:
                 record = self._records[job_identifier]
                 if not record.holds_admission or record.status == RunStatus.CANCELLED:
@@ -469,6 +482,7 @@ class RunManager:
                     record.current_stage = "Preparing workflow inputs"
                 record.started_at = record.started_at or datetime.now(UTC)
                 self._persist(record)
+                self._log_lifecycle(record, record.current_stage)
 
             if not self._validate_execution_before_launch(job_identifier, adapter, manifest):
                 return
@@ -487,6 +501,7 @@ class RunManager:
                     # stopped. Cancel re-reads this stage before finishing.
                     record.current_stage = "Starting containment"
                     self._persist(record)
+                    self._log_lifecycle(record, record.current_stage)
 
             if cancel_before_containment:
                 self._finish_cancelled_before_launch(record)
@@ -549,9 +564,34 @@ class RunManager:
                 self._signal_process_group(launched_process, signal.SIGTERM)
                 self._start_cancellation_watchdog(job_identifier, launched_process)
         finally:
+            stop_heartbeat.set()
             with self._lock:
                 self._processes.pop(job_identifier, None)
                 self._threads.pop(job_identifier, None)
+
+    def _preparation_heartbeat(self, job_identifier: str, stop: threading.Event) -> None:
+        while not stop.wait(max(0.1, HEARTBEAT_INTERVAL_SECONDS)):
+            with self._lock:
+                record = self._records.get(job_identifier)
+                if (
+                    record is None
+                    or not record.holds_admission
+                    or record.status
+                    not in {
+                        RunStatus.QUEUED,
+                        RunStatus.PREPARING,
+                        RunStatus.CANCELLING,
+                    }
+                ):
+                    return
+                snapshot = record.model_copy(deep=True)
+            started_at = snapshot.started_at or snapshot.created_at
+            elapsed_minutes = max(0, int((datetime.now(UTC) - started_at).total_seconds())) // 60
+            self._log_lifecycle(
+                snapshot,
+                f"Heartbeat: {snapshot.status.value}; {snapshot.current_stage or 'stage pending'}; "
+                f"elapsed {elapsed_minutes}m",
+            )
 
     def _validate_execution_before_launch(
         self,
@@ -569,6 +609,7 @@ class RunManager:
                 return False
             record.current_stage = "Validating execution"
             self._persist(record)
+            self._log_lifecycle(record, record.current_stage)
             start_stage = record.start_stage
             project_root = Path(record.results_directory).parent
 
@@ -593,6 +634,7 @@ class RunManager:
             record.execution_phase = RunExecutionPhase.WORKFLOW_LAUNCH
             record.current_stage = "Starting workflow runner"
             self._persist(record)
+            self._log_lifecycle(record, record.current_stage)
             log_path = Path(record.log_path)
 
         log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -647,6 +689,7 @@ class RunManager:
                     record.status = RunStatus.RUNNING
                     record.current_stage = "Workflow runner"
                     self._persist(record)
+                    self._log_lifecycle(record, "Workflow runner started")
             return self._wait_for_process_with_monitor(job_identifier, process, log_handle)
 
     def _finish_process(self, job_identifier: str, exit_code: int) -> None:
@@ -668,6 +711,7 @@ class RunManager:
             if not record.holds_admission:
                 return
             record.exit_code = exit_code
+            self._log_lifecycle(record, "Workflow process exited; finishing")
             # A controlled cancellation can race with the runner reaper after
             # SIGTERM has already produced its conventional negative exit code.
             cancelling = record.status == RunStatus.CANCELLING or exit_code < 0
@@ -688,6 +732,7 @@ class RunManager:
                 record.error_message = f"Workflow runner exited with status {exit_code}"
             self._persist_safely(record)
             self._append_terminal_log_marker(record)
+            self._log_lifecycle(record, "Verifying process and container cleanup")
         if process_group_id is not None and self._process_group_exists(process_group_id):
             with suppress(ProcessLookupError):
                 os.killpg(process_group_id, signal.SIGTERM)
@@ -719,6 +764,7 @@ class RunManager:
             record.cleanup_warning = None
             record.holds_admission = False
             self._persist_safely(record)
+            self._log_lifecycle(record, "Cleanup verified; admission released")
             self._release_locks(job_identifier)
 
     def _wait_for_process_with_monitor(
@@ -731,20 +777,45 @@ class RunManager:
             record = self._records[job_identifier]
             monitor = ResourceMonitor(Path(record.results_directory).parent)
             log_path = Path(record.log_path)
+            started_at = record.started_at
+            task_output = (
+                NextflowTaskOutput(Path(record.results_directory).parent / "work")
+                if record.pipeline_identifier == "bulk-rnaseq"
+                and record.command
+                and record.command[0] == "nextflow"
+                else None
+            )
+
+        def forward_task_output() -> None:
+            if task_output is None:
+                return
+            with suppress(OSError, ValueError):
+                task_stage = task_output.pump(log_path, log_handle)
+                if task_stage:
+                    self._set_runner_stage(job_identifier, f"Nextflow task: {task_stage}")
+
         cancellation_requested = False
         next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
         while True:
             try:
-                return process.wait(timeout=CHECK_INTERVAL_SECONDS)
+                exit_code = process.wait(timeout=CHECK_INTERVAL_SECONDS)
+                forward_task_output()
+                return exit_code
             except subprocess.TimeoutExpired:
                 self._update_runner_stage_from_log(job_identifier, log_path)
+                forward_task_output()
                 now = time.monotonic()
                 if now >= next_heartbeat:
+                    elapsed_seconds = (
+                        max(0, int((datetime.now(UTC) - started_at).total_seconds()))
+                        if started_at is not None
+                        else 0
+                    )
                     self._write_log_line_safely(
                         log_handle,
-                        "Heartbeat at "
+                        "[Missus Tom lifecycle] Heartbeat at "
                         f"{self._format_log_timestamp(datetime.now(UTC))}: "
-                        "workflow is still running.\n",
+                        f"workflow is still running. Elapsed {elapsed_seconds // 60}m.\n",
                     )
                     next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
                 reason = monitor.check()
@@ -764,14 +835,17 @@ class RunManager:
         if not matches:
             return
         stage = Path(matches[-1].group(1)).stem
+        self._set_runner_stage(job_identifier, f"Runner stage: {stage}")
+
+    def _set_runner_stage(self, job_identifier: str, current_stage: str) -> None:
         with self._lock:
             record = self._records.get(job_identifier)
             if record is None or record.status != RunStatus.RUNNING:
                 return
-            current_stage = f"Runner stage: {stage}"
             if record.current_stage != current_stage:
                 record.current_stage = current_stage
                 self._persist_safely(record)
+                self._log_lifecycle(record, current_stage)
 
     @staticmethod
     def _format_log_timestamp(value: datetime) -> str:
@@ -797,6 +871,14 @@ class RunManager:
         except (OSError, ValueError):
             return
 
+    def _log_lifecycle(self, record: RunRecord, message: str | None) -> None:
+        if message:
+            self._append_log_line_safely(
+                Path(record.log_path),
+                f"[Missus Tom lifecycle] {self._format_log_timestamp(datetime.now(UTC))} "
+                f"{message}\n",
+            )
+
     def _append_terminal_log_marker(self, record: RunRecord) -> None:
         """Record one operator-visible marker when this path makes a run terminal."""
         terminal_message = {
@@ -808,7 +890,8 @@ class RunManager:
             return
         self._append_log_line_safely(
             Path(record.log_path),
-            f"{terminal_message} at {self._format_log_timestamp(record.finished_at)}.\n",
+            f"[Missus Tom lifecycle] {terminal_message} at "
+            f"{self._format_log_timestamp(record.finished_at)}.\n",
         )
 
     def _claim_cancelled_before_launch(self, job_identifier: str) -> RunRecord | None:
@@ -885,6 +968,7 @@ class RunManager:
                 return
             record.current_stage = "Preparing references"
             self._persist(record)
+            self._log_lifecycle(record, record.current_stage)
             log_path = Path(record.log_path)
 
         prepare = getattr(adapter, "prepare_run_references", None)
@@ -896,7 +980,8 @@ class RunManager:
         def log_writer(message: str) -> None:
             self._append_log_line_safely(
                 log_path,
-                f"{self._format_log_timestamp(datetime.now(UTC))} {message}\n",
+                f"[Missus Tom lifecycle] {self._format_log_timestamp(datetime.now(UTC))} "
+                f"{message}\n",
             )
 
         execution_manifest, _prepared = prepare(
@@ -928,10 +1013,13 @@ class RunManager:
         def report(stage: str) -> None:
             with self._lock:
                 record = self._records.get(job_identifier)
-                if record is None:
+                if record is None or record.status in {RunStatus.CANCELLING, RunStatus.CANCELLED}:
+                    return
+                if record.current_stage == stage:
                     return
                 record.current_stage = stage
                 self._persist_safely(record)
+                self._log_lifecycle(record, stage)
 
         return report
 
@@ -949,7 +1037,8 @@ class RunManager:
             run_log = Path(record.log_path)
         self._append_log_line_safely(
             run_log,
-            f"{self._format_log_timestamp(datetime.now(UTC))} Reference build log excerpt:\n"
+            f"[Missus Tom lifecycle] {self._format_log_timestamp(datetime.now(UTC))} "
+            "Reference build log excerpt:\n"
             f"{excerpt}\n",
         )
 
@@ -1084,6 +1173,7 @@ class RunManager:
             record.execution_phase = RunExecutionPhase.QUEUED
             self._persist_safely(record)
             self._append_terminal_log_marker(record)
+            self._log_lifecycle(record, record.current_stage)
             self._release_locks(job_identifier)
 
     def _enforce_cancellation(
@@ -1234,6 +1324,7 @@ class RunManager:
                 record.error_message = warning
             record.holds_admission = True
             self._persist_safely(record)
+            self._log_lifecycle(record, f"Cleanup needs attention: {warning}")
 
     def _cleanup_owned_containers(self, job_identifier: str) -> bool:
         with self._lock:

@@ -480,6 +480,11 @@ h4 {
   border-color: var(--green-500);
 }
 
+.button.danger {
+  color: white;
+  background: var(--red);
+}
+
 .button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
@@ -954,6 +959,22 @@ h4 {
 .job-card:last-child {
   border-bottom: 0;
   padding-bottom: 0;
+}
+
+.cancel-confirmation {
+  margin-top: 0.75rem;
+  border: 1px solid #e7b4ae;
+  border-radius: var(--radius-control);
+  padding: 0.75rem;
+  background: var(--red-soft);
+}
+
+.cancel-confirmation p {
+  margin-bottom: 0.65rem;
+}
+
+.cancel-confirmation .button + .button {
+  margin-left: 0.5rem;
 }
 
 .job-metadata {
@@ -1617,6 +1638,22 @@ legend {
   font-size: 0.78rem;
 }
 
+.directory-open-error p {
+  margin: 0 0 0.4rem;
+}
+
+.directory-open-error code {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.directory-open-error button {
+  position: static;
+  justify-self: start;
+  padding: 0.25rem 0;
+  font-size: 0.78rem;
+}
+
 .warning-list {
   border: 1px solid #ecd09d;
   color: #704716;
@@ -1724,6 +1761,14 @@ legend {
 .setup-job.running { color: var(--blue); background: #e6f0f5; }
 .setup-job.succeeded { color: #175a3d; background: #e0f1e8; }
 .setup-job.failed { color: var(--red); background: var(--red-soft); }
+
+.setup-progress {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
 
 .dependency-list {
   display: grid;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { openDirectory } from "../native";
+import { DirectoryOpenError, type DirectoryOpenFailure } from "../components/DirectoryOpenError";
 import { RequestCoordinator } from "../requestCoordinator";
 import type { ResultArtifact, RunRecord } from "../types";
 
@@ -25,6 +26,7 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
   const [category, setCategory] = useState("all");
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
+  const [directoryOpenFailure, setDirectoryOpenFailure] = useState<DirectoryOpenFailure | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const selectedId = useRef<string | null>(activeRun?.job_identifier ?? null);
   const coordinator = useRef(new RequestCoordinator());
@@ -89,13 +91,19 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
     setSelectedRun(run);
     setArtifacts([]);
     setError("");
+    setDirectoryOpenFailure(null);
     void scan(run.job_identifier);
   };
 
   const openOutput = async () => {
     if (!selectedRun) return;
-    try { await openDirectory(selectedRun.results_directory); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "The output folder could not be opened."); }
+    const path = selectedRun.results_directory;
+    try {
+      await openDirectory(path);
+      setDirectoryOpenFailure(null);
+    } catch (reason) {
+      setDirectoryOpenFailure({ path, message: reason instanceof Error ? reason.message : String(reason) });
+    }
   };
   const visibleCategories = category === "all" ? categories : categories.filter(([key]) => key === category);
 
@@ -103,6 +111,7 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
     <div className="page-stack">
       <header className="page-header"><div><p className="eyebrow">Project outputs</p><h1>Results</h1><p className="lede">Files currently in this project’s output folder. Reruns update this folder.</p></div><div className="header-actions">{selectedRun && <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>}<button className="button primary" type="button" disabled={!selectedRun || refreshing} onClick={() => { if (selectedRun) void scan(selectedRun.job_identifier); }}>{refreshing ? "Refreshing…" : "Refresh files"}</button></div></header>
       {error && <div className="inline-error" role="alert">{error}</div>}
+      {directoryOpenFailure && selectedRun?.results_directory === directoryOpenFailure.path && <DirectoryOpenError key={directoryOpenFailure.path} {...directoryOpenFailure} />}
       <section className="panel results-toolbar">
         <label>Run<select value={selectedRun?.job_identifier ?? ""} onChange={(event) => { const run = runs.find((item) => item.job_identifier === event.target.value); if (run) selectRun(run); }} disabled={runs.length === 0}>{runs.length === 0 ? <option value="">No runs available</option> : runs.map((run) => <option key={run.job_identifier} value={run.job_identifier}>{run.project_name} · {run.status} · {new Date(run.created_at).toLocaleString()}</option>)}</select></label>
         <label>File group<select value={category} onChange={(event) => setCategory(event.target.value)}><option value="all">All file groups</option>{categories.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>

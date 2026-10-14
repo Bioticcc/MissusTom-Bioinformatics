@@ -15,7 +15,6 @@ test("Dashboard runs the bulk RNA-seq demo through prepare and project endpoints
   assert.match(source, /\/api\/v1\/demos\/bulk-rnaseq\/prepare/);
   assert.match(source, /\/api\/v1\/demos\/bulk-rnaseq\/project/);
   assert.match(source, /LiveCommandLog/);
-  assert.match(source, /synthetic fixtures/);
   assert.doesNotMatch(source, /\/api\/v1\/demos\/human/);
   assert.doesNotMatch(source, /Load human demo/);
 });

@@ -364,7 +364,7 @@ def test_run_log_offset_read(tmp_path: Path, manifest_payload: dict[str, Any]) -
     record = wait_for_terminal(manager, started.job_identifier)
     assert record.status == RunStatus.COMPLETED
 
-    tail = manager.read_log(started.job_identifier, limit=1000)
+    tail = manager.read_log(started.job_identifier, offset=0, limit=10_000)
     assert tail.truncated in {True, False}
     assert tail.bytes_available is not None
 
@@ -373,7 +373,7 @@ def test_run_log_offset_read(tmp_path: Path, manifest_payload: dict[str, Any]) -
     assert head.text == tail.text[: len(head.text)]
     assert head.truncated is True
     assert rest.truncated is False
-    assert head.text + rest.text == tail.text[: head.next_offset + len(rest.text)]
+    assert head.text + rest.text == tail.text
 
 
 def test_run_manager_captures_status_and_log(
@@ -425,6 +425,89 @@ def test_run_manager_writes_timestamped_heartbeats(
     assert "Heartbeat at " in log_text
     assert ": workflow is still running." in log_text
     assert "Completed at " in log_text
+
+
+def test_nextflow_task_stderr_reaches_run_log_without_running_nextflow(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    task = project / "work" / "ab" / "cdef1234567890"
+    task.mkdir(parents=True)
+    (task / ".command.err").write_text("Running DESeq2 for comparison A\n", encoding="utf-8")
+    log_path = project / "logs" / "run-test.log"
+    log_path.parent.mkdir(parents=True)
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="Task output test",
+        status=RunStatus.RUNNING,
+        command=["nextflow", "run", "main.nf"],
+        log_path=str(log_path),
+        results_directory=str(project / "results"),
+        created_at=datetime.now(UTC),
+        started_at=datetime.now(UTC),
+        holds_admission=True,
+    )
+    manager._records[record.job_identifier] = record
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "print('[ab/cdef12] Submitted process > BULK_RNASEQ_ANALYSIS')"],
+            stdout=log_handle,
+            text=True,
+        )
+        assert (
+            manager._wait_for_process_with_monitor(record.job_identifier, process, log_handle) == 0
+        )
+
+    assert "[Task err: BULK_RNASEQ_ANALYSIS]" in log_path.read_text(encoding="utf-8")
+    assert "Running DESeq2 for comparison A" in log_path.read_text(encoding="utf-8")
+    assert manager.get(record.job_identifier).current_stage == "Nextflow task: BULK_RNASEQ_ANALYSIS"
+
+
+def test_reference_status_does_not_replace_stopping_stage(tmp_path: Path) -> None:
+    manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
+    record = RunRecord(
+        job_identifier=str(uuid4()),
+        project_identifier=str(uuid4()),
+        project_name="Stopping reference preparation",
+        status=RunStatus.CANCELLING,
+        current_stage="Stopping controlled workflow process",
+        command=["nextflow", "run"],
+        log_path=str(tmp_path / "project" / "logs" / "run.log"),
+        results_directory=str(tmp_path / "project" / "results"),
+        created_at=datetime.now(UTC),
+        holds_admission=True,
+    )
+    manager._records[record.job_identifier] = record
+
+    manager._reference_status_callback(record.job_identifier)("Preparing annotation mapping")
+
+    assert (
+        manager.get(record.job_identifier).current_stage == "Stopping controlled workflow process"
+    )
+
+
+def test_preparation_heartbeat_reports_real_stage(
+    tmp_path: Path, manifest_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_payload["output_directory"] = str(tmp_path / "project")
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(runs_module, "HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    manager = RunManager(
+        SlowValidationAdapter(tmp_path, entered, release), registry_directory=tmp_path / "state"
+    )  # type: ignore[arg-type]
+
+    started = manager.start(manifest)
+    assert entered.wait(timeout=1)
+    try:
+        time.sleep(0.15)
+        log = manager.read_log(started.job_identifier).text
+        assert "Heartbeat: preparing; Validating execution; elapsed 0m" in log
+    finally:
+        release.set()
+    assert wait_for_terminal(manager, started.job_identifier).status == RunStatus.COMPLETED
 
 
 def test_run_manager_can_start_without_resume(

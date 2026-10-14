@@ -33,6 +33,7 @@ export default function App() {
   ));
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [runPlan, setRunPlan] = useState<RunPlan | null>(null);
+  const [editingManifest, setEditingManifest] = useState<ProjectManifest | null>(null);
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
   const [polledRuns, setPolledRuns] = useState<RunRecord[] | null>(null);
   const [runPollError, setRunPollError] = useState("");
@@ -133,7 +134,23 @@ export default function App() {
   const projectReady = (nextManifest: ProjectManifest, nextPlan: RunPlan) => {
     setManifest(nextManifest);
     setRunPlan(nextPlan);
+    setEditingManifest(null);
     setActiveView("run-plan");
+  };
+
+  const editProject = () => {
+    if (!manifest) return;
+    setEditingManifest(manifest);
+    setManifest(null);
+    setRunPlan(null);
+    setActiveView("wizard");
+  };
+
+  const newProject = () => {
+    setEditingManifest(null);
+    setManifest(null);
+    setRunPlan(null);
+    setActiveView("wizard");
   };
 
   const runStarted = (record: RunRecord) => {
@@ -183,7 +200,7 @@ export default function App() {
               type="button"
               className={activeView === item.id ? "nav-item active" : "nav-item"}
               key={item.id}
-              onClick={() => setActiveView(item.id)}
+              onClick={() => item.id === "wizard" ? newProject() : setActiveView(item.id)}
               aria-current={activeView === item.id ? "page" : undefined}
             >
               <span aria-hidden="true" className="nav-glyph">
@@ -203,18 +220,19 @@ export default function App() {
         <main className="main-content" id="main-content">
         {runPollError && <div className="inline-error" role="alert">{runPollError}</div>}
         {activeView === "dashboard" && (
-          <Dashboard onNew={() => setActiveView("wizard")} onDemo={projectReady} onOpen={projectReady} />
+          <Dashboard onNew={newProject} onDemo={projectReady} onOpen={projectReady} />
         )}
         {activeView === "setup" && <Setup
           activeRun={activeRun}
           isRunActive={Boolean(activeRun)}
           onContinue={() => { setSetupRequired(false); setActiveView("dashboard"); }}
         />}
-        {activeView === "wizard" && <NewProjectWizard onProjectReady={projectReady} />}
+        {activeView === "wizard" && <NewProjectWizard key={editingManifest?.project_identifier ?? "new"} initialManifest={editingManifest} onProjectReady={projectReady} />}
         {activeView === "run-plan" && (
           <RunPlanScreen
             manifest={manifest}
             plan={runPlan}
+            onEdit={editProject}
             onStarting={runStarting}
             onStartFailed={runStartFailed}
             onStarted={runStarted}

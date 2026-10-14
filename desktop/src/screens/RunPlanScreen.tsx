@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiRequest } from "../api";
 import { FolderPreview } from "../components/FolderPreview";
+import { DirectoryOpenError, type DirectoryOpenFailure } from "../components/DirectoryOpenError";
 import { PipelineDependencies } from "../components/PipelineDependencies";
 import { openDirectory } from "../native";
 import type { DirectoryPreview, ProjectManifest, RunPlan, RunRecord, RunStartStage } from "../types";
@@ -22,12 +23,14 @@ const analysisOnlySkippedStages = new Set([
 export function RunPlanScreen({
   manifest,
   plan,
+  onEdit,
   onStarting,
   onStartFailed,
   onStarted,
 }: {
   manifest: ProjectManifest | null;
   plan: RunPlan | null;
+  onEdit: () => void;
   onStarting: () => void | Promise<void>;
   onStartFailed: () => void;
   onStarted: (record: RunRecord) => void;
@@ -39,6 +42,7 @@ export function RunPlanScreen({
     : "quantification";
   const [startStage, setStartStage] = useState<RunStartStage>(configuredStartStage);
   const [error, setError] = useState("");
+  const [directoryOpenFailure, setDirectoryOpenFailure] = useState<DirectoryOpenFailure | null>(null);
   const [inputPreview, setInputPreview] = useState<DirectoryPreview | null>(null);
   const [outputPreview, setOutputPreview] = useState<DirectoryPreview | null>(null);
   const [refreshedPlan, setRefreshedPlan] = useState<RunPlan | null>(null);
@@ -141,10 +145,12 @@ export function RunPlanScreen({
   };
 
   const openOutput = async () => {
+    const path = manifest.output_directory;
     try {
-      await openDirectory(manifest.output_directory);
+      await openDirectory(path);
+      setDirectoryOpenFailure(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The output folder could not be opened.");
+      setDirectoryOpenFailure({ path, message: reason instanceof Error ? reason.message : String(reason) });
     }
   };
 
@@ -157,6 +163,7 @@ export function RunPlanScreen({
           <p className="lede">{isOntPipeline ? "Local mouse modBAM analysis with validated, restartable stages." : "Local tools with resumable Nextflow work."}</p>
         </div>
         <div className="header-actions">
+          <button className="button secondary" type="button" disabled={starting} onClick={onEdit}>Edit project settings</button>
           <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>
           <button className="button primary" type="button" disabled={!currentPlan.execution_enabled || starting} onClick={startRun}>{starting ? "Starting…" : "Run pipeline"}</button>
         </div>
@@ -169,6 +176,7 @@ export function RunPlanScreen({
         </section>
       )}
       {error && <div className="inline-error" role="alert">{error}</div>}
+      {directoryOpenFailure && manifest.output_directory === directoryOpenFailure.path && <DirectoryOpenError key={directoryOpenFailure.path} {...directoryOpenFailure} />}
       <PipelineDependencies pipelineIdentifier={manifest.pipeline_identifier} onInstalled={refreshRunPlan} />
 
       {isOntPipeline ? <section className="panel"><h2>Restartable ONT execution</h2><p>Run all five stages, reusing only validated current outputs. Existing results and logs are retained. A forced rebuild is not exposed in this screen.</p></section> : <fieldset className="run-mode-panel" disabled={starting}>

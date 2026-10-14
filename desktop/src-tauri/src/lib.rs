@@ -778,8 +778,37 @@ fn read_text_file(path: String) -> Result<String, String> {
         .map_err(|error| format!("Could not read the settings file as UTF-8: {error}"))
 }
 
-#[tauri::command]
-fn open_directory(path: String) -> Result<(), String> {
+fn is_wsl_release(release: &str) -> bool {
+    let release = release.to_ascii_lowercase();
+    release.contains("microsoft") || release.contains("wsl")
+}
+
+fn is_wsl() -> bool {
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        return true;
+    }
+    ["/proc/sys/kernel/osrelease", "/proc/version"]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|release| is_wsl_release(&release))
+}
+
+fn directory_opener(canonical: &Path, windows_path: Option<&str>) -> Command {
+    match windows_path {
+        Some(path) => {
+            let mut command = Command::new("explorer.exe");
+            command.arg(path);
+            command
+        }
+        None => {
+            let mut command = Command::new("xdg-open");
+            command.arg(canonical);
+            command
+        }
+    }
+}
+
+fn open_directory_blocking(path: &str) -> Result<(), String> {
     let requested = Path::new(&path);
     if !requested.is_absolute() {
         return Err("The directory path must be absolute.".to_string());
@@ -790,11 +819,55 @@ fn open_directory(path: String) -> Result<(), String> {
     if !canonical.is_dir() {
         return Err("The requested path is not a directory.".to_string());
     }
-    Command::new("xdg-open")
-        .arg(canonical)
-        .spawn()
-        .map_err(|error| format!("Could not open the directory: {error}"))?;
+    let windows_path = if is_wsl() {
+        let converted = Command::new("wslpath")
+            .arg("-w")
+            .arg(&canonical)
+            .output()
+            .map_err(|error| {
+                format!("Could not convert the directory for Windows Explorer: {error}")
+            })?;
+        if !converted.status.success() {
+            return Err(format!(
+                "Could not convert the directory for Windows Explorer: {}",
+                String::from_utf8_lossy(&converted.stderr).trim()
+            ));
+        }
+        let output = String::from_utf8(converted.stdout)
+            .map_err(|error| format!("Windows path conversion returned invalid text: {error}"))?;
+        let windows_path = output
+            .strip_suffix("\r\n")
+            .or_else(|| output.strip_suffix('\n'))
+            .unwrap_or(&output)
+            .to_string();
+        if windows_path.is_empty() {
+            return Err("Windows path conversion returned an empty path.".to_string());
+        }
+        Some(windows_path)
+    } else {
+        None
+    };
+    let program = if windows_path.is_some() {
+        "explorer.exe"
+    } else {
+        "xdg-open"
+    };
+    let status = directory_opener(&canonical, windows_path.as_deref())
+        .status()
+        .map_err(|error| format!("Could not start {program}: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "{program} could not open the directory (exit status {status})."
+        ));
+    }
     Ok(())
+}
+
+#[tauri::command]
+async fn open_directory(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_directory_blocking(&path))
+        .await
+        .map_err(|error| format!("Directory opener could not finish: {error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -882,9 +955,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        bottom_left_overlay_position, enforce_export_extension, parse_health_response,
-        should_show_overlay, sidecar_paths, startup_decision, validate_export_destination,
-        write_export_atomically, StartupDecision, TextExportKind,
+        bottom_left_overlay_position, directory_opener, enforce_export_extension, is_wsl_release,
+        parse_health_response, should_show_overlay, sidecar_paths, startup_decision,
+        validate_export_destination, write_export_atomically, StartupDecision, TextExportKind,
     };
 
     #[test]
@@ -893,6 +966,34 @@ mod tests {
         assert!(!should_show_overlay(true, false));
         assert!(!should_show_overlay(false, true));
         assert!(!should_show_overlay(false, false));
+    }
+
+    #[test]
+    fn wsl_release_detection_distinguishes_native_linux() {
+        assert!(is_wsl_release("6.6.87.2-microsoft-standard-WSL2"));
+        assert!(is_wsl_release("5.15.90.1-Microsoft"));
+        assert!(!is_wsl_release("6.1.0-25-amd64"));
+    }
+
+    #[test]
+    fn directory_openers_receive_one_unchanged_path_argument() {
+        use std::ffi::OsStr;
+
+        let linux_path = Path::new("/home/user/results with & spaces");
+        let windows_path = r"\\wsl.localhost\Ubuntu\home\user\results with & spaces";
+        let wsl = directory_opener(linux_path, Some(windows_path));
+        assert_eq!(wsl.get_program(), OsStr::new("explorer.exe"));
+        assert_eq!(
+            wsl.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new(windows_path)]
+        );
+
+        let native = directory_opener(linux_path, None);
+        assert_eq!(native.get_program(), OsStr::new("xdg-open"));
+        assert_eq!(
+            native.get_args().collect::<Vec<_>>(),
+            vec![linux_path.as_os_str()]
+        );
     }
 
     #[test]

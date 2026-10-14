@@ -505,7 +505,7 @@ def get_run_artifacts(job_identifier: str) -> ApiResponse[list[ResultArtifact]]:
 )
 def post_run_cancel(job_identifier: str) -> ApiResponse[RunRecord]:
     try:
-        record = run_manager.cancel(job_identifier)
+        record = run_manager.cancel(job_identifier, reason="Cancelled by user")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

@@ -27,6 +27,8 @@ test("setup restores completed and running debug jobs", () => {
 
 test("setup requires fresh dependency verification after an installer job succeeds", () => {
   assert.match(setupSource, /status\.job\?\.status === "succeeded" && status\.missing\.length === 0/);
+  assert.match(setupSource, /const joinedExistingInstall = status\.job\?\.status === "running"/);
+  assert.match(setupSource, /status\.job\?\.status === "succeeded" \? "complete" : "failed"/);
   assert.match(setupSource, /Installation finished but verification still reports missing requirements/);
   assert.match(setupSource, /Installed and verified\./);
   assert.doesNotMatch(setupSource, /status\.missing\.length === 0 \|\| status\.job\?\.status === "succeeded"/);
@@ -34,10 +36,27 @@ test("setup requires fresh dependency verification after an installer job succee
 
 test("setup and validation expose debug terminals while work is active", () => {
   assert.match(setupSource, /Starting setup and waiting for the backend job/);
+  assert.match(setupSource, /getBackendStatus\(\)/);
+  assert.match(setupSource, /native_containment/);
+  assert.match(setupSource, /Native runs cannot start yet/);
+  assert.match(setupSource, /Recheck/);
+  assert.match(setupSource, /Backend startup diagnostics/);
+  assert.match(setupSource, /Setup request:/);
+  assert.match(setupSource, /Verifying \$\{pipeline\} dependencies/);
+  assert.match(setupSource, /Setup completed\. Selected dependencies and fixtures are ready/);
+  assert.match(setupSource, /onUpdate\(job\)/);
   assert.match(wizardSource, /validation-debug-terminal/);
   assert.match(wizardSource, /streamProjectValidation/);
   assert.match(dashboardSource, /Backend diagnostics/);
   assert.match(dashboardSource, /startup_log_path/);
+});
+
+test("redundant information banners do not occupy the dashboard or setup", () => {
+  assert.doesNotMatch(dashboardSource, /Local pipeline workbench/);
+  assert.doesNotMatch(setupSource, /development-banner setup-sequence-note/);
+  assert.match(setupSource, /<details className="panel setup-sequence-note">/);
+  assert.doesNotMatch(wizardSource, /Compatible Bulk backend connected/);
+  assert.match(wizardSource, /Incompatible or unavailable backend/);
 });
 
 test("new project setup explains where additional pipeline installation lives", () => {

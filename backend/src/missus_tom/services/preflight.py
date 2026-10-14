@@ -39,6 +39,7 @@ from missus_tom.services.dependencies import (
     runtime_environment,
     runtime_tool,
 )
+from missus_tom.services.native_readiness import inspect_native_readiness
 from missus_tom.services.quantifications import has_kallisto_header
 from missus_tom.services.resources import (
     GIB,
@@ -176,6 +177,25 @@ def _managed_pipeline_check(
     )
 
 
+def native_containment_check(*, blocks_project_setup: bool = True) -> PreflightCheck:
+    readiness = inspect_native_readiness()
+    return PreflightCheck(
+        check_id="native_containment",
+        label="Native execution containment",
+        status=(
+            CheckStatus.PASSED
+            if readiness.available
+            else CheckStatus.BLOCKING
+            if blocks_project_setup
+            else CheckStatus.WARNING
+        ),
+        message=readiness.message
+        if readiness.available
+        else f"{readiness.message} {readiness.guidance}",
+        details=readiness.details,
+    )
+
+
 def system_preflight() -> SystemPreflightResult:
     host = inspect_host_resources()
     disk_state = inspect_storage(settings.state_directory)
@@ -200,6 +220,7 @@ def system_preflight() -> SystemPreflightResult:
         )
     available_memory = host.available_memory_bytes
     memory_ok = available_memory is not None
+    containment_check = native_containment_check()
     checks = [
         PreflightCheck(
             check_id="operating_system",
@@ -233,6 +254,7 @@ def system_preflight() -> SystemPreflightResult:
         _disk_preflight_check("disk_home", "User-data filesystem", disk_home),
         java_check,
         nextflow_check,
+        containment_check,
         _managed_pipeline_check(
             "bulk-rnaseq",
             check_id="managed_dependencies_bulk_rnaseq",
@@ -260,6 +282,7 @@ def system_preflight() -> SystemPreflightResult:
             settings.execution_enabled
             and java_check.status == CheckStatus.PASSED
             and nextflow_check.status == CheckStatus.PASSED
+            and containment_check.status == CheckStatus.PASSED
         ),
         checks=checks,
     )
@@ -724,6 +747,9 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             ),
         )
     )
+    if manifest.execution_profile == ExecutionProfile.LOCAL:
+        report_validation("Checking native execution containment.")
+        checks.append(native_containment_check(blocks_project_setup=False))
     checks.append(
         PreflightCheck(
             check_id="real_execution",
@@ -1229,6 +1255,9 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             ),
         )
     )
+    if manifest.execution_profile == ExecutionProfile.LOCAL:
+        report_validation("Checking native execution containment.")
+        checks.append(native_containment_check(blocks_project_setup=False))
     missing_tools = [
         tool
         for tool in ("dorado", "samtools", "mosdepth", "modkit", "bgzip", "tabix", "Rscript")

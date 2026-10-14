@@ -1,30 +1,24 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { saveTextFile } from "../native";
+import { elapsedMs, formatDuration, isTerminalStatus, lastOutputLabel } from "../runPresentation";
 import type { CommandLogChunk } from "../types";
 
 const DEFAULT_POLL_MS = 2_000;
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
+const LOG_PREVIEW_CHARACTERS = 131_072;
 
 function processLabel(status: string | undefined, quietMs: number | null): string {
   const normalized = (status ?? "idle").toLowerCase();
   if (normalized === "running" || normalized === "preparing" || normalized === "queued" || normalized === "cancelling") {
+    const label = normalized === "preparing" ? "Preparing" : normalized === "queued" ? "Queued" : normalized === "cancelling" ? "Stopping" : "Running";
     if (quietMs !== null && quietMs >= 60_000) {
-      return `Running (no new output for ${formatDuration(quietMs)}; this does not mean the process is frozen)`;
+      return `${label} (no new output for ${formatDuration(quietMs)}; this does not mean the process is frozen)`;
     }
-    return "Running";
+    return label;
   }
   if (normalized === "succeeded" || normalized === "completed") return "Completed";
   if (normalized === "failed") return "Failed";
-  if (normalized === "cancelled" || normalized === "interrupted") return "Interrupted";
+  if (normalized === "cancelled") return "Cancelled";
+  if (normalized === "interrupted") return "Interrupted";
   return status ?? "Idle";
 }
 
@@ -53,7 +47,7 @@ export function LiveCommandLog({
   defaultExpanded?: boolean;
   resetKey?: string;
 }) {
-  const [text, setText] = useState("");
+  const [previewText, setPreviewText] = useState("");
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
   const [copyState, setCopyState] = useState("");
@@ -62,7 +56,10 @@ export function LiveCommandLog({
   const follow = useRef(true);
   const preRef = useRef<HTMLPreElement | null>(null);
   const offsetRef = useRef(0);
+  const fullTextRef = useRef("");
+  const fetchChunkRef = useRef(fetchChunk);
   const mounted = useRef(true);
+  fetchChunkRef.current = fetchChunk;
 
   useEffect(() => {
     mounted.current = true;
@@ -73,19 +70,21 @@ export function LiveCommandLog({
 
   useEffect(() => {
     offsetRef.current = 0;
+    fullTextRef.current = "";
     setOffset(0);
-    setText("");
+    setPreviewText("");
     setError("");
     setCopyState("");
   }, [resetKey]);
 
   useEffect(() => {
+    if (!active || isTerminalStatus(status)) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [active, status]);
 
   useEffect(() => {
-    if (!expanded && !active) return;
+    if (!expanded) return;
     let timer: number | undefined;
     const controller = new AbortController();
     let polling = false;
@@ -94,14 +93,15 @@ export function LiveCommandLog({
       if (polling || controller.signal.aborted) return;
       polling = true;
       try {
-        const chunk = await fetchChunk(offsetRef.current, controller.signal);
+        const chunk = await fetchChunkRef.current(offsetRef.current, controller.signal);
         if (!mounted.current || controller.signal.aborted) return;
         if (chunk.text) {
-          setText((existing) => existing + chunk.text);
+          fullTextRef.current += chunk.text;
+          setPreviewText(fullTextRef.current.slice(-LOG_PREVIEW_CHARACTERS));
         }
         offsetRef.current = chunk.next_offset;
-        setOffset(chunk.next_offset);
-        setError("");
+        setOffset((previous) => previous === chunk.next_offset ? previous : chunk.next_offset);
+        setError((previous) => previous ? "" : previous);
       } catch (reason) {
         if (mounted.current && !controller.signal.aborted) {
           setError(reason instanceof Error ? reason.message : "Log output could not be loaded.");
@@ -119,24 +119,21 @@ export function LiveCommandLog({
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [active, expanded, fetchChunk, pollMs, resetKey]);
+  }, [active, expanded, pollMs, resetKey]);
 
   useLayoutEffect(() => {
     const element = preRef.current;
     if (element && follow.current) element.scrollTop = element.scrollHeight;
-  }, [text]);
+  }, [previewText]);
 
-  const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
-  const finishedMs = finishedAt ? Date.parse(finishedAt) : Number.NaN;
   const lastOutputMs = lastOutputAt ? Date.parse(lastOutputAt) : Number.NaN;
-  const elapsedMs = Number.isFinite(startedMs)
-    ? (Number.isFinite(finishedMs) ? finishedMs : now) - startedMs
-    : null;
-  const quietMs = Number.isFinite(lastOutputMs) ? now - lastOutputMs : null;
+  const terminal = isTerminalStatus(status);
+  const runElapsedMs = elapsedMs(startedAt, finishedAt, status, now);
+  const quietMs = !terminal && Number.isFinite(lastOutputMs) ? Math.max(0, now - lastOutputMs) : null;
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(fullTextRef.current);
       setCopyState("Copied to clipboard.");
     } catch {
       setCopyState("Clipboard copy failed.");
@@ -145,7 +142,7 @@ export function LiveCommandLog({
 
   const save = async () => {
     try {
-      const path = await saveTextFile("Save command log", "missus-tom-command.log", text || "No log output yet.\n", "log");
+      const path = await saveTextFile("Save command log", "missus-tom-command.log", fullTextRef.current || "No log output yet.\n", "log");
       setCopyState(path ? `Saved to ${path}` : "Save cancelled.");
     } catch (reason) {
       setCopyState(reason instanceof Error ? reason.message : "Log could not be saved.");
@@ -159,14 +156,16 @@ export function LiveCommandLog({
         <div className="live-command-log-meta">
           <span><strong>Status:</strong> {processLabel(status, quietMs)}</span>
           {stage ? <span><strong>Stage:</strong> {stage}</span> : null}
-          {elapsedMs !== null ? <span><strong>Elapsed:</strong> {formatDuration(elapsedMs)}</span> : null}
-          {quietMs !== null ? <span><strong>Last output:</strong> {formatDuration(quietMs)} ago</span> : <span><strong>Last output:</strong> waiting</span>}
+          {runElapsedMs !== null ? <span><strong>Elapsed:</strong> {formatDuration(runElapsedMs)}</span> : null}
+          {terminal && runElapsedMs === null ? <span><strong>Elapsed:</strong> Unconfirmed</span> : null}
+          <span><strong>Last output:</strong> {lastOutputLabel(lastOutputAt, status, now)}</span>
           <span><strong>Bytes read:</strong> {offset.toLocaleString()}</span>
         </div>
         <div className="live-command-log-actions">
-          <button type="button" className="text-button" onClick={() => void copy()} disabled={!text}>Copy</button>
+          <button type="button" className="text-button" onClick={() => void copy()} disabled={!fullTextRef.current}>Copy</button>
           <button type="button" className="text-button" onClick={() => void save()}>Save…</button>
         </div>
+        {fullTextRef.current.length > LOG_PREVIEW_CHARACTERS && <p className="field-help">Showing recent output. Copy or Save includes all loaded output.</p>}
         {copyState && <p className="field-help" role="status">{copyState}</p>}
         {error && <div className="inline-error" role="alert">{error}</div>}
         <pre
@@ -178,7 +177,7 @@ export function LiveCommandLog({
           }}
           ref={preRef}
         >
-          {text || (active ? "Waiting for command output…" : "No log output yet.")}
+          {previewText || (active && !terminal ? "Waiting for command output…" : "No log output yet.")}
         </pre>
       </details>
     </section>

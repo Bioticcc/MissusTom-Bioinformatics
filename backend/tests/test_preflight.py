@@ -54,6 +54,16 @@ def test_system_preflight_excludes_container_runtime_checks(
             installable=True,
         ),
     )
+    monkeypatch.setattr(
+        preflight,
+        "native_containment_check",
+        lambda: PreflightCheck(
+            check_id="native_containment",
+            label="Native execution containment",
+            status=CheckStatus.BLOCKING,
+            message="The systemd user bus is unavailable.",
+        ),
+    )
 
     result = preflight.system_preflight()
     check_ids = {check.check_id for check in result.checks}
@@ -62,6 +72,8 @@ def test_system_preflight_excludes_container_runtime_checks(
     assert "apptainer" not in check_ids
     assert "disk_state" in check_ids
     assert "disk_home" in check_ids
+    assert "native_containment" in check_ids
+    assert result.ready_for_real_execution is False
     disk_home = next(check for check in result.checks if check.check_id == "disk_home")
     assert "measurement=linux" in disk_home.message
 
