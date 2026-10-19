@@ -41,12 +41,13 @@
 - `desktop/src-tauri/`: Rust host commands and Tauri packaging configuration.
 - `schemas/project-manifest.schema.json`: versioned JSON manifest contract.
 - `workflows/bulk_rnaseq/`: Nextflow DSL2 workflow, resource policy, container
-  definition, and R analysis. Its nested `AGENTS.md` adds scientific rules.
+  definition, and R analysis. Workflow-specific guidance is in
+  `docs/workflows/AGENTS.md`.
 - `workflows/ont_analysis/`: manifest-driven native-tool runner, restartable ONT
   stages, weighted summary helpers, and mouse methylation exploration.
 - `scripts/`: setup, development, demo-preparation, and agent utilities.
-- `docs/`: architecture, baseline evidence, migration decisions, and open
-  scientific questions.
+- `docs/`: agent guides, developer diary, architecture, backend and workflow
+  guides, baseline evidence, migration decisions, and open scientific questions.
 - Runtime data belongs outside Git. Generated `work/`, `results/`, caches,
   dependency trees, and build outputs are ignored and are not source.
 
@@ -60,7 +61,7 @@
 - API behavior: `backend/src/missus_tom/api/routes.py` and the Pydantic models.
 - Manifest contract: keep the JSON schema, Pydantic model, TypeScript types, and
   synthetic example aligned; `backend/tests/test_schema.py` checks part of this.
-- Workflow contract: `workflows/bulk_rnaseq/README.md`, `main.nf`,
+- Workflow contract: `docs/workflows/bulk_rnaseq/README.md`, `main.nf`,
   `nextflow.config`, and `conf/resources.config`.
 - Validation commands and escalation order: `docs/agent/WORKFLOWS.md`.
 

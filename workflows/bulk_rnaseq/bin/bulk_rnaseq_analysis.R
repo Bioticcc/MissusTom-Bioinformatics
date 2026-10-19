@@ -2,7 +2,7 @@
 
 # Optional gene-class outputs use exact biotype matches only (no pattern grep).
 # Accepted lncRNA gene_biotype values are listed in ACCEPTED_LNCRNA_GENE_BIOTYPES
-# below and in workflows/bulk_rnaseq/README.md.
+# below and in docs/workflows/bulk_rnaseq/README.md.
 PROTEIN_CODING_GENE_BIOTYPE <- "protein_coding"
 ACCEPTED_LNCRNA_GENE_BIOTYPES <- c(
   "lncRNA",

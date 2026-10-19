@@ -1124,12 +1124,12 @@ mod tests {
 
     #[test]
     fn health_response_requires_the_expected_api_envelope() {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"name\":\"Missus Tom\",\"version\":\"0.4.0\",\"status\":\"ok\",\"activity\":{\"state\":\"idle\",\"operation\":null}}}";
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":{\"name\":\"Missus Tom\",\"version\":\"0.4.1\",\"status\":\"ok\",\"activity\":{\"state\":\"idle\",\"operation\":null}}}";
         assert!(parse_health_response(response));
         assert_eq!(
             parse_backend_health(response),
             Some(BackendHealth {
-                version: "0.4.0".to_string(),
+                version: "0.4.1".to_string(),
                 activity: "idle".to_string(),
                 operation: None,
             })

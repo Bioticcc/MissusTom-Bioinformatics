@@ -49,8 +49,8 @@ git ls-files | awk -F/ '{counts[$1]++} END {for (name in counts) printf "%4d  %s
 
 mapfile -t relevant_paths < <(
   git ls-files \
-    AGENTS.md README.md Makefile \
-    backend/src backend/tests backend/pyproject.toml backend/README.md \
+    README.md Makefile \
+    backend/src backend/tests backend/pyproject.toml \
     desktop/src desktop/src-tauri/src desktop/package.json desktop/vite.config.ts \
     docs examples schemas scripts workflows \
   | awk '

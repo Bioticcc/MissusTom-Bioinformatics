@@ -22,6 +22,7 @@ const pipelines: Array<{ id: SetupPipelineIdentifier; name: string; detail: stri
 ];
 
 const POLL_INTERVAL_MS = 2_000;
+const DEPENDENCY_VERIFICATION_TIMEOUT_MS = 45_000;
 
 type LiveJobKind = "fixtures" | "dependencies";
 
@@ -74,6 +75,18 @@ async function pollInstall(pipeline: SetupPipelineIdentifier, controller: AbortS
   throw new DOMException("Setup cancelled", "AbortError");
 }
 
+function verifyDependencies(pipeline: SetupPipelineIdentifier, signal: AbortSignal) {
+  return apiRequest<PipelineDependencies>(
+    `/api/v1/pipelines/${pipeline}/dependencies`,
+    { signal },
+    {
+      requestKind: "long",
+      timeoutMs: DEPENDENCY_VERIFICATION_TIMEOUT_MS,
+      timeoutMessage: "Dependency installation completed, but verification did not finish within 45 seconds. Retry setup; the installed environment is preserved.",
+    },
+  );
+}
+
 export function Setup({ activeRun, isRunActive, onContinue }: {
   activeRun: RunRecord | null;
   isRunActive: boolean;
@@ -97,9 +110,14 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
   const liveJobIdentifier = liveJob?.jobIdentifier;
   const liveJobStatus = liveJob?.status;
 
-  useEffect(() => () => {
-    mounted.current = false;
-    controllerRef.current?.abort();
+  useEffect(() => {
+    // React Strict Mode rehearses effect cleanup in development. Restore this
+    // guard on the second setup so checkbox changes can render normally.
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      controllerRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -323,7 +341,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
             setSetupStep(`Installing ${pipeline} dependencies…`);
             await pollInstall(pipeline, controller.signal, (job) => syncDependencyLiveJob(pipeline, job));
             setSetupStep(`Verifying ${pipeline} dependencies…`);
-            status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
+            status = await verifyDependencies(pipeline, controller.signal);
           }
           if (status.missing.length === 0) {
             current = joinedExistingInstall
@@ -340,7 +358,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
           setSetupStep(`Installing ${pipeline} dependencies…`);
           await pollInstall(pipeline, controller.signal, (job) => syncDependencyLiveJob(pipeline, job));
           setSetupStep(`Verifying ${pipeline} dependencies…`);
-          status = await apiRequest<PipelineDependencies>(`/api/v1/pipelines/${pipeline}/dependencies`, { signal: controller.signal }, { requestKind: "long" });
+          status = await verifyDependencies(pipeline, controller.signal);
           if (status.job) syncDependencyLiveJob(pipeline, status.job);
           current = status.job?.status === "succeeded" && status.missing.length === 0
             ? record(current, pipeline, "dependencies", "complete", "Installed and verified.")
@@ -422,7 +440,8 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
             <label className="setup-action-toggle"><input type="checkbox" checked={configured.fixtures} disabled={working} onChange={(event) => select(pipeline.id, "fixtures", event.target.checked)} /> Prepare synthetic fixtures</label>
             {selectedActions(state, pipeline.id).map((action) => {
               const outcome = configured.outcomes[action];
-              return <p className={`setup-job ${outcome.state}`} key={action}><strong>{actionLabel(action)}:</strong> {outcome.state === "pending" ? "Awaiting your confirmation." : outcome.reason}</p>;
+              const message = outcome.reason || (outcome.state === "pending" ? "Selected. Choose Prepare selected setup to begin." : "Status unavailable.");
+              return <p className={`setup-job ${outcome.state}`} key={action}><strong>{actionLabel(action)}:</strong> {message}</p>;
             })}
           </div>}
         </section>;

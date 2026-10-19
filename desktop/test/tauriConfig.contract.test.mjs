@@ -9,6 +9,9 @@ const packageJson = JSON.parse(await readFile(new URL("../package.json", import.
 const releaseConfig = JSON.parse(
   await readFile(new URL("../src-tauri/tauri.release.conf.json", import.meta.url), "utf8"),
 );
+const defaultCapability = JSON.parse(
+  await readFile(new URL("../src-tauri/capabilities/default.json", import.meta.url), "utf8"),
+);
 
 // Tauri 2's documented `bundle.category` values. Keep this list aligned with
 // https://v2.tauri.app/reference/config/#bundleconfig.category.
@@ -69,6 +72,11 @@ test("Main window uses frameless chrome with supported minimum size", () => {
   assert.equal(mainWindow.minWidth, 760);
   assert.equal(mainWindow.minHeight, 520);
   assert.equal(mainWindow.title, "Missus Tom");
+});
+
+test("Main window enables Tauri zoom shortcuts with the narrow webview permission", () => {
+  assert.equal(mainWindow.zoomHotkeysEnabled, true);
+  assert.ok(defaultCapability.permissions.includes("core:webview:allow-set-webview-zoom"));
 });
 
 test("local release builds inject the git revision used by frozen backend sidecars", () => {

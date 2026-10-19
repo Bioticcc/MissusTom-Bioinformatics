@@ -6,27 +6,50 @@ the application does not upload biological data.
 
 ## Availability
 
-Linux x86_64 on Ubuntu and Debian is the only supported release target.
-Successful tagged releases provide one ZIP containing the Debian `.deb`
-installer, its checksum file, and installation instructions. Windows, macOS,
-ARM Linux, and AppImage releases are unavailable.
+- [WINDOWS] - Available only through WSL Ubuntu.
+- [LINUX] - Available through x86_64 Ubuntu and Debian.
+- [MAC] - Implementation planned after Windows is fully complete.
 
-Clean-machine GUI installation has not yet been verified.
+Successful tagged releases provide one ZIP containing the Debian `.deb`
+installer, its checksum file, and installation instructions. ARM Linux and
+AppImage releases are unavailable. Clean-machine GUI installation has not yet
+been verified.
 
 ## Available pipelines
 
-- **Paired-end Bulk RNA-seq** prepares compatible transcriptome references and
-  runs quality checks, trimming, transcript quantification, and manifest-defined
-  two-group differential-expression analysis.
-- **One-sample mouse ONT modified-base analysis** works with existing mouse
-  pass modBAM files, retaining modified-base calls for alignment, coverage, and
-  descriptive 5mC/5hmC exploration.
+- [PAIRED-END BULK RNA-SEQ] - Available. Controlled synthetic runs and
+  automated checks are available; clean-machine installation and broad
+  production-project validation are still in progress. It prepares compatible
+  transcriptome references and runs quality checks, trimming, transcript
+  quantification, and manifest-defined two-group differential-expression
+  analysis.
+  - Pipeline requirements: Nextflow, Java, FastQC, MultiQC, Cutadapt,
+    Kallisto, R, DESeq2, tximport, and ggplot2. Setup installs these managed
+    dependencies automatically when you select their installation.
+  - Pipeline inputs: paired FASTQ files for every sample, a transcriptome FASTA,
+    and a matching GTF annotation. The FASTA and GTF must be from the same
+    reference/annotation version, or validation problems may occur.
+- [ONE-SAMPLE MOUSE ONT MODIFIED-BASE ANALYSIS] - Available for setup and
+  one-sample mouse projects, but it has not passed sufficient production
+  testing. It works with existing pass modBAM files, retaining modified-base
+  calls for alignment, coverage, and descriptive 5mC/5hmC exploration.
+  - Pipeline requirements: Dorado, Samtools/HTSlib, Mosdepth, Modkit,
+    Minimap2, Python, R, and the required R packages. Setup installs these
+    managed dependencies automatically when you select their installation.
+  - Pipeline inputs: existing mouse pass modBAM files and the compatible mouse
+    reference resources required by the selected project.
 
 The pipelines are deliberately separate. Bulk RNA-seq does not currently
 support single-end data, batch/covariate statistical models, or automatic
 reference downloads. ONT currently supports one mouse GRCm38p6 sample only;
 it does not re-basecall reads or provide multi-sample comparisons, DMR/DhMR,
 enrichment, or human ONT analysis.
+
+## Future pipelines
+
+- [SIX BASE DNA METHYLATION ANALYSIS] - Not Started
+- [SINGLE CELL RNA SEQUENCING] - Not Started
+- [ONT VS SIXBASE DIRECT COMPARISON] - Not Started
 
 ## Setup and demo fixtures
 
@@ -142,7 +165,9 @@ npm run tauri dev
 For development checks, packaging guidance, and validation commands, see
 [the workflow guide](docs/agent/WORKFLOWS.md). For the application's component
 boundaries and local-security design, see [the architecture
-overview](docs/mvp_architecture.md).
+overview](docs/mvp_architecture.md). The [agent guide](docs/agent/AGENTS.md),
+[backend guide](docs/backend/README.md), [workflow guides](docs/workflows/),
+and [development diary](docs/Dev_Diary.md) are also kept under `docs/`.
 
 ## Current limits
 

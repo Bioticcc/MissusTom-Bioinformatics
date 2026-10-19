@@ -25,12 +25,26 @@ test("setup restores completed and running debug jobs", () => {
   assert.doesNotMatch(setupSource, /setDependencyInstallActive/);
 });
 
+test("setup restores its render guard after the React Strict Mode effect rehearsal", () => {
+  assert.match(
+    setupSource,
+    /useEffect\(\(\) => \{\s*\/\/ React Strict Mode[\s\S]*mounted\.current = true;[\s\S]*return \(\) => \{\s*mounted\.current = false;/,
+  );
+});
+
+test("pending setup actions explain how to begin and retain specific pending reasons", () => {
+  assert.match(setupSource, /const message = outcome\.reason \|\| \(outcome\.state === "pending" \? "Selected\. Choose Prepare selected setup to begin\."/);
+  assert.doesNotMatch(setupSource, /Awaiting your confirmation\./);
+});
+
 test("setup requires fresh dependency verification after an installer job succeeds", () => {
   assert.match(setupSource, /status\.job\?\.status === "succeeded" && status\.missing\.length === 0/);
   assert.match(setupSource, /const joinedExistingInstall = status\.job\?\.status === "running"/);
   assert.match(setupSource, /status\.job\?\.status === "succeeded" \? "complete" : "failed"/);
   assert.match(setupSource, /Installation finished but verification still reports missing requirements/);
   assert.match(setupSource, /Installed and verified\./);
+  assert.match(setupSource, /DEPENDENCY_VERIFICATION_TIMEOUT_MS = 45_000/);
+  assert.match(setupSource, /Dependency installation completed, but verification did not finish within 45 seconds/);
   assert.doesNotMatch(setupSource, /status\.missing\.length === 0 \|\| status\.job\?\.status === "succeeded"/);
 });
 

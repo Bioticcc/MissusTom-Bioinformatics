@@ -1,6 +1,7 @@
 # Workflow-specific guidance
 
-These instructions apply under `workflows/` in addition to the root guide.
+Use this guide for changes under `workflows/`, alongside
+`docs/agent/AGENTS.md`.
 
 ## Boundaries and sources
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Missus Tom",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "identifier": "org.yanlab.missustom",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,6 +17,7 @@
         "height": 900,
         "minWidth": 760,
         "minHeight": 520,
+        "zoomHotkeysEnabled": true,
         "decorations": false,
         "resizable": true
       }
