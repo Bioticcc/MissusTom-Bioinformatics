@@ -124,6 +124,15 @@ export interface Comparison {
   intervention: string | null;
 }
 
+export type CustomFigureType = "gene_metric_scatter" | "sample_correlation_heatmap" | "expression_distribution_boxplot" | "top_de_genes_bar" | "estimated_gene_count_bar";
+export interface AxisRange { mode: "automatic" | "manual"; minimum?: number | null; maximum?: number | null; }
+export interface CustomFigure {
+  figure_id: string; figure_type: CustomFigureType; title: string;
+  x_variable?: string | null; y_variable?: string | null;
+  x_axis: AxisRange; y_axis: AxisRange; x_label?: string | null; y_label?: string | null; top_n?: number | null;
+}
+export interface FigureConfiguration { version: 1; custom_figures: CustomFigure[]; }
+
 export type ManifestSchemaVersion = "1.0.0" | "1.1.0";
 export type BulkReferenceMode = "build" | "existing-index";
 export type BulkStrandedness = "unstranded" | "forward" | "reverse";
@@ -159,6 +168,7 @@ export interface ProjectManifest {
     included: boolean;
   }>;
   comparisons: Comparison[];
+  figure_configuration?: FigureConfiguration | null;
   parameters: Record<string, string | number | boolean | null>;
   // Total workflow budgets; max_parallel_tasks applies across all stages.
   resource_profile: { cpus: number; memory_gb: number; max_parallel_tasks: number };

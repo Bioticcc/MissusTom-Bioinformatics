@@ -170,6 +170,7 @@ export function resolveImportedWizardStep(
     "FASTQ discovery",
     "Sample review",
     "Experimental design",
+    "Figures",
     "Comparisons",
     "Pipeline options",
     "Preflight validation",
@@ -180,9 +181,11 @@ export function resolveImportedWizardStep(
   if (labelledPosition >= 0) return labelledPosition;
 
   const position = typeof currentStep === "number" ? currentStep : 1;
-  // The short-lived seven-step UI omitted Sample review; its later numeric
-  // positions cannot be distinguished without the exported label.
-  return Math.max(0, Math.min(7, position - 1));
+  // Older exports predate the Figures page. Numeric pages after Experimental
+  // design therefore move forward one slot in the current wizard.
+  const legacyPosition = position - 1;
+  const currentPosition = legacyPosition >= 4 ? legacyPosition + 1 : legacyPosition;
+  return Math.max(0, Math.min(8, currentPosition));
 }
 
 export function mergeImportedBulkOptions(

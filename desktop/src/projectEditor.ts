@@ -1,4 +1,4 @@
-import type { BulkReferenceMode, BulkStrandedness, Comparison, ProjectManifest, ProposedSample, RunStartStage } from "./types";
+import type { BulkReferenceMode, BulkStrandedness, Comparison, FigureConfiguration, ProjectManifest, ProposedSample, RunStartStage } from "./types";
 
 export interface EditorOptions {
   organism: string;
@@ -68,6 +68,7 @@ export function loadProjectEditor(manifest: ProjectManifest, defaults: EditorOpt
   options: EditorOptions;
   samples: ProposedSample[];
   comparisons: Comparison[];
+  figureConfiguration: FigureConfiguration;
   startStage: RunStartStage;
 } {
   const resources = manifest.reference_resources;
@@ -128,6 +129,7 @@ export function loadProjectEditor(manifest: ProjectManifest, defaults: EditorOpt
       warnings: [],
     })),
     comparisons: manifest.comparisons.map((comparison) => ({ ...comparison })),
+    figureConfiguration: manifest.figure_configuration ?? { version: 1, custom_figures: [] },
     startStage: parameters.start_stage === "analysis" ? "analysis" : "quantification",
   };
 }

@@ -8,6 +8,7 @@ import { FolderPreview } from "../components/FolderPreview";
 import { PipelineDependencies } from "../components/PipelineDependencies";
 import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
 import { loadProjectDefaults } from "../preferences";
+import { DEFAULT_FIGURES, FIGURE_TYPES, GENE_METRICS, newCustomFigure } from "../figureCatalog";
 import {
   BULK_MANIFEST_SCHEMA_VERSION,
   BULK_PIPELINE_VERSION,
@@ -30,6 +31,7 @@ import {
 } from "../newProjectWizardContract";
 import type {
   Comparison,
+  CustomFigure,
   DirectoryPreview,
   FastqDiscoveryResult,
   HealthStatus,
@@ -47,6 +49,7 @@ const bulkSteps = [
   "FASTQ discovery",
   "Sample review",
   "Experimental design",
+  "Figures",
   "Comparisons",
   "Pipeline options",
   "Preflight validation",
@@ -184,6 +187,7 @@ export function NewProjectWizard({
   const [discovery, setDiscovery] = useState<InputDiscoveryResult | null>(null);
   const [samples, setSamples] = useState<ProposedSample[]>(initialEditor?.samples ?? []);
   const [comparisons, setComparisons] = useState<Comparison[]>(initialEditor?.comparisons ?? []);
+  const [figureConfiguration, setFigureConfiguration] = useState(initialEditor?.figureConfiguration ?? { version: 1 as const, custom_figures: [] });
   const [numerator, setNumerator] = useState("");
   const [denominator, setDenominator] = useState("");
   const [comparisonIntervention, setComparisonIntervention] = useState("");
@@ -299,6 +303,7 @@ export function NewProjectWizard({
     setSamples([]);
     setMetadataImport(null);
     setComparisons([]);
+    setFigureConfiguration({ version: 1, custom_figures: [] });
     invalidateValidation();
   };
 
@@ -312,6 +317,7 @@ export function NewProjectWizard({
     setDiscovery(null);
     setSamples([]);
     setComparisons([]);
+    setFigureConfiguration({ version: 1, custom_figures: [] });
     setMetadataImport(null);
     setOptions((current) => value === "ont-analysis"
       ? {
@@ -661,6 +667,7 @@ export function NewProjectWizard({
         included: sample.included,
       })),
       comparisons: isOntPipeline ? [] : comparisons,
+      ...(!isOntPipeline ? { figure_configuration: figureConfiguration } : {}),
       parameters: {
         ...(isOntPipeline ? {} : { start_stage: startStage }),
         ...(isOntPipeline ? {
@@ -720,6 +727,7 @@ export function NewProjectWizard({
           options,
           samples,
           comparisons,
+          figure_configuration: figureConfiguration,
           discovery,
           metadata_import: metadataImport,
           pending_assignment: {
@@ -826,6 +834,10 @@ export function NewProjectWizard({
       ) as unknown as EditorOptions);
       setSamples(importedSamples);
       setComparisons(importedComparisons);
+      const importedFigures = isRecord(imported.figure_configuration) ? imported.figure_configuration : manifestDraft.figure_configuration;
+      setFigureConfiguration(isRecord(importedFigures) && Array.isArray(importedFigures.custom_figures)
+        ? { version: 1, custom_figures: importedFigures.custom_figures as CustomFigure[] }
+        : { version: 1, custom_figures: [] });
       setDiscovery((imported.discovery as InputDiscoveryResult | null) ?? null);
       setMetadataImport((imported.metadata_import as MetadataImportStatus | null) ?? null);
       setAssignmentSearch(typeof pendingAssignment.search === "string" ? pendingAssignment.search : "");
@@ -1227,6 +1239,22 @@ export function NewProjectWizard({
           </section>
         );
         return (
+          <section className="wizard-card form-stack">
+            <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Figures</h2></div></div>
+            <p className="helper-copy">These cards are illustrative descriptions. Default figures are generated automatically when their data are available.</p>
+            <div className="figure-gallery">{DEFAULT_FIGURES.map(([name, description]) => <article key={name}><div className="figure-thumbnail" aria-hidden="true">⌁</div><strong>{name}</strong><p>{description}</p><small>Included automatically</small></article>)}</div>
+            <div className="section-heading"><div><h3>Additional figures</h3><p className="helper-copy">Configure controlled, reproducible plots from the same DESeq2 model. No setup-time preview is generated.</p></div><button className="button secondary" type="button" onClick={() => { setFigureConfiguration((current) => ({ ...current, custom_figures: [...current.custom_figures, newCustomFigure("gene_metric_scatter")] })); invalidateValidation(); }}>Add a figure</button></div>
+            {figureConfiguration.custom_figures.map((figure, index) => <fieldset className="custom-figure-card" key={figure.figure_id}><legend>Additional figure {index + 1}</legend><div className="field-pair"><label>Figure type<select value={figure.figure_type} onChange={(event) => { const replacement = newCustomFigure(event.target.value as CustomFigure["figure_type"]); replacement.figure_id = figure.figure_id; replacement.title = figure.title; setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? replacement : item) })); invalidateValidation(); }}>{Object.entries(FIGURE_TYPES).map(([value, details]) => <option key={value} value={value}>{details.label}</option>)}</select></label><label>Title <span aria-hidden="true">*</span><input value={figure.title} maxLength={160} onChange={(event) => { const title = event.target.value; setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? { ...item, title } : item) })); invalidateValidation(); }} placeholder="Required figure title" /></label></div><p className="field-help">{FIGURE_TYPES[figure.figure_type].description}</p>{figure.figure_type === "gene_metric_scatter" && <div className="field-pair"><label>X variable<select value={figure.x_variable ?? "base_mean"} onChange={(event) => { const x_variable = event.target.value; setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? { ...item, x_variable } : item) })); invalidateValidation(); }}>{GENE_METRICS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>Y variable<select value={figure.y_variable ?? "log2_fold_change"} onChange={(event) => { const y_variable = event.target.value; setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? { ...item, y_variable } : item) })); invalidateValidation(); }}>{GENE_METRICS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>}{figure.figure_type === "expression_distribution_boxplot" && <label>Group expression by<select value={figure.x_variable ?? "sample_id"} onChange={(event) => { const x_variable = event.target.value; setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? { ...item, x_variable } : item) })); invalidateValidation(); }}><option value="sample_id">Sample ID</option><option value="condition">Experimental condition</option></select></label>}{figure.figure_type === "top_de_genes_bar" && <label>Top genes<select value={figure.top_n ?? 20} onChange={(event) => { const top_n = Number(event.target.value); setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.map((item) => item.figure_id === figure.figure_id ? { ...item, top_n } : item) })); invalidateValidation(); }}><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option></select></label>}<button className="text-button danger" type="button" onClick={() => { setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.filter((item) => item.figure_id !== figure.figure_id) })); invalidateValidation(); }}>Remove figure</button></fieldset>)}
+          </section>
+        );
+      case 5:
+        if (isOntPipeline) return (
+          <section className="wizard-card">
+            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
+            <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>{validationTerminal}<CheckList checks={validation?.checks ?? []} />
+          </section>
+        );
+        return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Build comparisons</h2></div></div>
             <div className="concept-explainer"><p><strong>Comparisons</strong> specify the questions DESeq2 should test. Each comparison uses two conditions from the experimental design and produces its own differential-expression tables and plots.</p><p><strong>Numerator − denominator:</strong> for Treated versus Control, positive log2 fold change means higher expression in Treated; negative means higher in Control.</p></div>
@@ -1234,14 +1262,14 @@ export function NewProjectWizard({
             <div className="comparison-list">{comparisons.length === 0 ? <p className="empty-copy">No comparisons requested.</p> : comparisons.map((comparison) => <article key={comparison.comparison_id}><div><strong>{comparison.numerator} <span>−</span> {comparison.denominator}</strong><p>{comparison.label}{comparison.intervention ? ` · Intervention: ${comparison.intervention}` : ""}</p></div><button type="button" className="text-button danger" onClick={() => removeComparison(comparison.comparison_id)}>Remove</button></article>)}</div>
           </section>
         );
-      case 5:
+      case 6:
         if (isOntPipeline) return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
-            <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
-            {validation && <div className={validation.valid && !nativeExecutionUnavailable ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? nativeExecutionUnavailable ? "Manifest valid; native execution unavailable" : "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
-            {validationTerminal}
-            <CheckList checks={validation?.checks ?? []} />
+            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Review and save</h2></div></div>
+            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
+            {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
+            {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
+            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || busy === "plan" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : busy === "plan" ? "Building run plan…" : "Save manifest & build run plan"}</button></div>
           </section>
         );
         return (
@@ -1288,16 +1316,7 @@ export function NewProjectWizard({
             <p className="field-help">CPU, RAM, and parallel task limits cover the workflow as a whole. Leave headroom for the desktop and other local work.</p>
           </section>
         );
-      case 6:
-        if (isOntPipeline) return (
-          <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Review and save</h2></div></div>
-            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
-            {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
-            {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
-            <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || busy === "plan" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : busy === "plan" ? "Building run plan…" : "Save manifest & build run plan"}</button></div>
-          </section>
-        );
+      case 7:
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
