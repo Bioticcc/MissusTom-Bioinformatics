@@ -245,6 +245,7 @@ process BULK_RNASEQ_ANALYSIS {
     val minimum_group_size
     val experimental_design_type
     val adjust_for_batch_effects
+    val figure_configuration
 
     output:
     path "differential_expression"
@@ -259,14 +260,19 @@ process BULK_RNASEQ_ANALYSIS {
         "printf '%s\\t%s\\t%s\\t%s\\n' ${shellQuote(comparison.comparison_id)} ${shellQuote(comparison.numerator)} ${shellQuote(comparison.denominator)} ${shellQuote(comparison.intervention ?: '')} >> comparisons.tsv"
     }.join('\n')
     def mapping_arg = shellQuote(transcript_to_gene)
+    def custom_figure_rows = (figure_configuration?.custom_figures ?: []).collect { figure ->
+        [figure.figure_id, figure.figure_type, figure.title, figure.x_variable ?: '', figure.y_variable ?: '', figure.top_n ?: '', figure.x_axis?.mode ?: 'automatic', figure.x_axis?.minimum ?: '', figure.x_axis?.maximum ?: '', figure.y_axis?.mode ?: 'automatic', figure.y_axis?.minimum ?: '', figure.y_axis?.maximum ?: ''].collect { shellQuote(it) }.join(' ')
+    }.collect { values -> "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${values} >> custom_figures.tsv" }.join('\n')
     """
     printf 'sample_id\tcondition\tbiological_replicate\tbatch\tintervention\tabundance_tsv\n' > samples.tsv
     ${rows}
     printf 'comparison_id\tnumerator\tdenominator\tintervention\n' > comparisons.tsv
     ${comparison_rows}
+    printf 'figure_id\tfigure_type\ttitle\tx_variable\ty_variable\ttop_n\tx_axis_mode\tx_axis_minimum\tx_axis_maximum\ty_axis_mode\ty_axis_minimum\ty_axis_maximum\n' > custom_figures.tsv
+    ${custom_figure_rows}
 
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 RCPP_PARALLEL_NUM_THREADS=1 \
-      bulk_rnaseq_analysis.R samples.tsv ${mapping_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size} ${experimental_design_type} ${adjust_for_batch_effects}
+      bulk_rnaseq_analysis.R samples.tsv ${mapping_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size} ${experimental_design_type} ${adjust_for_batch_effects} custom_figures.tsv
     """
 }
 
@@ -472,6 +478,7 @@ workflow {
         absolute_log2_fold_change,
         minimum_group_size,
         experimental_design_type,
-        adjust_for_batch_effects
+        adjust_for_batch_effects,
+        manifest_data.figure_configuration ?: [:]
     )
 }

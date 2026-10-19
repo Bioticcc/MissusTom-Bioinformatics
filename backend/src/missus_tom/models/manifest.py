@@ -60,6 +60,115 @@ class PipelineStatus(StrEnum):
 Scalar = str | int | float | bool | None
 
 
+class AxisRange(BaseModel):
+    """Viewing limits only; these never change DESeq2 calculations."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    mode: Literal["automatic", "manual"] = "automatic"
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @model_validator(mode="after")
+    def validate_manual_range(self) -> AxisRange:
+        if self.mode == "automatic":
+            if self.minimum is not None or self.maximum is not None:
+                raise ValueError("automatic axis ranges cannot contain limits")
+            return self
+        if self.minimum is None or self.maximum is None or self.minimum >= self.maximum:
+            raise ValueError("manual axis range requires finite minimum less than maximum")
+        return self
+
+
+FIGURE_TYPES = {
+    "gene_metric_scatter",
+    "sample_correlation_heatmap",
+    "expression_distribution_boxplot",
+    "top_de_genes_bar",
+    "estimated_gene_count_bar",
+}
+GENE_METRICS = {
+    "base_mean",
+    "log2_fold_change",
+    "p_value",
+    "adjusted_p_value",
+    "minus_log10_p_value",
+    "minus_log10_adjusted_p_value",
+    "stat",
+    "lfc_standard_error",
+}
+
+
+class CustomFigure(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    figure_id: str
+    figure_type: str
+    title: str = Field(min_length=1, max_length=160)
+    x_variable: str | None = None
+    y_variable: str | None = None
+    x_axis: AxisRange = Field(default_factory=AxisRange)
+    y_axis: AxisRange = Field(default_factory=AxisRange)
+    x_label: str | None = Field(default=None, max_length=120)
+    y_label: str | None = Field(default=None, max_length=120)
+    top_n: int | None = Field(default=None, ge=1, le=50)
+
+    @field_validator("figure_id")
+    @classmethod
+    def validate_figure_id(cls, value: str) -> str:
+        if not SAFE_IDENTIFIER.fullmatch(value):
+            raise ValueError("figure_id must be a safe identifier")
+        return value
+
+    @field_validator("title", "x_label", "y_label")
+    @classmethod
+    def validate_figure_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(character in value for character in "\t\r\n"):
+            raise ValueError("figure text must be non-empty and cannot contain line breaks")
+        return value
+
+    @model_validator(mode="after")
+    def validate_figure_contract(self) -> CustomFigure:
+        if self.figure_type not in FIGURE_TYPES:
+            raise ValueError("unsupported figure_type")
+        if self.figure_type == "gene_metric_scatter":
+            if self.x_variable not in GENE_METRICS or self.y_variable not in GENE_METRICS:
+                raise ValueError("gene-metric scatter requires supported numeric x and y variables")
+        elif self.figure_type == "expression_distribution_boxplot":
+            if (
+                self.x_variable not in {"sample_id", "condition"}
+                or self.y_variable != "rlog_expression"
+            ):
+                raise ValueError(
+                    "expression boxplot requires sample_id or condition and rlog_expression"
+                )
+        elif self.figure_type == "top_de_genes_bar":
+            if self.y_variable not in {None, "log2_fold_change"}:
+                raise ValueError("top-DE bar chart uses log2_fold_change")
+            if self.top_n is None:
+                raise ValueError("top-DE bar chart requires top_n")
+        elif self.figure_type in {"sample_correlation_heatmap", "estimated_gene_count_bar"} and (
+            self.x_variable is not None or self.y_variable is not None
+        ):
+            raise ValueError("this figure type has fixed sample axes")
+        return self
+
+
+class FigureConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    version: Literal[1] = 1
+    custom_figures: list[CustomFigure] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def unique_figure_ids(self) -> FigureConfiguration:
+        ids = [figure.figure_id for figure in self.custom_figures]
+        if len(ids) != len(set(ids)):
+            raise ValueError("custom figure identifiers must be unique")
+        return self
+
+
 class SampleRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -199,6 +308,7 @@ class ProjectManifest(BaseModel):
     strandedness: Strandedness
     samples: list[SampleRecord] = Field(min_length=1)
     comparisons: list[Comparison] = Field(default_factory=list)
+    figure_configuration: FigureConfiguration | None = None
     parameters: dict[str, Scalar] = Field(default_factory=dict)
     resource_profile: ResourceProfile = Field(default_factory=ResourceProfile)
     execution_profile: ExecutionProfile = ExecutionProfile.LOCAL

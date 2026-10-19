@@ -22,10 +22,10 @@ suppressPackageStartupMessages({
 })
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 9) {
+if (length(args) != 10) {
   stop(
     "Usage: bulk_rnaseq_analysis.R <samples.tsv> <transcript_to_gene.tsv> <output> ",
-    "<comparisons.tsv> <q-value> <absolute-lfc> <minimum-group-size> <experimental-design-type> <adjust-for-batch-effects>"
+    "<comparisons.tsv> <q-value> <absolute-lfc> <minimum-group-size> <experimental-design-type> <adjust-for-batch-effects> <custom-figures.tsv>"
   )
 }
 
@@ -38,6 +38,7 @@ lfc_threshold <- as.numeric(args[[6]])
 minimum_group_size <- as.integer(args[[7]])
 experimental_design_type <- args[[8]]
 adjust_for_batch_effects <- args[[9]]
+custom_figures_path <- args[[10]]
 if (!is.finite(q_value) || q_value <= 0 || q_value > 1) stop("Adjusted p-value must be in (0, 1]")
 if (!is.finite(lfc_threshold) || lfc_threshold < 0) stop("Absolute log2 fold change must be non-negative")
 if (is.na(minimum_group_size) || minimum_group_size < 2) stop("Minimum group size must be at least 2")
@@ -69,6 +70,14 @@ if (anyDuplicated(samples$sample_id)) stop("Sample identifiers must be unique")
 if (!all(file.exists(samples$abundance_tsv))) stop("One or more abundance tables are missing")
 
 comparisons <- read.delim(comparison_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+custom_figures <- read.delim(custom_figures_path, stringsAsFactors = FALSE, check.names = FALSE)
+custom_figure_columns <- c("figure_id", "figure_type", "title", "x_variable", "y_variable", "top_n", "x_axis_mode", "x_axis_minimum", "x_axis_maximum", "y_axis_mode", "y_axis_minimum", "y_axis_maximum")
+if (!all(custom_figure_columns %in% colnames(custom_figures))) {
+  stop("Custom figure sheet has an unsupported format")
+}
+# One UTC execution timestamp makes custom artifact names reproducible within a run.
+custom_figure_timestamp <- format(Sys.time(), tz = "UTC", format = "%Y-%m-%d_%H-%M-%S")
+custom_figure_metadata_rows <- list()
 comparison_columns <- c("comparison_id", "numerator", "denominator", "intervention")
 if (!all(comparison_columns %in% colnames(comparisons)) || nrow(comparisons) == 0) {
   stop("Comparison sheet must contain comparison_id, numerator, denominator, and intervention rows")
@@ -417,6 +426,97 @@ record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_pa
 
 record_artifact_skipped <- function(comparison_id, analysis_class, artifact, rationale) {
   record_output_contract(comparison_id, analysis_class, artifact, "skipped", "", rationale)
+}
+
+safe_figure_filename <- function(title, figure_id, prior_stems) {
+  stem <- gsub("[^A-Za-z0-9._-]+", "_", trimws(title))
+  stem <- gsub("_+", "_", stem)
+  stem <- gsub("^[._-]+|[._-]+$", "", stem)
+  if (!nzchar(stem)) stem <- "Custom_Figure"
+  stem <- paste0(stem, "_", custom_figure_timestamp)
+  if (stem %in% prior_stems) stem <- paste0(stem, "_", figure_id)
+  stem
+}
+
+apply_custom_axes <- function(plot, spec) {
+  numeric_value <- function(column) suppressWarnings(as.numeric(spec[[column]][[1]]))
+  x_min <- numeric_value("x_axis_minimum"); x_max <- numeric_value("x_axis_maximum")
+  y_min <- numeric_value("y_axis_minimum"); y_max <- numeric_value("y_axis_maximum")
+  x_limits <- if (spec$x_axis_mode[[1]] == "manual" && is.finite(x_min) && is.finite(x_max) && x_min < x_max) c(x_min, x_max) else NULL
+  y_limits <- if (spec$y_axis_mode[[1]] == "manual" && is.finite(y_min) && is.finite(y_max) && y_min < y_max) c(y_min, y_max) else NULL
+  if (!is.null(x_limits) || !is.null(y_limits)) plot <- plot + coord_cartesian(xlim = x_limits, ylim = y_limits)
+  plot
+}
+
+metric_values <- function(result_df, variable) {
+  source <- switch(variable,
+    base_mean = result_df$baseMean,
+    log2_fold_change = result_df$log2FoldChange,
+    p_value = result_df$pvalue,
+    adjusted_p_value = result_df$padj,
+    minus_log10_p_value = -log10(pmax(result_df$pvalue, .Machine$double.xmin)),
+    minus_log10_adjusted_p_value = -log10(pmax(result_df$padj, .Machine$double.xmin)),
+    stat = result_df$stat,
+    lfc_standard_error = result_df$lfcSE,
+    NULL
+  )
+  if (is.null(source)) return(NULL)
+  as.numeric(source)
+}
+
+generate_custom_figures <- function(comparison_id, class_label, result_df, rlog_matrix, normalized_counts, selected_samples, significant) {
+  if (nrow(custom_figures) == 0) return(invisible(NULL))
+  custom_root <- file.path(output_root, "figures", "custom", comparison_id)
+  dir.create(custom_root, recursive = TRUE, showWarnings = FALSE)
+  used_stems <- character()
+  for (row_index in seq_len(nrow(custom_figures))) {
+    spec <- custom_figures[row_index, , drop = FALSE]
+    figure_id <- as.character(spec$figure_id[[1]])
+    figure_type <- as.character(spec$figure_type[[1]])
+    title <- as.character(spec$title[[1]])
+    filename_stem <- safe_figure_filename(title, figure_id, used_stems)
+    used_stems <- c(used_stems, filename_stem)
+    stem <- file.path(custom_root, filename_stem)
+    artifact <- paste("custom figure", figure_id)
+    tryCatch({
+      if (figure_type == "gene_metric_scatter") {
+        x <- metric_values(result_df, as.character(spec$x_variable[[1]])); y <- metric_values(result_df, as.character(spec$y_variable[[1]]))
+        values <- data.frame(x = x, y = y); values <- values[is.finite(values$x) & is.finite(values$y), , drop = FALSE]
+        if (nrow(values) < 2) stop("fewer than two finite gene values")
+        plot <- ggplot(values, aes(x, y)) + geom_point(alpha = 0.55, size = 1) + labs(title = title, x = spec$x_variable[[1]], y = spec$y_variable[[1]]) + theme_bw(base_size = 12)
+      } else if (figure_type == "sample_correlation_heatmap") {
+        correlation <- cor(rlog_matrix, use = "pairwise.complete.obs")
+        if (ncol(correlation) < 2) stop("fewer than two samples")
+        png(paste0(stem, ".png"), width = 1000, height = 900, res = 130); heatmap(correlation, symm = TRUE, col = colorRampPalette(c("#ffffff", "#1e655d"))(100), margins = c(9, 9), main = title); dev.off()
+        pdf(paste0(stem, ".pdf"), width = 8, height = 7); heatmap(correlation, symm = TRUE, col = colorRampPalette(c("#ffffff", "#1e655d"))(100), margins = c(9, 9), main = title); dev.off()
+        record_artifact_file(comparison_id, class_label, artifact, paste0(stem, ".png"), "rlog sample correlation")
+        record_artifact_file(comparison_id, class_label, paste(artifact, "PDF"), paste0(stem, ".pdf"), "rlog sample correlation")
+        custom_figure_metadata_rows <<- c(custom_figure_metadata_rows, list(data.frame(figure_id, figure_type, title, filename = basename(stem), timestamp_utc = custom_figure_timestamp, x_variable = spec$x_variable[[1]], y_variable = spec$y_variable[[1]], x_axis_mode = spec$x_axis_mode[[1]], y_axis_mode = spec$y_axis_mode[[1]], status = "generated", reason = "", stringsAsFactors = FALSE)))
+        next
+      } else if (figure_type == "expression_distribution_boxplot") {
+        grouping <- if (as.character(spec$x_variable[[1]]) == "condition") selected_samples$condition else colnames(rlog_matrix)
+        values <- data.frame(group = rep(grouping, each = nrow(rlog_matrix)), expression = as.vector(rlog_matrix))
+        plot <- ggplot(values, aes(group, expression, fill = group)) + geom_boxplot(outlier.size = 0.5) + labs(title = title, x = ifelse(spec$x_variable[[1]] == "condition", "Experimental condition", "Sample ID"), y = "rlog normalized gene expression") + theme_bw(base_size = 12) + theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+      } else if (figure_type == "top_de_genes_bar") {
+        top_n <- as.integer(spec$top_n[[1]]); values <- significant[order(abs(significant$log2FoldChange), decreasing = TRUE), , drop = FALSE]; values <- head(values, top_n)
+        if (nrow(values) == 0) stop("no qualifying genes")
+        values$label <- ifelse(is.na(values$gene_name) | !nzchar(values$gene_name), values$gene_id, values$gene_name)
+        plot <- ggplot(values, aes(reorder(label, log2FoldChange), log2FoldChange, fill = log2FoldChange > 0)) + geom_col() + coord_flip() + labs(title = title, x = "Gene", y = "Log2 fold change (numerator vs denominator)") + theme_bw(base_size = 12) + theme(legend.position = "none")
+      } else if (figure_type == "estimated_gene_count_bar") {
+        values <- data.frame(sample_id = colnames(normalized_counts), estimated_gene_counts = colSums(normalized_counts, na.rm = TRUE))
+        plot <- ggplot(values, aes(sample_id, estimated_gene_counts)) + geom_col(fill = "#1e655d") + labs(title = title, x = "Sample ID", y = "Sum of estimated gene counts") + theme_bw(base_size = 12) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      } else stop("unsupported figure type")
+      plot <- apply_custom_axes(plot, spec)
+      save_ggplot(plot, stem, 8, 6)
+      record_artifact_file(comparison_id, class_label, artifact, paste0(stem, ".png"), paste("type", figure_type))
+      record_artifact_file(comparison_id, class_label, paste(artifact, "PDF"), paste0(stem, ".pdf"), paste("type", figure_type))
+      custom_figure_metadata_rows <<- c(custom_figure_metadata_rows, list(data.frame(figure_id, figure_type, title, filename = basename(stem), timestamp_utc = custom_figure_timestamp, x_variable = spec$x_variable[[1]], y_variable = spec$y_variable[[1]], x_axis_mode = spec$x_axis_mode[[1]], y_axis_mode = spec$y_axis_mode[[1]], status = "generated", reason = "", stringsAsFactors = FALSE)))
+    }, error = function(error) {
+      record_artifact_skipped(comparison_id, class_label, artifact, conditionMessage(error))
+      custom_figure_metadata_rows <<- c(custom_figure_metadata_rows, list(data.frame(figure_id, figure_type, title, filename = "", timestamp_utc = custom_figure_timestamp, x_variable = spec$x_variable[[1]], y_variable = spec$y_variable[[1]], x_axis_mode = spec$x_axis_mode[[1]], y_axis_mode = spec$y_axis_mode[[1]], status = "skipped", reason = conditionMessage(error), stringsAsFactors = FALSE)))
+      progress_message(sprintf("Skipped %s: %s", artifact, conditionMessage(error)))
+    })
+  }
 }
 
 analysis_artifacts <- c(
@@ -963,6 +1063,12 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       "DE totals by comparison plot",
       file.path(figure_dir, "DE_totals_by_comparison.png")
     )
+    if (analysis_name == "all_genes") {
+      generate_custom_figures(
+        comparison_id, class_label, result_df, rlog_matrix,
+        counts(dds, normalized = TRUE), selected_samples, significant
+      )
+    }
 
     status <- data.frame(
       analysis = analysis_name,
@@ -1076,6 +1182,11 @@ if (length(optional_skip_log) > 0) {
     quote = FALSE,
     row.names = FALSE
   )
+}
+if (length(custom_figure_metadata_rows) > 0) {
+  metadata_path <- file.path(summary_root, "custom_figure_metadata.tsv")
+  write.table(do.call(rbind, custom_figure_metadata_rows), metadata_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  record_artifact_file("", "summary", "custom figure metadata", metadata_path)
 }
 
 versions <- data.frame(

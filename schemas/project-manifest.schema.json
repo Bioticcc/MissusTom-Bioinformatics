@@ -61,6 +61,7 @@
       "type": "array",
       "items": { "$ref": "#/$defs/comparison" }
     },
+    "figure_configuration": { "$ref": "#/$defs/figureConfiguration" },
     "parameters": { "$ref": "#/$defs/scalarMap" },
     "resource_profile": {
       "type": "object",
@@ -186,6 +187,29 @@
         "label": { "type": ["string", "null"] },
         "intervention": { "type": ["string", "null"], "pattern": "^[^\\t\\r\\n]+$" }
       }
+    }
+    ,"axisRange": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {"mode": {"enum": ["automatic", "manual"]}, "minimum": {"type": "number"}, "maximum": {"type": "number"}}
+    },
+    "customFigure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["figure_id", "figure_type", "title"],
+      "properties": {
+        "figure_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "figure_type": {"enum": ["gene_metric_scatter", "sample_correlation_heatmap", "expression_distribution_boxplot", "top_de_genes_bar", "estimated_gene_count_bar"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "x_variable": {"type": ["string", "null"]}, "y_variable": {"type": ["string", "null"]},
+        "x_axis": {"$ref": "#/$defs/axisRange"}, "y_axis": {"$ref": "#/$defs/axisRange"},
+        "x_label": {"type": ["string", "null"]}, "y_label": {"type": ["string", "null"]},
+        "top_n": {"type": ["integer", "null"], "minimum": 1, "maximum": 50}
+      }
+    },
+    "figureConfiguration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "custom_figures"],
+      "properties": {"version": {"const": 1}, "custom_figures": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/customFigure"}}}
     }
   }
 }

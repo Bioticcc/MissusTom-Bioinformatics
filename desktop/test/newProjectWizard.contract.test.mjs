@@ -188,3 +188,13 @@ test("project preflight uses an operation-specific timeout and keeps timeout err
   assert.match(wizardSource, /validationController.current\?\.abort/);
   assert.match(wizardSource, /setValidatedManifest\(null\)/);
 });
+
+test("figure gallery uses offline illustrations and confirms custom figure drafts", () => {
+  assert.match(wizardSource, /function FigureThumbnail/);
+  assert.doesNotMatch(wizardSource, /figure-thumbnail" aria-hidden/);
+  assert.match(wizardSource, /const \[figureDraft, setFigureDraft\]/);
+  assert.match(wizardSource, /<FigureEditor/);
+  assert.match(wizardSource, /editingFigureId \? current\.custom_figures\.map/);
+  assert.match(wizardSource, /: \[\.\.\.current\.custom_figures, figure\]/);
+  assert.match(wizardSource, /setFigureDraft\(null\); setEditingFigureId\(null\);/);
+});

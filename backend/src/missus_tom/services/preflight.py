@@ -866,6 +866,21 @@ def _bulk_rnaseq_contract_checks(
     manifest: ProjectManifest, *, analysis_only: bool
 ) -> list[PreflightCheck]:
     checks: list[PreflightCheck] = ProgressChecks()
+    figure_count = (
+        len(manifest.figure_configuration.custom_figures) if manifest.figure_configuration else 0
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="figure_configuration",
+            label="Figure configuration",
+            status=CheckStatus.PASSED,
+            message=(
+                f"{figure_count} additional figure{'s' if figure_count != 1 else ''} requested; "
+                "default figures remain enabled"
+            ),
+            details={"custom_figure_count": figure_count},
+        )
+    )
     report_validation("Checking Bulk reference configuration and transcript compatibility.")
     migration = legacy_biomart_migration_message(manifest)
     if migration:

@@ -73,6 +73,7 @@ def _run_analysis(
     minimum_group_size: str = "2",
     experimental_design_type: str = "independent",
     adjust_for_batch_effects: str = "false",
+    custom_figure_rows: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     mapping_path = tmp_path / "transcript_to_gene.tsv"
     _write_table(mapping_path, mapping_header, mapping_lines)
@@ -99,6 +100,12 @@ def _run_analysis(
     )
     output_root = tmp_path / "analysis_output"
     output_root.mkdir()
+    custom_figures_path = tmp_path / "custom_figures.tsv"
+    _write_table(
+        custom_figures_path,
+        "figure_id\tfigure_type\ttitle\tx_variable\ty_variable\ttop_n\tx_axis_mode\tx_axis_minimum\tx_axis_maximum\ty_axis_mode\ty_axis_minimum\ty_axis_maximum",
+        custom_figure_rows or [],
+    )
 
     return subprocess.run(
         [
@@ -113,6 +120,7 @@ def _run_analysis(
             minimum_group_size,
             experimental_design_type,
             adjust_for_batch_effects,
+            str(custom_figures_path),
         ],
         capture_output=True,
         text=True,
@@ -206,6 +214,35 @@ EXPECTED_CLASS_ARTIFACTS = {
     "DE totals by comparison plot",
     "comparison status table",
 }
+
+
+def test_custom_figures_use_title_timestamped_pdf_and_png(tmp_path: Path) -> None:
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=BASE_SAMPLES,
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample={
+            sample.split("\t", 1)[0]: HIGH_CONTROL if sample.startswith("ctrl") else HIGH_TREAT
+            for sample in BASE_SAMPLES
+        },
+        custom_figure_rows=[
+            "custom_scatter\tgene_metric_scatter\tTreatment Volcano Plot!\tbase_mean\t"
+            "log2_fold_change\t\tautomatic\t\t\tmanual\t-5\t5"
+        ],
+    )
+    assert result.returncode == 0, result.stderr
+    custom_dir = tmp_path / "analysis_output" / "figures" / "custom" / "cmp_treat_vs_control"
+    png_files = list(custom_dir.glob("Treatment_Volcano_Plot_????-??-??_??-??-??.png"))
+    assert len(png_files) == 1
+    assert png_files[0].with_suffix(".pdf").is_file()
+    assert png_files[0].with_suffix(".pdf").stat().st_size > 0
+    metadata_path = (
+        tmp_path / "analysis_output" / "tables" / "summary" / "custom_figure_metadata.tsv"
+    )
+    metadata = metadata_path.read_text()
+    assert "Treatment Volcano Plot!" in metadata
 
 
 def test_paired_design_records_and_uses_subject_formula(tmp_path: Path) -> None:

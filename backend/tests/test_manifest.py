@@ -29,6 +29,33 @@ def test_duplicate_sample_identifiers_are_rejected(manifest_payload: dict[str, A
         ProjectManifest.model_validate(payload)
 
 
+def test_custom_figure_configuration_is_typed_and_validated(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["figure_configuration"] = {
+        "version": 1,
+        "custom_figures": [
+            {
+                "figure_id": "effect_vs_expression",
+                "figure_type": "gene_metric_scatter",
+                "title": "Effect versus expression",
+                "x_variable": "base_mean",
+                "y_variable": "log2_fold_change",
+                "x_axis": {"mode": "automatic"},
+                "y_axis": {"mode": "manual", "minimum": -4, "maximum": 4},
+            }
+        ],
+    }
+    manifest = ProjectManifest.model_validate(payload)
+    assert manifest.figure_configuration is not None
+    assert manifest.figure_configuration.custom_figures[0].figure_id == "effect_vs_expression"
+
+    payload["figure_configuration"]["custom_figures"][0]["y_variable"] = "unsafe_expression"
+    with pytest.raises(ValidationError, match="supported numeric"):
+        ProjectManifest.model_validate(payload)
+
+
 def test_paired_sample_with_unequal_mates_is_blocking(manifest_payload: dict[str, Any]) -> None:
     payload = deepcopy(manifest_payload)
     payload["samples"][0]["r2_files"] = []
