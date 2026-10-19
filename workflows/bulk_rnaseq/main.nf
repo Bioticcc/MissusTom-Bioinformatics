@@ -237,12 +237,14 @@ process BULK_RNASEQ_ANALYSIS {
     publishDir "${params.outdir}", mode: 'copy', overwrite: true
 
     input:
-    tuple val(sample_ids), val(conditions), val(interventions), path(abundance_files, stageAs: 'quantifications/??/*')
+    tuple val(sample_ids), val(conditions), val(biological_replicates), val(batches), val(interventions), path(abundance_files, stageAs: 'quantifications/??/*')
     path transcript_to_gene
     val comparisons
     val adjusted_p_value
     val absolute_log2_fold_change
     val minimum_group_size
+    val experimental_design_type
+    val adjust_for_batch_effects
 
     output:
     path "differential_expression"
@@ -251,20 +253,20 @@ process BULK_RNASEQ_ANALYSIS {
 
     script:
     def rows = (0..<sample_ids.size()).collect { index ->
-        "printf '%s\\t%s\\t%s\\t%s\\n' ${shellQuote(sample_ids[index])} ${shellQuote(conditions[index])} ${shellQuote(interventions[index])} ${shellQuote(abundance_files[index])} >> samples.tsv"
+        "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${shellQuote(sample_ids[index])} ${shellQuote(conditions[index])} ${shellQuote(biological_replicates[index])} ${shellQuote(batches[index])} ${shellQuote(interventions[index])} ${shellQuote(abundance_files[index])} >> samples.tsv"
     }.join('\n')
     def comparison_rows = comparisons.collect { comparison ->
         "printf '%s\\t%s\\t%s\\t%s\\n' ${shellQuote(comparison.comparison_id)} ${shellQuote(comparison.numerator)} ${shellQuote(comparison.denominator)} ${shellQuote(comparison.intervention ?: '')} >> comparisons.tsv"
     }.join('\n')
     def mapping_arg = shellQuote(transcript_to_gene)
     """
-    printf 'sample_id\tcondition\tintervention\tabundance_tsv\n' > samples.tsv
+    printf 'sample_id\tcondition\tbiological_replicate\tbatch\tintervention\tabundance_tsv\n' > samples.tsv
     ${rows}
     printf 'comparison_id\tnumerator\tdenominator\tintervention\n' > comparisons.tsv
     ${comparison_rows}
 
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 RCPP_PARALLEL_NUM_THREADS=1 \
-      bulk_rnaseq_analysis.R samples.tsv ${mapping_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size}
+      bulk_rnaseq_analysis.R samples.tsv ${mapping_arg} . comparisons.tsv ${adjusted_p_value} ${absolute_log2_fold_change} ${minimum_group_size} ${experimental_design_type} ${adjust_for_batch_effects}
     """
 }
 
@@ -306,6 +308,12 @@ workflow {
     condition_by_sample = included_samples.collectEntries { sample ->
         [(sample.sample_id as String): sample.condition as String]
     }
+    biological_replicate_by_sample = included_samples.collectEntries { sample ->
+        [(sample.sample_id as String): sample.biological_replicate as String]
+    }
+    batch_by_sample = included_samples.collectEntries { sample ->
+        [(sample.sample_id as String): (sample.batch ?: '') as String]
+    }
     intervention_by_sample = included_samples.collectEntries { sample ->
         [(sample.sample_id as String): (sample.covariates?.intervention ?: '') as String]
     }
@@ -314,6 +322,14 @@ workflow {
             ? manifest_data.parameters.minimum_group_size
             : 2
     ) as Integer
+    experimental_design_type = (manifest_data.parameters.experimental_design_type ?: 'independent') as String
+    if (!(experimental_design_type in ['independent', 'paired'])) {
+        error "experimental_design_type must be independent or paired."
+    }
+    adjust_for_batch_effects = manifest_data.parameters.adjust_for_batch_effects ?: false
+    if (!(adjust_for_batch_effects instanceof Boolean)) {
+        error "adjust_for_batch_effects must be true or false."
+    }
     manifest_data.comparisons.each { comparison ->
         [comparison.numerator, comparison.denominator].each { group ->
             def matching_samples = included_samples.findAll { sample ->
@@ -321,8 +337,32 @@ workflow {
                     !comparison.intervention || sample.covariates?.intervention == comparison.intervention
                 )
             }
-            if (matching_samples.size() < minimum_group_size) {
-                error "Comparison ${comparison.comparison_id} requires at least ${minimum_group_size} samples in ${group}."
+            def unit_count = experimental_design_type == 'paired'
+                ? matching_samples.collect { it.biological_replicate }.findAll { it }.toSet().size()
+                : matching_samples.size()
+            if (unit_count < minimum_group_size) {
+                error "Comparison ${comparison.comparison_id} requires at least ${minimum_group_size} ${experimental_design_type == 'paired' ? 'paired subjects' : 'samples'} in ${group}."
+            }
+        }
+        if (experimental_design_type == 'paired') {
+            def paired_samples = included_samples.findAll { sample ->
+                sample.condition in [comparison.numerator, comparison.denominator] &&
+                    (!comparison.intervention || sample.covariates?.intervention == comparison.intervention)
+            }
+            def invalid_subjects = paired_samples.groupBy { it.biological_replicate }.findAll { subject, rows ->
+                !subject || rows.size() != 2 || rows.collect { it.condition }.toSet() != [comparison.numerator, comparison.denominator].toSet()
+            }
+            if (!invalid_subjects.isEmpty()) {
+                error "Comparison ${comparison.comparison_id} requires exactly one sample per subject in both conditions."
+            }
+        }
+        if (adjust_for_batch_effects) {
+            def adjusted_samples = included_samples.findAll { sample ->
+                sample.condition in [comparison.numerator, comparison.denominator] &&
+                    (!comparison.intervention || sample.covariates?.intervention == comparison.intervention)
+            }
+            if (adjusted_samples.any { !it.batch } || adjusted_samples.collect { it.batch }.toSet().size() < 2) {
+                error "Comparison ${comparison.comparison_id} requires complete assignments across at least two batches."
             }
         }
     }
@@ -406,6 +446,8 @@ workflow {
             tuple(
                 sample_id,
                 condition_by_sample[sample_id],
+                biological_replicate_by_sample[sample_id],
+                batch_by_sample[sample_id],
                 intervention_by_sample[sample_id],
                 abundance_file
             )
@@ -417,7 +459,9 @@ workflow {
                 ordered.collect { it[0] },
                 ordered.collect { it[1] },
                 ordered.collect { it[2] },
-                ordered.collect { it[3] }
+                ordered.collect { it[3] },
+                ordered.collect { it[4] },
+                ordered.collect { it[5] }
             )
         }
     BULK_RNASEQ_ANALYSIS(
@@ -426,6 +470,8 @@ workflow {
         manifest_data.comparisons,
         adjusted_p_value,
         absolute_log2_fold_change,
-        minimum_group_size
+        minimum_group_size,
+        experimental_design_type,
+        adjust_for_batch_effects
     )
 }

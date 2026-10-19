@@ -22,10 +22,10 @@ suppressPackageStartupMessages({
 })
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 7) {
+if (length(args) != 9) {
   stop(
     "Usage: bulk_rnaseq_analysis.R <samples.tsv> <transcript_to_gene.tsv> <output> ",
-    "<comparisons.tsv> <q-value> <absolute-lfc> <minimum-group-size>"
+    "<comparisons.tsv> <q-value> <absolute-lfc> <minimum-group-size> <experimental-design-type> <adjust-for-batch-effects>"
   )
 }
 
@@ -36,9 +36,18 @@ comparison_sheet_path <- args[[4]]
 q_value <- as.numeric(args[[5]])
 lfc_threshold <- as.numeric(args[[6]])
 minimum_group_size <- as.integer(args[[7]])
+experimental_design_type <- args[[8]]
+adjust_for_batch_effects <- args[[9]]
 if (!is.finite(q_value) || q_value <= 0 || q_value > 1) stop("Adjusted p-value must be in (0, 1]")
 if (!is.finite(lfc_threshold) || lfc_threshold < 0) stop("Absolute log2 fold change must be non-negative")
 if (is.na(minimum_group_size) || minimum_group_size < 2) stop("Minimum group size must be at least 2")
+if (!experimental_design_type %in% c("independent", "paired")) {
+  stop("Experimental design type must be independent or paired")
+}
+if (!adjust_for_batch_effects %in% c("true", "false")) {
+  stop("Adjust for batch effects must be true or false")
+}
+adjust_for_batch_effects <- adjust_for_batch_effects == "true"
 
 progress_message <- function(...) {
   message(...)
@@ -52,9 +61,9 @@ provenance_dir <- file.path(output_root, "tables", "provenance")
 dir.create(provenance_dir, recursive = TRUE, showWarnings = FALSE)
 
 samples <- read.delim(sample_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
-required_columns <- c("sample_id", "condition", "intervention", "abundance_tsv")
+required_columns <- c("sample_id", "condition", "biological_replicate", "batch", "intervention", "abundance_tsv")
 if (!all(required_columns %in% colnames(samples))) {
-  stop("Sample sheet must contain sample_id, condition, intervention, and abundance_tsv columns")
+  stop("Sample sheet must contain sample_id, condition, biological_replicate, batch, intervention, and abundance_tsv columns")
 }
 if (anyDuplicated(samples$sample_id)) stop("Sample identifiers must be unique")
 if (!all(file.exists(samples$abundance_tsv))) stop("One or more abundance tables are missing")
@@ -170,7 +179,7 @@ has_gene_biotype <- "gene_biotype" %in% colnames(mapping_table) &&
   any(nzchar(mapping_table$gene_biotype))
 
 write.table(
-  samples[, c("sample_id", "condition", "intervention"), drop = FALSE],
+  samples[, c("sample_id", "condition", "biological_replicate", "batch", "intervention"), drop = FALSE],
   file.path(provenance_dir, "sample_metadata.tsv"),
   sep = "\t",
   quote = FALSE,
@@ -209,6 +218,8 @@ write.table(
       "adjusted_p_value",
       "absolute_log2_fold_change",
       "minimum_group_size",
+      "experimental_design_type",
+      "adjust_for_batch_effects",
       "design_formula",
       "log2_fold_change_numerator",
       "log2_fold_change_denominator"
@@ -217,7 +228,13 @@ write.table(
       q_value,
       lfc_threshold,
       minimum_group_size,
-      "~condition",
+      experimental_design_type,
+      adjust_for_batch_effects,
+      paste("~", paste(c(
+        if (adjust_for_batch_effects) "batch",
+        if (experimental_design_type == "paired") "biological_replicate",
+        "condition"
+      ), collapse = " + ")),
       "manifest comparison numerator (case)",
       "manifest comparison denominator (reference)"
     ),
@@ -475,6 +492,27 @@ for (comparison_index in seq_len(nrow(comparisons))) {
   if (any(condition_counts[c(reference_group, case_group)] < minimum_group_size)) {
     stop(paste("Comparison", comparison_id, "does not meet the minimum group size"))
   }
+  if (experimental_design_type == "paired") {
+    if (any(is.na(selected_samples$biological_replicate) | !nzchar(selected_samples$biological_replicate))) {
+      stop(paste("Comparison", comparison_id, "has samples without biological replicate IDs"))
+    }
+    assignment_counts <- table(selected_samples$biological_replicate, selected_samples$condition)
+    if (any(assignment_counts > 1) || any(rowSums(assignment_counts > 0) != 2) ||
+        any(assignment_counts[, c(reference_group, case_group), drop = FALSE] != 1)) {
+      stop(paste("Comparison", comparison_id, "does not contain exactly one matched sample per subject and condition"))
+    }
+    if (nrow(assignment_counts) < minimum_group_size) {
+      stop(paste("Comparison", comparison_id, "does not meet the minimum paired-subject count"))
+    }
+  }
+  if (adjust_for_batch_effects) {
+    if (any(is.na(selected_samples$batch) | !nzchar(selected_samples$batch))) {
+      stop(paste("Comparison", comparison_id, "has samples without batch assignments"))
+    }
+    if (length(unique(selected_samples$batch)) < 2) {
+      stop(paste("Comparison", comparison_id, "requires at least two batches for adjustment"))
+    }
+  }
   comparison_txi <- lapply(txi, function(value) {
     if (is.matrix(value) && ncol(value) == nrow(samples)) {
       value[, selected_samples$sample_id, drop = FALSE]
@@ -486,6 +524,27 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     condition = factor(selected_samples$condition, levels = c(reference_group, case_group)),
     row.names = selected_samples$sample_id
   )
+  if (experimental_design_type == "paired") {
+    col_data$biological_replicate <- factor(selected_samples$biological_replicate)
+  }
+  if (adjust_for_batch_effects) col_data$batch <- factor(selected_samples$batch)
+  design_formula <- as.formula(paste(
+    "~",
+    paste(c(
+      if (adjust_for_batch_effects) "batch",
+      if (experimental_design_type == "paired") "biological_replicate",
+      "condition"
+    ), collapse = " + ")
+  ))
+  if (adjust_for_batch_effects) {
+    design_matrix <- model.matrix(design_formula, data = col_data)
+    if (nrow(design_matrix) <= ncol(design_matrix) || qr(design_matrix)$rank != ncol(design_matrix)) {
+      stop(paste(
+        "Comparison", comparison_id,
+        "has a confounded batch, subject, and condition model or no residual degrees of freedom"
+      ))
+    }
+  }
   # Positive log2 fold change corresponds to the manifest numerator (case) vs denominator (reference).
   contrast <- c("condition", case_group, reference_group)
 
@@ -540,7 +599,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
     dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
 
-    dds <- DESeqDataSetFromTximport(class_txi, colData = col_data, design = ~condition)
+    dds <- DESeqDataSetFromTximport(class_txi, colData = col_data, design = design_formula)
     keep <- rowSums(counts(dds) >= 10) >= min(condition_counts[c(reference_group, case_group)])
     dds <- dds[keep, ]
     if (nrow(dds) < 2) {

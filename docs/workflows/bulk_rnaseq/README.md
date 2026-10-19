@@ -26,8 +26,12 @@ Processes:
 - `BULK_RNASEQ_ANALYSIS`
 
 The analysis process imports kallisto estimates with tximport using the manifest
-mapping, runs an all-gene DESeq2 model (`~condition`) for each comparison with
-positive log2 fold change toward the manifest numerator, and optionally runs
+mapping, runs an all-gene DESeq2 model (`~ condition`) for each comparison by
+default, or `~ biological_replicate + condition` when the explicit paired design
+is selected and every compared subject has exactly one sample in each condition.
+Optional batch adjustment adds `batch` before those factors only when every
+sample has an assignment and the resulting model is identifiable. Positive log2
+fold change is toward the manifest numerator. It optionally runs
 protein-coding (mRNA) and lncRNA class analyses when `gene_biotype` is present.
 Optional lncRNA outputs include genes whose `gene_biotype` is exactly one of:
 `lncRNA`, `lincRNA`, `antisense`, `sense_intronic`, `sense_overlapping`,

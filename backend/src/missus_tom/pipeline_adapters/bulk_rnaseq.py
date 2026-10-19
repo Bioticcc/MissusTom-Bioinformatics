@@ -31,6 +31,13 @@ from missus_tom.services.bulk_references import (
     read_supplied_transcript_to_gene,
 )
 from missus_tom.services.dependencies import bulk_lock_provenance, runtime_environment, runtime_tool
+from missus_tom.services.experimental_design import (
+    PAIRED_DESIGN,
+    batch_adjustment_enabled,
+    batch_design_errors,
+    experimental_design_type,
+    paired_design_errors,
+)
 from missus_tom.services.preflight import project_preflight
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resources import execution_resource_checks, validate_execution_resources
@@ -453,6 +460,16 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             raise ValueError("minimum_group_size must be an integer")
         if minimum_group_size < 2:
             raise ValueError("minimum_group_size must be at least 2")
+        design_type = experimental_design_type(manifest.parameters)
+        adjust_for_batch_effects = batch_adjustment_enabled(manifest.parameters)
+        if design_type == PAIRED_DESIGN:
+            errors = paired_design_errors(included, manifest.comparisons, minimum_group_size)
+            if errors:
+                raise ValueError("; ".join(errors))
+        if adjust_for_batch_effects:
+            errors = batch_design_errors(included, manifest.comparisons, design_type)
+            if errors:
+                raise ValueError("; ".join(errors))
         for comparison in manifest.comparisons:
             for group in (comparison.numerator, comparison.denominator):
                 group_samples = [
@@ -464,10 +481,24 @@ class BulkRnaSeqAdapter(PipelineAdapter):
                         or sample.covariates.get("intervention") == comparison.intervention
                     )
                 ]
-                if len(group_samples) < minimum_group_size:
+                unit_count = (
+                    len(
+                        {
+                            sample.biological_replicate
+                            for sample in group_samples
+                            if sample.biological_replicate
+                        }
+                    )
+                    if design_type == PAIRED_DESIGN
+                    else len(group_samples)
+                )
+                if unit_count < minimum_group_size:
+                    unit_label = (
+                        "paired subjects" if design_type == PAIRED_DESIGN else "biological samples"
+                    )
                     raise ValueError(
                         f"comparison {comparison.comparison_id} requires at least "
-                        f"{minimum_group_size} biological samples in group {group}"
+                        f"{minimum_group_size} {unit_label} in group {group}"
                     )
 
         if manifest.parameters.get("differential_expression", True) is not True:

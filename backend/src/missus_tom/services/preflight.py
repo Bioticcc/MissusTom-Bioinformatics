@@ -39,6 +39,13 @@ from missus_tom.services.dependencies import (
     runtime_environment,
     runtime_tool,
 )
+from missus_tom.services.experimental_design import (
+    PAIRED_DESIGN,
+    batch_adjustment_enabled,
+    batch_design_errors,
+    experimental_design_type,
+    paired_design_errors,
+)
 from missus_tom.services.native_readiness import inspect_native_readiness
 from missus_tom.services.quantifications import has_kallisto_header
 from missus_tom.services.resources import (
@@ -590,7 +597,68 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         if isinstance(configured_minimum, int) and not isinstance(configured_minimum, bool)
         else 2
     )
+    try:
+        design_type = experimental_design_type(manifest.parameters)
+        design_type_error: str | None = None
+    except ValueError as error:
+        design_type = "independent"
+        design_type_error = str(error)
+    try:
+        adjust_for_batch_effects = batch_adjustment_enabled(manifest.parameters)
+        batch_setting_error: str | None = None
+    except ValueError as error:
+        adjust_for_batch_effects = False
+        batch_setting_error = str(error)
+    paired_errors = (
+        paired_design_errors(included, manifest.comparisons, minimum_group_size)
+        if design_type == PAIRED_DESIGN
+        else []
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="experimental_design",
+            label="Experimental design type",
+            status=(
+                CheckStatus.BLOCKING if design_type_error or paired_errors else CheckStatus.PASSED
+            ),
+            message=(
+                design_type_error
+                or "; ".join(paired_errors)
+                or (
+                    "Paired design: every compared subject has one sample in each condition"
+                    if design_type == PAIRED_DESIGN
+                    else "Independent design: samples are modeled independently"
+                )
+            ),
+            details={"design_type": design_type},
+        )
+    )
+    batch_errors = (
+        batch_design_errors(included, manifest.comparisons, design_type)
+        if adjust_for_batch_effects
+        else []
+    )
+    checks.append(
+        PreflightCheck(
+            check_id="batch_adjustment",
+            label="Batch-effect adjustment",
+            status=(
+                CheckStatus.BLOCKING if batch_setting_error or batch_errors else CheckStatus.PASSED
+            ),
+            message=(
+                batch_setting_error
+                or "; ".join(batch_errors)
+                or (
+                    "Batch adjustment is enabled with an identifiable model"
+                    if adjust_for_batch_effects
+                    else "Batch adjustment is disabled"
+                )
+            ),
+            details={"enabled": adjust_for_batch_effects},
+        )
+    )
     comparison_sample_counts: dict[str, dict[str, int]] = {}
+    comparison_subject_counts: dict[str, dict[str, int]] = {}
     for comparison in manifest.comparisons:
         counts: dict[str, int] = defaultdict(int)
         for sample in included:
@@ -600,11 +668,26 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             if sample.condition in (comparison.numerator, comparison.denominator):
                 counts[sample.condition] += 1
         comparison_sample_counts[comparison.comparison_id] = counts
+        subject_counts: dict[str, set[str]] = defaultdict(set)
+        for sample in included:
+            if (
+                comparison.intervention
+                and sample.covariates.get("intervention") != comparison.intervention
+            ):
+                continue
+            if sample.condition in (comparison.numerator, comparison.denominator):
+                subject_counts[sample.condition].add(sample.biological_replicate)
+        comparison_subject_counts[comparison.comparison_id] = {
+            group: len(subjects - {""}) for group, subjects in subject_counts.items()
+        }
+    comparison_unit_counts = (
+        comparison_subject_counts if design_type == PAIRED_DESIGN else comparison_sample_counts
+    )
     low_sample_groups = sorted(
         f"{comparison.comparison_id}:{group}"
         for comparison in manifest.comparisons
         for group in (comparison.numerator, comparison.denominator)
-        if comparison_sample_counts[comparison.comparison_id].get(group, 0) < minimum_group_size
+        if comparison_unit_counts[comparison.comparison_id].get(group, 0) < minimum_group_size
     )
     if not manifest.comparisons:
         low_sample_groups = sorted(
@@ -614,7 +697,7 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         f"{comparison.comparison_id}:{group}"
         for comparison in manifest.comparisons
         for group in (comparison.numerator, comparison.denominator)
-        if comparison_sample_counts[comparison.comparison_id].get(group, 0) == 2
+        if comparison_unit_counts[comparison.comparison_id].get(group, 0) == 2
     )
     design_incomplete = bool(unassigned_groups)
     checks.append(
@@ -644,9 +727,17 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
                 f"{', '.join(two_sample_groups)}; this meets the operational minimum "
                 "but limits statistical reliability"
                 if two_sample_groups
-                else f"At least {minimum_group_size} biological samples per comparison group"
+                else (
+                    f"At least {minimum_group_size} paired subjects per comparison group"
+                    if design_type == PAIRED_DESIGN
+                    else f"At least {minimum_group_size} biological samples per comparison group"
+                )
             ),
-            details=dict(sorted(sample_counts.items())),
+            details=(
+                comparison_subject_counts
+                if design_type == PAIRED_DESIGN
+                else dict(sorted(sample_counts.items()))
+            ),
         )
     )
 
@@ -659,6 +750,10 @@ def project_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         or configured_minimum < 2
     ):
         parameter_errors.append("minimum_group_size must be an integer of at least 2")
+    if design_type_error:
+        parameter_errors.append(design_type_error)
+    if batch_setting_error:
+        parameter_errors.append(batch_setting_error)
     for key, default, minimum, maximum, exclusive_minimum in (
         ("trim_quality", 20, 0, 50, False),
         ("trim_minimum_length", 20, 1, None, False),

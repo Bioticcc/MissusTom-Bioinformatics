@@ -1,33 +1,6 @@
 # AGENT_TODO.md
 
 ## General TODOs
-- [Awaiting manual testing] On the setup screen, while installing the bolded "dependancies:" section says "awaiting your confirmation", however at no point does the user actually confirm anything. This is misleading, and unless it serves a purpose other then extra logs (which are already covered in the output terminal and other sections of the install) it should be removed or modified to give a move accurate output.
-
-## BRS — Paired Biological Replicate Analysis [CODEX]
-
-- Extend Bulk RNA-seq Experimental Design to support paired biological samples.
-- Add an **Experimental Design Type** setting:
-  - **Independent (default):** Treat each sample as an independent biological observation, regardless of Biological Replicate identifiers.
-  - **Paired:** Use the existing Biological Replicate field to identify samples originating from the same biological subject.
-- Do not automatically enable paired analysis because multiple samples share a replicate identifier.
-- Preserve the current independent DESeq2 model: `~ condition`.
-- For paired analysis, use: `~ biological_replicate + condition`.
-- Reuse the existing Biological Replicate column rather than introducing a redundant Subject ID field.
-- Require valid subject identifiers for paired analysis and validate matching samples across the compared conditions.
-- Reject incomplete, ambiguous, or statistically invalid paired designs with clear explanations.
-- Ensure biological sample counts and independent subject counts are handled appropriately during validation.
-- Apply the selected statistical model consistently to all-gene, mRNA, and lncRNA analyses.
-- Record the selected design type, subject assignments, and actual statistical model in the output metadata.
-- Preserve backward compatibility with existing project manifests and the current independent-sample workflow.
-
-### Validation Requirements
-
-- Verify independent analysis produces the same results as the existing implementation.
-- Validate paired analysis against a trusted DESeq2 paired-design example.
-- Test missing subject IDs, incomplete pairings, duplicate assignments, and invalid designs.
-- Ensure selecting paired mode does not modify or overwrite existing biological metadata.
-- Verify the correct statistical model is recorded in the results.
-- Run relevant frontend, backend, and R analysis tests.
 
 ## BRS — Batch-Effect Adjustment [CODEX]
 

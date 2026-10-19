@@ -114,6 +114,15 @@ test("import merge revalidates legacy bulk wizard options", () => {
   assert.equal(merged.referenceMode, "build");
 });
 
+test("debug settings restore current and short-lived seven-step Bulk wizard positions", () => {
+  assert.equal(contract.resolveImportedWizardStep("bulk-rnaseq", 3, "Experimental design"), 3);
+  assert.equal(contract.resolveImportedWizardStep("bulk-rnaseq", 3, "Sample review"), 2);
+  assert.equal(contract.resolveImportedWizardStep("bulk-rnaseq", 5, "Comparisons"), 4);
+  assert.equal(contract.resolveImportedWizardStep("bulk-rnaseq", 8, undefined), 7);
+  assert.equal(contract.resolveImportedWizardStep("bulk-rnaseq", 2, "Kallisto discovery"), 1);
+  assert.equal(contract.resolveImportedWizardStep("ont-analysis", 7, "Review & save"), 6);
+});
+
 test("unstranded libraries omit a Kallisto strandedness flag", () => {
   assert.match(contractSource, /No strandedness flag\./);
   assert.doesNotMatch(contractSource, /--fr-stranded false/);
@@ -158,6 +167,20 @@ test("wizard UI encodes production bulk controls", () => {
   assert.match(wizardSource, /Jump to latest/);
   assert.match(wizardSource, /validationFollow/);
   assert.match(wizardSource, /busy === "plan"/);
+  assert.match(wizardSource, /const bulkSteps = \[\s*"Project & directories",\s*"FASTQ discovery",\s*"Sample review",\s*"Experimental design",\s*"Comparisons",\s*"Pipeline options",\s*"Preflight validation",\s*"Review & save"/);
+  assert.match(wizardSource, /const ontSteps = \[\s*"Project & directories",\s*"BAM selection",\s*"Sample review"/);
+  assert.doesNotMatch(wizardSource, /Manage sample inputs/);
+  assert.doesNotMatch(wizardSource, /sample-id-inline/);
+  assert.match(wizardSource, /samples\.slice\(0, 8\)/);
+  assert.match(wizardSource, /includedSamples\.slice\(0, 8\)/);
+  assert.match(wizardSource, /Expand sample list/);
+  assert.match(wizardSource, /Review sample inclusion, identifiers, input paths, and pairing status/);
+  assert.match(wizardSource, /resolveImportedWizardStep/);
+  assert.match(wizardSource, /Experimental design type/);
+  assert.match(wizardSource, /experimental_design_type: options\.experimentalDesignType/);
+  assert.match(wizardSource, /~ biological_replicate \+ condition/);
+  assert.match(wizardSource, /Adjust for Batch Effects/);
+  assert.match(wizardSource, /adjust_for_batch_effects: options\.adjustForBatchEffects/);
 });
 
 test("project preflight uses an operation-specific timeout and keeps timeout errors distinct", () => {

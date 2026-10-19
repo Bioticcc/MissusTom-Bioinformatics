@@ -464,7 +464,10 @@ def test_generic_analysis_uses_normalized_mapping_and_explicit_contrast() -> Non
     analysis = (workflow_root / "bin" / "bulk_rnaseq_analysis.R").read_text(encoding="utf-8")
 
     assert "reference_resources.transcript_to_gene" in workflow
-    assert "design = ~condition" in analysis
+    assert 'if (experimental_design_type == "paired") "biological_replicate"' in analysis
+    assert 'if (adjust_for_batch_effects) "batch"' in analysis
+    assert "adjust_for_batch_effects" in workflow
+    assert "design = design_formula" in analysis
     assert 'contrast <- c("condition", case_group, reference_group)' in analysis
     assert "full_human_analysis" not in workflow
     assert "biomart" not in analysis.lower()

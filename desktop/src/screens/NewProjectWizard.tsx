@@ -21,6 +21,7 @@ import {
   ONT_MANIFEST_SCHEMA_VERSION,
   ONT_PIPELINE_VERSION,
   projectActionsBlockedByBackend,
+  resolveImportedWizardStep,
   resolveBulkReferenceMode,
   STRANDEDNESS_KIT_HELP,
   STRANDEDNESS_UI_OPTIONS,
@@ -162,6 +163,8 @@ export function NewProjectWizard({
     minimumGroupSize: 2,
     adjustedPValue: 0.05,
     absoluteLog2FoldChange: 0.3,
+    experimentalDesignType: "independent",
+    adjustForBatchEffects: false,
     coverageWindowSize: 100000,
     modkitFilterPercentile: 0.1,
     modkitMaxDepth: 60000,
@@ -203,6 +206,8 @@ export function NewProjectWizard({
   const [metadataImport, setMetadataImport] = useState<MetadataImportStatus | null>(null);
   const [assignmentHistory, setAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [automaticSettings, setAutomaticSettings] = useState<AutomaticSettingsResult | null>(null);
+  const [sampleReviewExpanded, setSampleReviewExpanded] = useState(false);
+  const [designSamplesExpanded, setDesignSamplesExpanded] = useState(false);
   const validationController = useRef<AbortController | null>(null);
   const validationFollow = useRef(true);
   const validationLogRef = useRef<HTMLPreElement | null>(null);
@@ -258,6 +263,7 @@ export function NewProjectWizard({
   );
 
   const groups = useMemo(() => includedConditionGroups(samples), [samples]);
+  const includedSamples = useMemo(() => samples.filter((sample) => sample.included), [samples]);
   const interventions = useMemo(
     () => [...new Set(samples
       .filter((sample) => sample.included)
@@ -397,6 +403,9 @@ export function NewProjectWizard({
         sampleIndex === index ? { ...sample, [key]: value } : sample,
       ),
     );
+    if (key === "sample_id" || key === "r1_files" || key === "r2_files" || key === "abundance_tsv") {
+      setAutomaticSettings(null);
+    }
     setMetadataImport(null);
     invalidateValidation();
   };
@@ -577,6 +586,7 @@ export function NewProjectWizard({
         .filter((sample) => sample.included && sample.condition.trim())
         .map((sample) => sample.condition.trim()));
       setSamples(mergedSamples);
+      setAutomaticSettings(null);
       setAssignmentHistory((current) => [...current, {
         timestamp: new Date().toISOString(),
         action: "input_rediscovery",
@@ -675,6 +685,8 @@ export function NewProjectWizard({
           minimum_group_size: options.minimumGroupSize,
           adjusted_p_value: options.adjustedPValue,
           absolute_log2_fold_change: options.absoluteLog2FoldChange,
+          experimental_design_type: options.experimentalDesignType,
+          adjust_for_batch_effects: options.adjustForBatchEffects,
         } : {}),
       },
       resource_profile: {
@@ -831,10 +843,8 @@ export function NewProjectWizard({
         setProjectId(manifestDraft.project_identifier);
       }
       if (typeof manifestDraft.created_at === "string") setCreatedAt(manifestDraft.created_at);
-      if (typeof imported.current_step === "number") {
-        const importedSteps = importedPipeline === "ont-analysis" ? ontSteps : bulkSteps;
-        setStep(Math.max(0, Math.min(importedSteps.length - 1, imported.current_step - 1)));
-      }
+      setStep(resolveImportedWizardStep(importedPipeline, imported.current_step, imported.current_step_label));
+      setAutomaticSettings(null);
       setValidation(null);
       setValidatedManifest(null);
       setInputPreview(null);
@@ -1156,10 +1166,8 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card wide-card">
             <div className="section-heading"><div><p className="eyebrow">Step 3</p><h2>{startStage === "analysis" ? "Review samples and abundance tables" : "Review samples and read pairs"}</h2></div><span className="count-pill">{samples.length}</span></div>
-            <p className="helper-copy">Review inclusion, identifiers, read paths, and any design fields already known. Condition and batch are confirmed in the next step; nothing here is inferred from filenames.</p>
-            {samples.length === 0 ? <p className="empty-copy">No sample proposals. Return to input discovery first.</p> : (
-              <div className="table-scroll"><table className={`sample-table${startStage === "analysis" ? " analysis-input-table" : ""}`}><thead><tr><th>Use</th><th>Sample identifier</th><th>Condition</th><th>Replicate</th><th>Batch</th>{startStage === "analysis" ? <th>abundance.tsv</th> : <><th>R1 files</th><th>R2 files</th></>}<th>Status</th></tr></thead><tbody>{samples.map((sample, index) => <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td><td><input value={sample.condition} onChange={(event) => updateSample(index, "condition", event.target.value)} aria-label={`Condition for ${sample.sample_id}`} /></td><td><input value={sample.biological_replicate} onChange={(event) => updateSample(index, "biological_replicate", event.target.value)} aria-label={`Biological replicate for ${sample.sample_id}`} /></td><td><input value={sample.batch ?? ""} onChange={(event) => updateSample(index, "batch", event.target.value || null)} aria-label={`Batch for ${sample.sample_id}`} /></td>{startStage === "analysis" ? <td><div className="sample-path-editor"><textarea rows={2} value={sample.abundance_tsv ?? ""} onChange={(event) => updateSample(index, "abundance_tsv", event.target.value.trim() || null)} aria-label={`Abundance table for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "abundance_tsv")}>Browse…</button></div></td> : <><td><div className="sample-path-editor"><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r1_files")}>Browse…</button></div></td><td><div className="sample-path-editor"><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r2_files")}>Browse…</button></div></td></>}<td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning, warningIndex) => <small className="cell-warning" key={`${warning}-${warningIndex}`}>{warning}</small>)}</td></tr>)}</tbody></table></div>
-            )}
+            <p className="helper-copy">Review sample inclusion, identifiers, input paths, and pairing status. Set experimental metadata in the next step.</p>
+            {samples.length === 0 ? <p className="empty-copy">No sample proposals. Return to input discovery first.</p> : <><div className="table-scroll"><table className={`sample-table${startStage === "analysis" ? " analysis-input-table" : ""}`}><thead><tr><th>Use</th><th>Sample identifier</th>{startStage === "analysis" ? <th>abundance.tsv</th> : <><th>R1 files</th><th>R2 files</th></>}<th>Status</th></tr></thead><tbody>{(sampleReviewExpanded ? samples : samples.slice(0, 8)).map((sample) => { const index = samples.indexOf(sample); return <tr key={`${sample.sample_id}-${index}`}><td><input type="checkbox" checked={sample.included} onChange={(event) => updateSample(index, "included", event.target.checked)} aria-label={`Include ${sample.sample_id}`} /></td><td><input value={sample.sample_id} onChange={(event) => updateSample(index, "sample_id", event.target.value)} aria-label={`Sample identifier row ${index + 1}`} /></td>{startStage === "analysis" ? <td><div className="sample-path-editor"><textarea rows={2} value={sample.abundance_tsv ?? ""} onChange={(event) => updateSample(index, "abundance_tsv", event.target.value.trim() || null)} aria-label={`Abundance table for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "abundance_tsv")}>Browse…</button></div></td> : <><td><div className="sample-path-editor"><textarea rows={2} value={sample.r1_files.join("\n")} onChange={(event) => updateSample(index, "r1_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R1 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r1_files")}>Browse…</button></div></td><td><div className="sample-path-editor"><textarea rows={2} value={sample.r2_files.join("\n")} onChange={(event) => updateSample(index, "r2_files", event.target.value.split("\n").map((value) => value.trim()).filter(Boolean))} aria-label={`R2 files for ${sample.sample_id}`} /><button className="text-button" type="button" onClick={() => void chooseSampleInput(index, "r2_files")}>Browse…</button></div></td></>}<td><span className={`pair-status pair-${sample.pairing_status}`}>{sample.pairing_status}</span>{sample.warnings.map((warning, warningIndex) => <small className="cell-warning" key={`${warning}-${warningIndex}`}>{warning}</small>)}</td></tr>; })}</tbody></table></div>{samples.length > 8 && <button className="text-button sample-list-toggle" type="button" onClick={() => setSampleReviewExpanded((expanded) => !expanded)}>{sampleReviewExpanded ? "Show fewer samples" : `Expand sample list (${samples.length - 8} more)`}</button>}</>}
           </section>
         );
       case 3:
@@ -1177,7 +1185,9 @@ export function NewProjectWizard({
         return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>Confirm experimental design</h2></div></div>
-            <div className="concept-explainer"><p><strong>Experimental design</strong> tells the analysis which biological group each sample belongs to.</p><ul><li><strong>Condition:</strong> the required group being studied, such as Control or Treated.</li><li><strong>Biological replicate:</strong> optional subject/specimen metadata retained for future paired analyses. The current unpaired analysis does not use it.</li><li><strong>Batch:</strong> optional provenance for when or where a sample was processed. It is recorded, but the current analysis does not adjust for batch.</li></ul><p>Missus Tom never guesses these biological facts from filenames unless you explicitly request an automatic suggestion.</p></div>
+            <div className="concept-explainer"><p><strong>Experimental design</strong> tells the analysis which biological group each sample belongs to.</p><ul><li><strong>Condition:</strong> the required group being studied, such as Control or Treated.</li><li><strong>Biological replicate:</strong> optional subject/specimen metadata for independent analysis; required for paired analysis.</li><li><strong>Batch:</strong> optional processing metadata. It is used only when batch adjustment is enabled.</li></ul><p>Missus Tom never guesses these biological facts from filenames unless you explicitly request an automatic suggestion.</p></div>
+            <fieldset className="run-mode-panel"><legend>Experimental design type</legend><label className={`run-mode-option${options.experimentalDesignType === "independent" ? " selected" : ""}`}><input type="radio" name="experimental-design-type" checked={options.experimentalDesignType === "independent"} onChange={() => updateOptions("experimentalDesignType", "independent")} /><span><strong>Independent</strong><small>Default. Each sample is an independent observation; DESeq2 uses <code>~ condition</code>.</small></span></label><label className={`run-mode-option${options.experimentalDesignType === "paired" ? " selected" : ""}`}><input type="radio" name="experimental-design-type" checked={options.experimentalDesignType === "paired"} onChange={() => updateOptions("experimentalDesignType", "paired")} /><span><strong>Paired</strong><small>Use the Biological replicate field as the subject ID. Each compared subject needs exactly one sample in both conditions; DESeq2 uses <code>~ biological_replicate + condition</code>.</small></span></label></fieldset>
+            <fieldset className="run-mode-panel"><legend>Batch-effect adjustment</legend><label className={`run-mode-option${options.adjustForBatchEffects ? " selected" : ""}`}><input type="checkbox" checked={options.adjustForBatchEffects} onChange={(event) => updateOptions("adjustForBatchEffects", event.target.checked)} /><span><strong>Adjust for Batch Effects</strong><small>Disabled by default. Uses the existing Batch field; every compared sample needs a batch assignment and the resulting model must not be confounded.</small></span></label></fieldset>
             <div className="automatic-settings-panel">
               <div><strong>Attempt automatic settings</strong><p>Use sample and read filenames to suggest condition, biological replicate, and clearly marked batch or intervention values.</p></div>
               <button className="button secondary" type="button" onClick={attemptAutomaticSettings}>Attempt Automatic Settings</button>
@@ -1199,10 +1209,11 @@ export function NewProjectWizard({
               <button className="button secondary" type="button" onClick={() => void importMetadataCsv()} disabled={busy === "metadata-csv" || samples.length === 0}>{busy === "metadata-csv" ? "Importing…" : "Select metadata CSV…"}</button>
             </div>
             {metadataImport && <div className={metadataImport.unmatchedSamples.length || metadataImport.unusedRows.length || metadataImport.warnings.length ? "warning-list metadata-import-result" : "success-message metadata-import-result"}><strong>Imported metadata for {metadataImport.matched} sample(s)</strong><p><code>{metadataImport.path}</code></p>{metadataImport.unmatchedSamples.length > 0 && <div><p>No matching CSV row for:</p><ul>{metadataImport.unmatchedSamples.map((sampleId) => <li key={sampleId}><code>{sampleId}</code></li>)}</ul></div>}{metadataImport.unusedRows.length > 0 && <div><p>Unused CSV rows, including superseded legacy duplicates:</p><ul>{metadataImport.unusedRows.map((row) => <li key={row}><code>{row}</code></li>)}</ul></div>}{metadataImport.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div>}
-            <div className="design-list">{samples.filter((sample) => sample.included).map((sample, index) => {
+            <div className="design-list">{(designSamplesExpanded ? includedSamples : includedSamples.slice(0, 8)).map((sample, index) => {
               const realIndex = samples.indexOf(sample);
-              return <article className="design-row" key={`${sample.sample_id}-${index}`}><strong>{sample.sample_id}</strong><label>Condition<input value={sample.condition} onChange={(event) => updateSample(realIndex, "condition", event.target.value)} /></label><label>Biological replicate (optional)<input value={sample.biological_replicate} onChange={(event) => updateSample(realIndex, "biological_replicate", event.target.value)} /></label><label>Batch<input value={sample.batch ?? ""} onChange={(event) => updateSample(realIndex, "batch", event.target.value || null)} /></label><label>Intervention<input value={typeof sample.covariates.intervention === "string" ? sample.covariates.intervention : ""} onChange={(event) => updateSample(realIndex, "covariates", { ...sample.covariates, intervention: event.target.value || null })} /></label></article>;
+              return <article className="design-row" key={`${sample.sample_id}-${index}`}><strong>{sample.sample_id}</strong><label>Condition<input value={sample.condition} onChange={(event) => updateSample(realIndex, "condition", event.target.value)} /></label><label>Biological replicate{options.experimentalDesignType === "paired" ? " (subject ID)" : " (optional)"}<input value={sample.biological_replicate} onChange={(event) => updateSample(realIndex, "biological_replicate", event.target.value)} /></label><label>Batch<input value={sample.batch ?? ""} onChange={(event) => updateSample(realIndex, "batch", event.target.value || null)} /></label><label>Intervention<input value={typeof sample.covariates.intervention === "string" ? sample.covariates.intervention : ""} onChange={(event) => updateSample(realIndex, "covariates", { ...sample.covariates, intervention: event.target.value || null })} /></label></article>;
             })}</div>
+            {includedSamples.length > 8 && <button className="text-button sample-list-toggle" type="button" onClick={() => setDesignSamplesExpanded((expanded) => !expanded)}>{designSamplesExpanded ? "Show fewer samples" : `Expand sample list (${includedSamples.length - 8} more)`}</button>}
             {groups.length > 0 && <div className="group-summary"><strong>Current groups</strong>{groups.map((group) => <span key={group}>{group}: {samples.filter((sample) => sample.included && sample.condition.trim() === group).length} sample(s)</span>)}</div>}
           </section>
         );
@@ -1217,7 +1228,7 @@ export function NewProjectWizard({
         );
         return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Build comparisons</h2></div></div>
+            <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Build comparisons</h2></div></div>
             <div className="concept-explainer"><p><strong>Comparisons</strong> specify the questions DESeq2 should test. Each comparison uses two conditions from the experimental design and produces its own differential-expression tables and plots.</p><p><strong>Numerator − denominator:</strong> for Treated versus Control, positive log2 fold change means higher expression in Treated; negative means higher in Control.</p></div>
             {groups.length < 2 ? <div className="warning-list">Assign at least two conditions in the experimental design step.</div> : <div className="comparison-builder filtered-comparison-builder"><label>Numerator / test group<select value={numerator} onChange={(event) => setNumerator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><span className="direction-mark" aria-hidden="true">versus</span><label>Denominator / reference group<select value={denominator} onChange={(event) => setDenominator(event.target.value)}><option value="">Choose group</option>{groups.map((group) => <option key={group}>{group}</option>)}</select></label><label>Intervention filter<select value={comparisonIntervention} onChange={(event) => setComparisonIntervention(event.target.value)}><option value="">All interventions</option>{interventions.map((intervention) => <option key={intervention}>{intervention}</option>)}</select></label><button className="button primary" type="button" onClick={addComparison}>Add comparison</button></div>}
             <div className="comparison-list">{comparisons.length === 0 ? <p className="empty-copy">No comparisons requested.</p> : comparisons.map((comparison) => <article key={comparison.comparison_id}><div><strong>{comparison.numerator} <span>−</span> {comparison.denominator}</strong><p>{comparison.label}{comparison.intervention ? ` · Intervention: ${comparison.intervention}` : ""}</p></div><button type="button" className="text-button danger" onClick={() => removeComparison(comparison.comparison_id)}>Remove</button></article>)}</div>
@@ -1235,7 +1246,7 @@ export function NewProjectWizard({
         );
         return (
           <section className="wizard-card form-stack">
-            <div className="section-heading"><div><p className="eyebrow">Step 6</p><h2>Pipeline options</h2></div></div>
+            <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Pipeline options</h2></div></div>
             <p className="helper-copy">{startStage === "analysis" ? "Analysis-only projects require annotation GTF or transcript-to-gene mapping. Production bulk RNA-seq is paired-end only." : "Quantification uses paired-end FASTQs. Missus Tom validates FASTA and GTF, derives the transcript-to-gene mapping, and builds or reuses a managed Kallisto index when the run starts."}</p>
             <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<select value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)}><option>total RNA</option><option>lncRNA</option><option>mRNA</option><option>other (confirm)</option></select></label></div>
@@ -1289,7 +1300,7 @@ export function NewProjectWizard({
         );
         return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
+            <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Preflight validation</h2></div><button className="button primary" type="button" onClick={validate} disabled={busy === "validate" || backendBlocksProjectActions}>{busy === "validate" ? "Validating…" : "Run project checks"}</button></div>
             <p className="helper-copy">Blocking failures prevent saving. Warnings do not.</p>
             {validation && <div className={validation.valid && !nativeExecutionUnavailable ? "validation-summary valid" : "validation-summary invalid"}><strong>{validation.valid ? nativeExecutionUnavailable ? "Manifest valid; native execution unavailable" : "Manifest valid" : "Validation failed"}</strong><span>{validation.checks.filter((check) => check.status === "blocking_failure").length} blocking · {validation.checks.filter((check) => check.status === "warning").length} warning</span></div>}
             {validationTerminal}
@@ -1299,7 +1310,7 @@ export function NewProjectWizard({
       default:
         return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 8</p><h2>Review and save</h2></div></div>
+            <div className="section-heading"><div><p className="eyebrow">Step {step + 1}</p><h2>Review and save</h2></div></div>
             <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Starting point</dt><dd>{startStage === "analysis" ? "Analysis-only (existing Kallisto results)" : "FASTQ quantification"}</dd><dt>Reference mode</dt><dd>{bulkReferenceMode}</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>Comparisons</dt><dd>{comparisons.length}</dd><dt>Library</dt><dd>{options.libraryType} · paired-end · {options.strandedness}</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM · {options.maxParallelTasks} parallel task(s)</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}

@@ -71,17 +71,24 @@ def _run_analysis(
     q_value: str = "0.05",
     lfc_threshold: str = "0",
     minimum_group_size: str = "2",
+    experimental_design_type: str = "independent",
+    adjust_for_batch_effects: str = "false",
 ) -> subprocess.CompletedProcess[str]:
     mapping_path = tmp_path / "transcript_to_gene.tsv"
     _write_table(mapping_path, mapping_header, mapping_lines)
     samples_path = tmp_path / "samples.tsv"
-    sample_header = "sample_id\tcondition\tintervention\tabundance_tsv"
+    sample_header = "sample_id\tcondition\tbiological_replicate\tbatch\tintervention\tabundance_tsv"
     sample_lines: list[str] = []
     for row in sample_rows:
         sample_id = row.split("\t", 1)[0]
         abundance_path = tmp_path / "abundance" / f"{sample_id}.tsv"
         _write_abundance(abundance_path, abundance_by_sample[sample_id])
-        sample_lines.append(f"{row}\t{abundance_path}")
+        fields = row.split("\t")
+        if len(fields) == 3:
+            fields = [fields[0], fields[1], fields[0], "batch_1", fields[2]]
+        elif len(fields) == 4:
+            fields = [fields[0], fields[1], fields[2], "batch_1", fields[3]]
+        sample_lines.append("\t".join([*fields, str(abundance_path)]))
     _write_table(samples_path, sample_header, sample_lines)
 
     comparisons_path = tmp_path / "comparisons.tsv"
@@ -104,6 +111,8 @@ def _run_analysis(
             q_value,
             lfc_threshold,
             minimum_group_size,
+            experimental_design_type,
+            adjust_for_batch_effects,
         ],
         capture_output=True,
         text=True,
@@ -197,6 +206,119 @@ EXPECTED_CLASS_ARTIFACTS = {
     "DE totals by comparison plot",
     "comparison status table",
 }
+
+
+def test_paired_design_records_and_uses_subject_formula(tmp_path: Path) -> None:
+    abundance = {
+        "ctrl_subject_1": HIGH_CONTROL,
+        "ctrl_subject_2": HIGH_CONTROL,
+        "treat_subject_1": HIGH_TREAT,
+        "treat_subject_2": HIGH_TREAT,
+    }
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=[
+            "ctrl_subject_1\tcontrol\tsubject_1\t",
+            "ctrl_subject_2\tcontrol\tsubject_2\t",
+            "treat_subject_1\ttreat\tsubject_1\t",
+            "treat_subject_2\ttreat\tsubject_2\t",
+        ],
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample=abundance,
+        experimental_design_type="paired",
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    parameters_path = (
+        tmp_path / "analysis_output" / "tables" / "provenance" / "analysis_parameters.tsv"
+    )
+    parameters = parameters_path.read_text(encoding="utf-8")
+    assert "experimental_design_type\tpaired" in parameters
+    assert "design_formula\t~ biological_replicate + condition" in parameters
+    de_path = (
+        tmp_path
+        / "analysis_output"
+        / "differential_expression"
+        / "all_genes"
+        / "cmp_treat_vs_control"
+        / "full_results.tsv"
+    )
+    lines = de_path.read_text(encoding="utf-8").strip().splitlines()
+    header = lines[0].split("\t")
+    gene_index = header.index("gene_id")
+    lfc_index = header.index("log2FoldChange")
+    by_gene = {
+        line.split("\t")[gene_index]: float(line.split("\t")[lfc_index]) for line in lines[1:]
+    }
+    assert by_gene["G_BETA"] > 0
+    assert by_gene["G_ALPHA"] < 0
+
+
+def test_batch_adjusted_design_records_and_uses_batch_formula(tmp_path: Path) -> None:
+    abundance = {
+        "ctrl_batch_1": HIGH_CONTROL,
+        "treat_batch_1": HIGH_TREAT,
+        "ctrl_batch_2": HIGH_CONTROL,
+        "treat_batch_2": HIGH_TREAT,
+        "ctrl_batch_3": HIGH_CONTROL,
+        "treat_batch_3": HIGH_TREAT,
+    }
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=[
+            "ctrl_batch_1\tcontrol\tctrl_batch_1\tbatch_1\t",
+            "treat_batch_1\ttreat\ttreat_batch_1\tbatch_1\t",
+            "ctrl_batch_2\tcontrol\tctrl_batch_2\tbatch_2\t",
+            "treat_batch_2\ttreat\ttreat_batch_2\tbatch_2\t",
+            "ctrl_batch_3\tcontrol\tctrl_batch_3\tbatch_3\t",
+            "treat_batch_3\ttreat\ttreat_batch_3\tbatch_3\t",
+        ],
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample=abundance,
+        adjust_for_batch_effects="true",
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    parameters = (
+        tmp_path / "analysis_output" / "tables" / "provenance" / "analysis_parameters.tsv"
+    ).read_text(encoding="utf-8")
+    assert "adjust_for_batch_effects\tTRUE" in parameters
+    assert "design_formula\t~ batch + condition" in parameters
+
+
+def test_paired_batch_adjusted_design_records_combined_formula(tmp_path: Path) -> None:
+    abundance = {
+        "ctrl_subject_1": HIGH_CONTROL,
+        "treat_subject_1": HIGH_TREAT,
+        "ctrl_subject_2": HIGH_CONTROL,
+        "treat_subject_2": HIGH_TREAT,
+        "ctrl_subject_3": HIGH_CONTROL,
+        "treat_subject_3": HIGH_TREAT,
+    }
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=[
+            "ctrl_subject_1\tcontrol\tsubject_1\tbatch_1\t",
+            "treat_subject_1\ttreat\tsubject_1\tbatch_2\t",
+            "ctrl_subject_2\tcontrol\tsubject_2\tbatch_2\t",
+            "treat_subject_2\ttreat\tsubject_2\tbatch_1\t",
+            "ctrl_subject_3\tcontrol\tsubject_3\tbatch_1\t",
+            "treat_subject_3\ttreat\tsubject_3\tbatch_2\t",
+        ],
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample=abundance,
+        experimental_design_type="paired",
+        adjust_for_batch_effects="true",
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    parameters = (
+        tmp_path / "analysis_output" / "tables" / "provenance" / "analysis_parameters.tsv"
+    ).read_text(encoding="utf-8")
+    assert "design_formula\t~ batch + biological_replicate + condition" in parameters
 
 
 def test_all_gene_analysis_without_biotypes_column(tmp_path: Path) -> None:

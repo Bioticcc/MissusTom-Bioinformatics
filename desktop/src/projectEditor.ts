@@ -30,6 +30,8 @@ export interface EditorOptions {
   minimumGroupSize: number;
   adjustedPValue: number;
   absoluteLog2FoldChange: number;
+  experimentalDesignType: "independent" | "paired";
+  adjustForBatchEffects: boolean;
   coverageWindowSize: number;
   modkitFilterPercentile: number;
   modkitMaxDepth: number;
@@ -49,6 +51,8 @@ const editableParameters = new Set([
   "expected_pass_bam_count", "adapter_r1", "adapter_r2", "trim_quality",
   "trim_minimum_length", "differential_expression", "minimum_group_size",
   "adjusted_p_value", "absolute_log2_fold_change",
+  "experimental_design_type",
+  "adjust_for_batch_effects",
 ]);
 
 function numberOr(value: ProjectManifest["parameters"][string], fallback: number): number {
@@ -105,6 +109,8 @@ export function loadProjectEditor(manifest: ProjectManifest, defaults: EditorOpt
       minimumGroupSize: numberOr(parameters.minimum_group_size, defaults.minimumGroupSize),
       adjustedPValue: numberOr(parameters.adjusted_p_value, defaults.adjustedPValue),
       absoluteLog2FoldChange: numberOr(parameters.absolute_log2_fold_change, defaults.absoluteLog2FoldChange),
+      experimentalDesignType: parameters.experimental_design_type === "paired" ? "paired" : "independent",
+      adjustForBatchEffects: parameters.adjust_for_batch_effects === true,
       coverageWindowSize: numberOr(parameters.coverage_window_size, defaults.coverageWindowSize),
       modkitFilterPercentile: numberOr(parameters.modkit_filter_percentile, defaults.modkitFilterPercentile),
       modkitMaxDepth: numberOr(parameters.modkit_max_depth, defaults.modkitMaxDepth),

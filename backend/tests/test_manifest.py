@@ -131,6 +131,85 @@ def test_missing_biological_replicates_are_optional(
     assert "Optional biological replicate IDs" in replicate_check.message
 
 
+def test_paired_design_requires_complete_unique_subject_assignments(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["experimental_design_type"] = "paired"
+    subjects = ("subject_1", "subject_1", "subject_2", "subject_2")
+    for sample, subject in zip(payload["samples"], subjects, strict=True):
+        sample["biological_replicate"] = subject
+    manifest = ProjectManifest.model_validate(payload)
+
+    valid = validate_project(manifest)
+    assert valid.valid is True
+    design = next(check for check in valid.checks if check.check_id == "experimental_design")
+    assert design.status.value == "passed"
+
+    payload["samples"][2]["biological_replicate"] = "subject_3"
+    invalid = validate_project(ProjectManifest.model_validate(payload))
+    design = next(check for check in invalid.checks if check.check_id == "experimental_design")
+    assert design.status.value == "blocking_failure"
+    assert "both conditions" in design.message
+
+
+def test_paired_design_rejects_duplicate_subject_condition_assignments(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["experimental_design_type"] = "paired"
+    for sample in payload["samples"]:
+        sample["biological_replicate"] = "subject_1"
+    result = validate_project(ProjectManifest.model_validate(payload))
+
+    design = next(check for check in result.checks if check.check_id == "experimental_design")
+    assert design.status.value == "blocking_failure"
+    assert "multiple samples" in design.message
+
+
+def test_paired_design_rejects_missing_subject_identifiers(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["experimental_design_type"] = "paired"
+    payload["samples"][0]["biological_replicate"] = ""
+    manifest = ProjectManifest.model_validate(payload)
+
+    result = validate_project(manifest)
+    design = next(check for check in result.checks if check.check_id == "experimental_design")
+    assert design.status.value == "blocking_failure"
+    assert "missing biological replicate ID" in design.message
+
+
+def test_batch_adjustment_requires_complete_identifiable_assignments(
+    manifest_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(manifest_payload)
+    payload["parameters"]["adjust_for_batch_effects"] = True
+    for sample, batch in zip(
+        payload["samples"], ("batch_1", "batch_1", "batch_2", "batch_2"), strict=True
+    ):
+        sample["batch"] = batch
+    valid = validate_project(ProjectManifest.model_validate(payload))
+    batch_check = next(check for check in valid.checks if check.check_id == "batch_adjustment")
+    assert batch_check.status.value == "passed"
+
+    payload["samples"][0]["batch"] = None
+    missing = validate_project(ProjectManifest.model_validate(payload))
+    batch_check = next(check for check in missing.checks if check.check_id == "batch_adjustment")
+    assert batch_check.status.value == "blocking_failure"
+    assert "missing batch assignment" in batch_check.message
+
+    payload["samples"][0]["batch"] = "batch_1"
+    payload["samples"][1]["batch"] = "batch_2"
+    payload["samples"][2]["batch"] = "batch_1"
+    payload["samples"][3]["batch"] = "batch_2"
+    confounded = validate_project(ProjectManifest.model_validate(payload))
+    batch_check = next(check for check in confounded.checks if check.check_id == "batch_adjustment")
+    assert batch_check.status.value == "blocking_failure"
+    assert "confounded" in batch_check.message
+
+
 def test_intervention_fields_reject_line_breaks(manifest_payload: dict[str, Any]) -> None:
     payload = deepcopy(manifest_payload)
     payload["samples"][0]["covariates"]["intervention"] = "D\nmalformed"

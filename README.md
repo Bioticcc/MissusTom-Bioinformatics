@@ -179,9 +179,12 @@ and [development diary](docs/Dev_Diary.md) are also kept under `docs/`.
   transcript/gene identifiers; support for every organism or annotation
   convention is not claimed. FASTA and GTF files must represent the same
   transcript annotation release.
-- Differential expression is limited to independent biological samples with
-  `~ condition` and explicit pairwise contrasts. Batch, paired-patient,
-  longitudinal, and interaction designs are not modeled.
+- Differential expression uses independent samples by default (`~ condition`).
+  A paired design (`~ biological_replicate + condition`) is available when each
+  compared subject has exactly one sample in both conditions. Optional batch
+  adjustment uses `~ batch + condition`, or `~ batch + biological_replicate +
+  condition` for an identifiable paired design. Longitudinal and interaction
+  designs are not modeled.
 - An existing Kallisto index cannot prove its own annotation compatibility.
   Supply its original transcriptome FASTA when available so Missus Tom can
   validate identifiers; otherwise compatibility remains user-supplied.

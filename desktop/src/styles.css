@@ -1938,6 +1938,10 @@ legend {
   display: grid;
 }
 
+.sample-list-toggle {
+  margin-top: 0.7rem;
+}
+
 .design-row > strong {
   padding-bottom: 0.65rem;
   overflow-wrap: anywhere;

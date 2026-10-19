@@ -153,6 +153,38 @@ export interface DebugExportWizardSlice {
   options?: Record<string, unknown>;
 }
 
+/** Map current and short-lived seven-step Bulk debug exports to the active wizard page. */
+export function resolveImportedWizardStep(
+  pipeline: "bulk-rnaseq" | "ont-analysis",
+  currentStep: unknown,
+  currentStepLabel: unknown,
+): number {
+  if (pipeline === "ont-analysis") {
+    const position = typeof currentStep === "number" ? currentStep - 1 : 0;
+    return Math.max(0, Math.min(6, position));
+  }
+
+  const label = typeof currentStepLabel === "string" ? currentStepLabel : "";
+  const bulkLabels = [
+    "Project & directories",
+    "FASTQ discovery",
+    "Sample review",
+    "Experimental design",
+    "Comparisons",
+    "Pipeline options",
+    "Preflight validation",
+    "Review & save",
+  ];
+  if (label === "Kallisto discovery") return 1;
+  const labelledPosition = bulkLabels.indexOf(label);
+  if (labelledPosition >= 0) return labelledPosition;
+
+  const position = typeof currentStep === "number" ? currentStep : 1;
+  // The short-lived seven-step UI omitted Sample review; its later numeric
+  // positions cannot be distinguished without the exported label.
+  return Math.max(0, Math.min(7, position - 1));
+}
+
 export function mergeImportedBulkOptions(
   current: Record<string, unknown>,
   imported: Record<string, unknown>,
