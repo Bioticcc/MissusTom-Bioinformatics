@@ -5,6 +5,7 @@ import { NewProjectWizard } from "./screens/NewProjectWizard";
 import { Results } from "./screens/Results";
 import { RunPlanScreen } from "./screens/RunPlanScreen";
 import { Settings } from "./screens/Settings";
+import { LearnAndModify } from "./screens/LearnAndModify";
 import { Setup } from "./screens/Setup";
 import { apiRequest, getBackendStatus } from "./api";
 import { TitleBar } from "./components/TitleBar";
@@ -21,6 +22,7 @@ const navigation: Array<{ id: ViewId; label: string; glyph: string }> = [
   { id: "run-plan", label: "Run plan", glyph: "≡" },
   { id: "jobs", label: "Jobs", glyph: "◷" },
   { id: "results", label: "Results", glyph: "▦" },
+  { id: "learn", label: "Learn and Modify", glyph: "⌑" },
   { id: "settings", label: "Settings", glyph: "⚙" },
 ];
 
@@ -240,6 +242,7 @@ export default function App() {
         )}
         {activeView === "jobs" && <Jobs activeRun={activeRun} polledRuns={polledRuns} />}
         {activeView === "results" && <Results activeRun={activeRun} />}
+        {activeView === "learn" && <LearnAndModify isRunActive={Boolean(activeRun)} />}
         {activeView === "settings" && <Settings onResetSetup={() => { resetSetupState(window.localStorage); setSetupRequired(true); setActiveView("setup"); }} isRunActive={Boolean(activeRun)} />}
         </main>
       </div>

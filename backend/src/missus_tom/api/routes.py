@@ -36,6 +36,13 @@ from missus_tom.models.manifest import (
     ProjectValidationResult,
 )
 from missus_tom.models.metadata import MetadataCsvRequest, MetadataCsvResult
+from missus_tom.models.pipeline_sources import (
+    PipelineDifference,
+    PipelineRevision,
+    PipelineSourceContent,
+    PipelineSourceStatus,
+    SavePipelineSourceRequest,
+)
 from missus_tom.models.preflight import CheckStatus, PreflightCheck, SystemPreflightResult
 from missus_tom.models.projects import ProjectOpenRequest, ProjectOpenResult, ProjectSummary
 from missus_tom.models.run import (
@@ -56,6 +63,7 @@ from missus_tom.services.directories import preview_directory
 from missus_tom.services.fastq import discover_fastqs
 from missus_tom.services.metadata import read_metadata_csv
 from missus_tom.services.observability import backend_observability
+from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import system_preflight
 from missus_tom.services.projects import (
     ProjectHistoryStore,
@@ -79,6 +87,117 @@ def _adapter_for(manifest: ProjectManifest) -> PipelineAdapter:
         return pipeline_registry.for_manifest(manifest)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _pipeline_source_error(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=404 if "unsupported" in str(exc) else 409, detail=str(exc))
+
+
+def _ensure_pipeline_source_mutable(pipeline_identifier: str) -> None:
+    if any(
+        run.pipeline_identifier == pipeline_identifier
+        and run.status.value in {"queued", "preparing", "running", "cancelling"}
+        for run in run_manager.list_runs()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="finish the active workflow before changing its pipeline source",
+        )
+
+
+@router.get(
+    f"{settings.api_prefix}/pipeline-sources",
+    response_model=ApiResponse[list[PipelineSourceStatus]],
+)
+def get_pipeline_sources() -> ApiResponse[list[PipelineSourceStatus]]:
+    return ApiResponse(
+        data=[pipeline_sources.status(identifier) for identifier in ("bulk-rnaseq", "ont-analysis")]
+    )
+
+
+@router.get(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}",
+    response_model=ApiResponse[PipelineSourceStatus],
+)
+def get_pipeline_source_status(pipeline_identifier: str) -> ApiResponse[PipelineSourceStatus]:
+    try:
+        return ApiResponse(data=pipeline_sources.status(pipeline_identifier))
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}/files/{{source_path:path}}",
+    response_model=ApiResponse[PipelineSourceContent],
+)
+def get_pipeline_source_file(
+    pipeline_identifier: str, source_path: str, revision_id: str | None = None
+) -> ApiResponse[PipelineSourceContent]:
+    try:
+        return ApiResponse(
+            data=pipeline_sources.read(pipeline_identifier, source_path, revision_id)
+        )
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
+
+
+@router.post(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}/revisions",
+    response_model=ApiResponse[PipelineRevision],
+)
+def post_pipeline_source_revision(
+    pipeline_identifier: str, request: SavePipelineSourceRequest
+) -> ApiResponse[PipelineRevision]:
+    try:
+        _ensure_pipeline_source_mutable(pipeline_identifier)
+        return ApiResponse(
+            data=pipeline_sources.save(
+                pipeline_identifier, request.path, request.content, request.expected_revision_id
+            )
+        )
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
+
+
+@router.post(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}/revisions/{{revision_id}}/activate",
+    response_model=ApiResponse[PipelineSourceStatus],
+)
+def post_pipeline_source_activate(
+    pipeline_identifier: str, revision_id: str
+) -> ApiResponse[PipelineSourceStatus]:
+    try:
+        _ensure_pipeline_source_mutable(pipeline_identifier)
+        return ApiResponse(data=pipeline_sources.activate(pipeline_identifier, revision_id))
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
+
+
+@router.post(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}/restore",
+    response_model=ApiResponse[PipelineSourceStatus],
+)
+def post_pipeline_source_restore(pipeline_identifier: str) -> ApiResponse[PipelineSourceStatus]:
+    try:
+        _ensure_pipeline_source_mutable(pipeline_identifier)
+        return ApiResponse(data=pipeline_sources.restore(pipeline_identifier))
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
+
+
+@router.get(
+    f"{settings.api_prefix}/pipeline-sources/{{pipeline_identifier}}/differences/{{source_path:path}}",
+    response_model=ApiResponse[PipelineDifference],
+)
+def get_pipeline_source_difference(
+    pipeline_identifier: str, source_path: str, revision_id: str | None = None
+) -> ApiResponse[PipelineDifference]:
+    try:
+        return ApiResponse(
+            data=pipeline_sources.difference(pipeline_identifier, source_path, revision_id)
+        )
+    except ValueError as exc:
+        raise _pipeline_source_error(exc) from exc
 
 
 @router.get("/health", response_model=ApiResponse[dict[str, Any]])

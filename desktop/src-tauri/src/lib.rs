@@ -72,6 +72,14 @@ struct BackendStatus {
     startup_log: String,
 }
 
+#[derive(Serialize)]
+struct UninstallStatus {
+    supported: bool,
+    package_name: Option<String>,
+    command: Option<String>,
+    message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TextExportKind {
@@ -933,6 +941,72 @@ async fn open_directory(path: String) -> Result<(), String> {
         .map_err(|error| format!("Directory opener could not finish: {error}"))?
 }
 
+fn debian_uninstall_status() -> UninstallStatus {
+    if cfg!(debug_assertions) {
+        return UninstallStatus {
+            supported: false,
+            package_name: None,
+            command: None,
+            message: "Application removal is unavailable from a development build.".to_string(),
+        };
+    }
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => {
+            return UninstallStatus {
+                supported: false,
+                package_name: None,
+                command: None,
+                message: "The installation location could not be verified.".to_string(),
+            }
+        }
+    };
+    if executable != PathBuf::from("/usr/bin/missus-tom") {
+        return UninstallStatus {
+            supported: false,
+            package_name: None,
+            command: None,
+            message: "This installation was not installed through the Debian package manager. Uninstall using the installation method originally used for this application.".to_string(),
+        };
+    }
+    let output = match Command::new("dpkg-query")
+        .args(["-W", "-f=${db:Status-Status}", "missus-tom"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => {
+            return UninstallStatus {
+                supported: false,
+                package_name: None,
+                command: None,
+                message: "Debian package tools are unavailable. Uninstall using the installation method originally used for this application.".to_string(),
+            }
+        }
+    };
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "installed" {
+        return UninstallStatus {
+            supported: false,
+            package_name: None,
+            command: None,
+            message: "The installed Missus Tom Debian package could not be verified.".to_string(),
+        };
+    }
+    UninstallStatus {
+        supported: true,
+        package_name: Some("missus-tom".to_string()),
+        command: Some("sudo apt remove missus-tom".to_string()),
+        message: "Missus Tom was installed as the verified Debian package missus-tom.".to_string(),
+    }
+}
+
+#[tauri::command]
+async fn uninstall_status(window: WebviewWindow) -> Result<UninstallStatus, String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    tauri::async_runtime::spawn_blocking(debian_uninstall_status)
+        .await
+        .map_err(|error| format!("Could not inspect the installation: {error}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1007,6 +1081,7 @@ pub fn run() {
             set_dependency_install_active,
             restore_main_window,
             backend_status,
+            uninstall_status,
             close_main_window
         ])
         .run(tauri::generate_context!())
@@ -1020,12 +1095,19 @@ mod tests {
     #[cfg(unix)]
     use super::backend_path_matches;
     use super::{
-        bottom_left_overlay_position, directory_opener, directory_opener_waits_for_exit,
-        enforce_export_extension, is_wsl_release, parse_backend_health, parse_health_response,
-        should_show_overlay, sidecar_paths, stale_backend_is_safe_to_stop, startup_decision,
-        validate_export_destination, write_export_atomically, BackendHealth, StartupDecision,
-        TextExportKind,
+        bottom_left_overlay_position, debian_uninstall_status, directory_opener,
+        directory_opener_waits_for_exit, enforce_export_extension, is_wsl_release,
+        parse_backend_health, parse_health_response, should_show_overlay, sidecar_paths,
+        stale_backend_is_safe_to_stop, startup_decision, validate_export_destination,
+        write_export_atomically, BackendHealth, StartupDecision, TextExportKind,
     };
+
+    #[test]
+    fn development_build_never_offers_package_removal() {
+        let status = debian_uninstall_status();
+        assert!(!status.supported);
+        assert!(status.command.is_none());
+    }
 
     #[test]
     fn overlay_is_only_shown_for_an_active_minimized_run() {

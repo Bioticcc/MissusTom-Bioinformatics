@@ -38,6 +38,7 @@ from missus_tom.services.experimental_design import (
     experimental_design_type,
     paired_design_errors,
 )
+from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import project_preflight
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resources import execution_resource_checks, validate_execution_resources
@@ -152,7 +153,8 @@ class BulkRnaSeqAdapter(PipelineAdapter):
 
     @property
     def workflow_directory(self) -> Path:
-        return self.repository_root / "workflows" / "bulk_rnaseq"
+        root, _, _ = pipeline_sources.resolve_active_root(self.pipeline_identifier)
+        return root
 
     def runner_working_directory(self, project_root: Path) -> Path:
         """Keep Nextflow session state in the writable saved project directory."""
@@ -245,7 +247,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
         ]
 
     def inspect_availability(self) -> PipelineStatusResult:
-        workflow = self.repository_root / "workflows" / "bulk_rnaseq" / "main.nf"
+        workflow = self.workflow_directory / "main.nf"
         return PipelineStatusResult(
             pipeline_identifier=self.pipeline_identifier,
             pipeline_version=self.pipeline_version,
@@ -271,7 +273,7 @@ class BulkRnaSeqAdapter(PipelineAdapter):
         manifest_path: Path | None = None,
         job_identifier: str | None = None,
     ) -> list[str]:
-        workflow = self.repository_root / "workflows" / "bulk_rnaseq" / "main.nf"
+        workflow = self.workflow_directory / "main.nf"
         root = Path(manifest.output_directory)
         if manifest_path is None:
             if job_identifier and manifest.pipeline_version == PRODUCTION_PIPELINE_VERSION:
@@ -284,6 +286,8 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             str(root / "logs" / "nextflow-engine.log"),
             "run",
             str(workflow),
+            "-c",
+            str(workflow.parent / "nextflow.config"),
             "-profile",
             manifest.execution_profile.value,
             "-resume",
@@ -352,6 +356,11 @@ class BulkRnaSeqAdapter(PipelineAdapter):
                     warnings.append(f"Could not read size for {path.name}")
 
         root = Path(manifest.output_directory)
+        _, source_type, revision_id = pipeline_sources.resolve_active_root(self.pipeline_identifier)
+        if source_type == "custom":
+            warnings.append(
+                "Custom Modified Pipeline: this run will use user-modified workflow code."
+            )
         return RunPlan(
             project_identifier=str(manifest.project_identifier),
             pipeline_identifier=self.pipeline_identifier,
@@ -364,6 +373,8 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             log_directory=str(root / "logs"),
             results_directory=str(root / "results"),
             warnings=warnings,
+            pipeline_source_type=source_type,
+            pipeline_revision_id=revision_id,
         )
 
     def validate_execution(

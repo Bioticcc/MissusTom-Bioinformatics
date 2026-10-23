@@ -175,6 +175,12 @@ export function RunPlanScreen({
           <div><strong>Execution unavailable</strong><p>Resolve the validation notes or enable local execution.</p></div>
         </section>
       )}
+      {currentPlan.pipeline_source_type === "custom" && (
+        <section className="development-banner warning" role="status">
+          <span className="notice-icon" aria-hidden="true">!</span>
+          <div><strong>Custom Modified Pipeline</strong><p>This run will execute user-modified {manifest.pipeline_identifier} code (revision {currentPlan.pipeline_revision_id}). Results are not guaranteed to match Missus Tom’s official validated pipeline. The original pipeline remains available for restoration.</p></div>
+        </section>
+      )}
       {error && <div className="inline-error" role="alert">{error}</div>}
       {directoryOpenFailure && manifest.output_directory === directoryOpenFailure.path && <DirectoryOpenError key={directoryOpenFailure.path} {...directoryOpenFailure} />}
       <PipelineDependencies pipelineIdentifier={manifest.pipeline_identifier} onInstalled={refreshRunPlan} />

@@ -1170,6 +1170,7 @@ def test_bulk_nextflow_runs_from_project_root_when_workflow_is_packaged_read_onl
     request.addfinalizer(lambda: workflow.chmod(0o755))
     request.addfinalizer(lambda: packaged_root.chmod(0o755))
     monkeypatch.setenv("MISSUS_TOM_RESOURCE_ROOT", str(packaged_root))
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path / "state-root"))
 
     project_root = tmp_path / project_name
     manifest_payload["pipeline_version"] = pipeline_version

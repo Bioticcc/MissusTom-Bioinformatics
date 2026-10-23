@@ -37,6 +37,7 @@ import type {
   FastqDiscoveryResult,
   HealthStatus,
   MetadataCsvResult,
+  PipelineSourceStatus,
   ProjectManifest,
   ProjectValidation,
   ProposedSample,
@@ -223,6 +224,7 @@ export function NewProjectWizard({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [backendHealth, setBackendHealth] = useState<HealthStatus | null>(null);
+  const [pipelineSources, setPipelineSources] = useState<PipelineSourceStatus[]>([]);
   const [healthReady, setHealthReady] = useState(false);
   const [savedPath, setSavedPath] = useState("");
   const [exportPath, setExportPath] = useState("");
@@ -247,6 +249,9 @@ export function NewProjectWizard({
   const [projectId, setProjectId] = useState<string>(() => initialManifest?.project_identifier ?? crypto.randomUUID());
   const [createdAt, setCreatedAt] = useState(() => initialManifest?.created_at ?? new Date().toISOString());
   const isOntPipeline = pipelineIdentifier === "ont-analysis";
+  const selectedPipelineSource = pipelineSources.find(
+    (source) => source.pipeline_identifier === pipelineIdentifier,
+  );
   const nativeExecutionUnavailable = validation?.checks.some(
     (check) => check.check_id === "native_containment" && check.status !== "passed",
   ) ?? false;
@@ -280,6 +285,17 @@ export function NewProjectWizard({
     };
     void refresh();
     return () => { live = false; if (timer !== undefined) window.clearTimeout(timer); };
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void apiRequest<PipelineSourceStatus[]>(
+      "/api/v1/pipeline-sources",
+      { signal: controller.signal },
+      { requestKind: "short" },
+    ).then(setPipelineSources).catch(() => {
+      if (!controller.signal.aborted) setPipelineSources([]);
+    });
+    return () => controller.abort();
   }, []);
   const steps = useMemo(
     () => (isOntPipeline ? ontSteps : bulkSteps).map((label, index) => (
@@ -1141,8 +1157,9 @@ export function NewProjectWizard({
             <p className="setup-guidance"><strong>Need another pipeline?</strong> You can install its requirements here from the Local setup section below without returning to first-launch setup.</p>
             <fieldset className="run-mode-panel setup-mode-panel" disabled={Boolean(initialManifest)}>
               <legend>Pipeline</legend>
-              <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end)</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
-              <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse)</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
+              <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end) {pipelineSources.find((source) => source.pipeline_identifier === "bulk-rnaseq")?.source_type === "custom" && <span className="modified-pipeline-badge"><span aria-hidden="true">!</span> Modified by user</span>}</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
+              <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse) {pipelineSources.find((source) => source.pipeline_identifier === "ont-analysis")?.source_type === "custom" && <span className="modified-pipeline-badge"><span aria-hidden="true">!</span> Modified by user</span>}</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
+              {selectedPipelineSource?.source_type === "custom" && <p className="run-mode-note modified-pipeline-warning"><strong>Modified pipeline selected.</strong> The next run for this project will use user-modified code from revision {selectedPipelineSource.active_revision_id}. This applies to new and existing projects that use this pipeline.</p>}
             </fieldset>
             <PipelineDependencies pipelineIdentifier={pipelineIdentifier} />
             {!isOntPipeline && <fieldset className="run-mode-panel setup-mode-panel">

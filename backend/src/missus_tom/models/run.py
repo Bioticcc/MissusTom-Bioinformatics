@@ -39,6 +39,8 @@ class RunPlan(BaseModel):
     log_directory: str
     results_directory: str
     warnings: list[str] = Field(default_factory=list)
+    pipeline_source_type: str = "official"
+    pipeline_revision_id: str | None = None
 
 
 class PipelineStatusResult(BaseModel):
@@ -117,6 +119,9 @@ class RunRecord(BaseModel):
     container_cleanup_required: bool = False
     container_cleanup_verified_at: datetime | None = None
     execution_manifest_path: str | None = None
+    pipeline_source_type: str = "official"
+    pipeline_revision_id: str | None = None
+    pipeline_source_checksums: dict[str, str] = Field(default_factory=dict)
 
 
 class RunLog(BaseModel):

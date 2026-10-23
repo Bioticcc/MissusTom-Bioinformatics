@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type TextExportKind = "settings" | "log";
+export type UninstallStatus = { supported: boolean; package_name?: string | null; command?: string | null; message: string };
 
 export function isDesktopShell() {
   return "__TAURI_INTERNALS__" in window;
@@ -93,4 +94,9 @@ export async function closeMainWindow(): Promise<void> {
 export async function isMainWindowMaximized(): Promise<boolean> {
   if (!isDesktopShell()) return false;
   return getCurrentWindow().isMaximized();
+}
+
+export async function getUninstallStatus(): Promise<UninstallStatus> {
+  if (!isDesktopShell()) return { supported: false, message: "Application removal is unavailable from a development build." };
+  return invoke<UninstallStatus>("uninstall_status");
 }

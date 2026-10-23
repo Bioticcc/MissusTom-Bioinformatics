@@ -35,7 +35,13 @@ export interface BackendDiagnostics {
   slow_requests: Array<{ path: string; status_code: number; duration_ms: number; completed_at: string }>;
 }
 
-export type ViewId = "dashboard" | "setup" | "wizard" | "run-plan" | "jobs" | "results" | "settings";
+export type ViewId = "dashboard" | "setup" | "wizard" | "run-plan" | "jobs" | "results" | "learn" | "settings";
+
+export interface PipelineSourceFile { path: string; description: string; language: string; size_bytes: number; checksum: string; }
+export interface PipelineSourceStatus { pipeline_identifier: string; display_name: string; source_type: "official" | "custom" | "custom-unavailable"; active_revision_id?: string | null; revision_id?: string | null; source_version: string; files: PipelineSourceFile[]; }
+export interface PipelineSourceContent { pipeline_identifier: string; path: string; content: string; checksum: string; source_type: string; revision_id?: string | null; }
+export interface PipelineRevision { revision_id: string; pipeline_identifier: string; created_at: string; source_version: string; files: PipelineSourceFile[]; active: boolean; }
+export interface PipelineDifference { path: string; diff: string; }
 
 export interface ErrorDetail {
   code: string;
@@ -204,6 +210,8 @@ export interface RunPlan {
   log_directory: string;
   results_directory: string;
   warnings: string[];
+  pipeline_source_type: "official" | "custom";
+  pipeline_revision_id?: string | null;
 }
 
 export interface PipelineDependencyRequirement {

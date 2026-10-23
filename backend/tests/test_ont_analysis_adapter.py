@@ -98,6 +98,7 @@ def test_ont_runner_working_directory_remains_its_installed_workflow(tmp_path: P
 def test_ont_adapter_uses_packaged_runner_when_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path / "state"))
     runner = tmp_path / "ont-analysis-runner-linux-x86_64"
     monkeypatch.setenv("MISSUS_TOM_ONT_RUNNER", str(runner))
 

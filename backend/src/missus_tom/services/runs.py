@@ -39,6 +39,7 @@ from missus_tom.services.bulk_references import (
 )
 from missus_tom.services.dependencies import runtime_environment
 from missus_tom.services.nextflow_task_output import NextflowTaskOutput
+from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resource_monitor import CHECK_INTERVAL_SECONDS, ResourceMonitor
 from missus_tom.services.run_containment import (
@@ -144,6 +145,13 @@ class RunManager:
             validator(manifest)
         job_identifier = str(uuid4())
         root = Path(manifest.output_directory)
+        source_root, source_type, revision_id = pipeline_sources.resolve_active_root(
+            manifest.pipeline_identifier
+        )
+        source_checksums = {
+            item.path: item.checksum
+            for item in pipeline_sources.status(manifest.pipeline_identifier).files
+        }
         command = adapter.construct_command(manifest, start_stage=start_stage)
         self._make_engine_log_unique(command, root, job_identifier)
         if not resume:
@@ -194,6 +202,9 @@ class RunManager:
                 container_cleanup_required=(
                     is_nextflow_command and manifest.execution_profile.value == "docker"
                 ),
+                pipeline_source_type=source_type,
+                pipeline_revision_id=revision_id,
+                pipeline_source_checksums=source_checksums,
             )
             self._records[job_identifier] = record
             self._locks[job_identifier] = locks

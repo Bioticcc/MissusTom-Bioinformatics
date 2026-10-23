@@ -10,6 +10,7 @@ from missus_tom.models.preflight import PreflightCheck
 from missus_tom.models.run import PipelineStatusResult, PlannedStage, RunPlan, RunStartStage
 from missus_tom.pipeline_adapters.base import PipelineAdapter
 from missus_tom.services.dependencies import ONT_R_PACKAGES, runtime_environment, runtime_tool
+from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import ont_analysis_preflight
 from missus_tom.services.projects import read_project_manifest
 from missus_tom.services.resources import execution_resource_checks, validate_execution_resources
@@ -36,7 +37,8 @@ class OntAnalysisAdapter(PipelineAdapter):
 
     @property
     def workflow_directory(self) -> Path:
-        return self.repository_root / "workflows" / "ont_analysis"
+        root, _, _ = pipeline_sources.resolve_active_root(self.pipeline_identifier)
+        return root
 
     @property
     def runner_path(self) -> Path:
@@ -121,7 +123,16 @@ class OntAnalysisAdapter(PipelineAdapter):
     ) -> list[str]:
         del start_stage  # The ONT runner owns its restartable internal stages.
         runner = settings.ont_runner
-        command = [str(runner)] if runner is not None else [sys.executable, str(self.runner_path)]
+        root, source_type, _ = pipeline_sources.resolve_active_root(self.pipeline_identifier)
+        # The packaged sidecar embeds Python and has an explicit source-root
+        # entry point, so custom source does not depend on an arbitrary system
+        # interpreter. Development continues to use its managed interpreter.
+        if runner is not None:
+            command = [str(runner)]
+            if source_type == "custom":
+                command.extend(["--source-root", str(root)])
+        else:
+            command = [sys.executable, str(root / "run_pipeline.py")]
         return [
             *command,
             "--manifest",
@@ -168,6 +179,11 @@ class OntAnalysisAdapter(PipelineAdapter):
             if path.is_file()
         )
         root = Path(manifest.output_directory)
+        _, source_type, revision_id = pipeline_sources.resolve_active_root(self.pipeline_identifier)
+        if source_type == "custom":
+            warnings.append(
+                "Custom Modified Pipeline: this run will use user-modified workflow code."
+            )
         return RunPlan(
             project_identifier=str(manifest.project_identifier),
             pipeline_identifier=self.pipeline_identifier,
@@ -180,6 +196,8 @@ class OntAnalysisAdapter(PipelineAdapter):
             log_directory=str(root / "logs"),
             results_directory=str(root / "results"),
             warnings=warnings,
+            pipeline_source_type=source_type,
+            pipeline_revision_id=revision_id,
         )
 
     def validate_execution(
