@@ -21,6 +21,14 @@ tables, and figures.
 `main.nf` connects all of these files. A run must use matching copies from the
 same saved pipeline revision.
 
+## Reading the appendices
+
+Each executable source file has numbered appendix references beside its major
+functions or blocks. If a piece of code is difficult to follow, find its
+appendix number and look at the appendix at the bottom of that same file. The
+appendix gives a plain-English pseudocode version of the existing behavior; it
+does not change how the pipeline runs.
+
 ## Before changing a file
 
 - Start with one small change and keep notes about why you made it.

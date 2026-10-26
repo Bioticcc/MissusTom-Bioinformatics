@@ -46,6 +46,8 @@ desktop/src-tauri/gen/
 *.hdf5
 work/
 results/
+# Deleted local Bulk RNA-seq backup artifacts; never commit or regenerate here.
+bios_backup_results/
 
 # Editor / OS
 .DS_Store

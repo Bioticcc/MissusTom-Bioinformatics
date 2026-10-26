@@ -175,6 +175,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           release_version="${RELEASE_TAG#v}"
+          release_title=$(git tag -l --format='%(contents:subject)' "${RELEASE_TAG}")
+          expected_title="Missus Tom ${RELEASE_TAG}: "
+          if [[ "${release_title}" != "${expected_title}"* ]]; then
+            echo "Annotated tag message must start with: ${expected_title}<short title>" >&2
+            exit 1
+          fi
           release_flags=()
           if [[ "${release_version}" == *-* ]]; then
             release_flags+=(--prerelease)
@@ -196,7 +202,7 @@ jobs:
               --repo "${GH_REPO}"
           else
             gh release create "${RELEASE_TAG}" "${release_assets[@]}" \
-              --title "Missus Tom ${RELEASE_TAG}" \
+              --title "${release_title}" \
               --generate-notes \
               --repo "${GH_REPO}" \
               "${release_flags[@]}"

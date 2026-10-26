@@ -90,6 +90,7 @@ adjust_for_batch_effects <- adjust_for_batch_effects == "true"
 # FUNCTION: Report progress to the workflow log
 # PURPOSE: Write a message immediately so the desktop log shows the current
 # analysis step. INPUTS: message fragments. OUTPUT: no data value.
+# APPENDIX: 1.1
 # -----------------------------------------------------------------------------
 progress_message <- function(...) {
   message(...)
@@ -97,6 +98,7 @@ progress_message <- function(...) {
 }
 
 # Create the stable output layout before any result is written.
+# APPENDIX: 1.2
 for (directory in c("differential_expression", "figures", "tables")) {
   dir.create(file.path(output_root, directory), recursive = TRUE, showWarnings = FALSE)
 }
@@ -145,6 +147,7 @@ if (!all(requested_interventions %in% unique(samples$intervention))) {
 # PURPOSE: Ensure every transcript identifier maps consistently to one gene
 # before tximport combines Kallisto transcript estimates. INPUT: TSV path.
 # OUTPUT: validated two-column mapping table. Stops on malformed mappings.
+# APPENDIX: 2.1
 # -----------------------------------------------------------------------------
 read_transcript_to_gene <- function(path) {
   progress_message("Loading transcript-to-gene mapping")
@@ -308,6 +311,7 @@ write.table(
 )
 
 quant_files <- samples$abundance_tsv
+# APPENDIX: 2.2
 names(quant_files) <- samples$sample_id
 progress_message("Importing Kallisto abundance tables")
 txi <- tximport(
@@ -325,6 +329,7 @@ txi <- tximport(
 
 # Save one ggplot in the existing PDF and PNG formats. Inputs are the plot,
 # filename stem, and dimensions; the two image files are its side effects.
+# APPENDIX: 3.1
 save_ggplot <- function(plot, stem, width = 8, height = 6) {
   ggsave(paste0(stem, ".png"), plot, width = width, height = height, dpi = 160)
   ggsave(paste0(stem, ".pdf"), plot, width = width, height = height)
@@ -332,6 +337,7 @@ save_ggplot <- function(plot, stem, width = 8, height = 6) {
 
 # Draw an expression heatmap with sample-group annotation. The matrix contains
 # genes by samples; this writes the requested image without changing its data.
+# APPENDIX: 3.2
 plot_heatmap <- function(matrix, annotation_groups, case_group, filename, title, width = 1100, height = 900) {
   colors <- colorRampPalette(c("#173331", "#f7faf8", "#a23b3b"))(100)
   png(filename, width = width, height = height, res = 130)
@@ -349,6 +355,7 @@ plot_heatmap <- function(matrix, annotation_groups, case_group, filename, title,
 }
 
 # Escape text before it is inserted into the self-contained PCA HTML report.
+# APPENDIX: 3.3
 html_escape <- function(value) {
   value <- gsub("&", "&amp;", value, fixed = TRUE)
   value <- gsub("<", "&lt;", value, fixed = TRUE)
@@ -358,6 +365,7 @@ html_escape <- function(value) {
 
 # Write the interactive-free HTML PCA summary from already calculated PCA data.
 # PCA (principal component analysis) summarizes major expression variation.
+# APPENDIX: 3.4
 write_pca_html <- function(pca_df, percent_var, filename, title, case_group) {
   if (!all(c("PC1", "PC2", "PC3") %in% colnames(pca_df))) {
     stop("3D PCA HTML requires PC1, PC2, and PC3 columns")
@@ -389,6 +397,7 @@ write_pca_html <- function(pca_df, percent_var, filename, title, case_group) {
 }
 
 # Record why a requested analysis class was skipped, preserving provenance.
+# APPENDIX: 3.5
 write_skip_rationale <- function(output_root, analysis_name, comparison_id, rationale) {
   table_dir <- file.path(output_root, "tables", analysis_name, comparison_id)
   dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
@@ -401,6 +410,7 @@ write_skip_rationale <- function(output_root, analysis_name, comparison_id, rati
 
 # Build the existing all-gene and, when annotated, biotype-specific analysis
 # classes. Inputs are gene results and annotations; output is named gene sets.
+# APPENDIX: 4.1
 build_analysis_classes <- function(all_genes, gene_annotation, has_gene_biotype) {
   classes <- list(all_genes = all_genes)
   skips <- list()
@@ -441,16 +451,19 @@ optional_de_generated <- c(mRNA = FALSE, lncRNA = FALSE)
 output_contract_rows <- list()
 
 # Convert an internal class key into the existing reader-facing label.
+# APPENDIX: 4.2
 analysis_class_label <- function(analysis_name) {
   if (analysis_name == "all_genes") "all-gene" else analysis_name
 }
 
 # Check whether an expected output exists and is not an empty file.
+# APPENDIX: 4.3
 artifact_path_nonempty <- function(path) {
   isTRUE(file.exists(path)) && isTRUE(file.info(path)$size > 0)
 }
 
 # Store output paths relative to the result root for portable provenance tables.
+# APPENDIX: 4.4
 relative_output_path <- function(path) {
   root <- normalizePath(output_root, winslash = "/", mustWork = FALSE)
   normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
@@ -459,6 +472,7 @@ relative_output_path <- function(path) {
 }
 
 # Add one artifact row to the in-memory output contract used at export time.
+# APPENDIX: 4.5
 record_output_contract <- function(
   comparison_id,
   analysis_class,
@@ -484,6 +498,7 @@ record_output_contract <- function(
 }
 
 # Record a generated file only when it is present and non-empty.
+# APPENDIX: 4.6
 record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_path, rationale = "") {
   rel <- relative_output_path(abs_path)
   if (artifact_path_nonempty(abs_path)) {
@@ -501,6 +516,7 @@ record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_pa
 }
 
 # Record an intentionally skipped artifact with an explanation for the user.
+# APPENDIX: 4.7
 record_artifact_skipped <- function(comparison_id, analysis_class, artifact, rationale) {
   record_output_contract(comparison_id, analysis_class, artifact, "skipped", "", rationale)
 }
@@ -510,6 +526,7 @@ record_artifact_skipped <- function(comparison_id, analysis_class, artifact, rat
 # =============================================================================
 
 # Make a safe, unique existing filename stem from the requested title and ID.
+# APPENDIX: 5.1
 safe_figure_filename <- function(title, figure_id, prior_stems) {
   stem <- gsub("[^A-Za-z0-9._-]+", "_", trimws(title))
   stem <- gsub("_+", "_", stem)
@@ -521,6 +538,7 @@ safe_figure_filename <- function(title, figure_id, prior_stems) {
 }
 
 # Apply only the already validated optional manual axis limits to a ggplot.
+# APPENDIX: 5.2
 apply_custom_axes <- function(plot, spec) {
   # Read an optional numeric axis bound while preserving invalid values as NA.
   numeric_value <- function(column) suppressWarnings(as.numeric(spec[[column]][[1]]))
@@ -533,6 +551,7 @@ apply_custom_axes <- function(plot, spec) {
 }
 
 # Select the requested existing DESeq2 result metric for a custom scatterplot.
+# APPENDIX: 5.3
 metric_values <- function(result_df, variable) {
   source <- switch(variable,
     base_mean = result_df$baseMean,
@@ -551,6 +570,7 @@ metric_values <- function(result_df, variable) {
 
 # Generate configured figures from existing analysis objects. It writes files
 # and metadata; it does not change any DESeq2 calculation or default figure.
+# APPENDIX: 5.4
 generate_custom_figures <- function(comparison_id, class_label, result_df, rlog_matrix, normalized_counts, selected_samples, significant) {
   if (nrow(custom_figures) == 0) return(invisible(NULL))
   custom_root <- file.path(output_root, "figures", "custom", comparison_id)
@@ -630,6 +650,7 @@ analysis_artifacts <- c(
 )
 
 # Record every standard artifact as skipped for an unavailable gene class.
+# APPENDIX: 5.5
 record_class_skipped <- function(comparison_id, analysis_class, rationale) {
   for (artifact in analysis_artifacts) {
     record_artifact_skipped(comparison_id, analysis_class, artifact, rationale)
@@ -642,6 +663,7 @@ record_class_skipped <- function(comparison_id, analysis_class, rationale) {
 
 # Fit the existing DESeq2 model, using gene-wise dispersions only for very
 # small valid gene sets where the standard dispersion trend cannot be fitted.
+# APPENDIX: 6.1
 run_deseq_robust <- function(dds) {
   tryCatch(
     DESeq(dds, quiet = TRUE),
@@ -663,6 +685,7 @@ run_deseq_robust <- function(dds) {
 
 # Each comparison is analyzed independently so its requested numerator,
 # denominator, optional intervention, and output directory remain traceable.
+# APPENDIX: 6.2
 for (comparison_index in seq_len(nrow(comparisons))) {
   comparison_id <- comparisons$comparison_id[[comparison_index]]
   progress_message(sprintf("Preparing comparison %s", comparison_id))
@@ -1278,6 +1301,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
 # =============================================================================
 # SECTION 7: CROSS-COMPARISON SUMMARY EXPORTS
 # =============================================================================
+# APPENDIX: 7.1
 # After all comparisons finish, combine their recorded status rows into the
 # existing project-level summary tables and figures.
 
@@ -1350,3 +1374,47 @@ write.table(
   row.names = FALSE
 )
 progress_message("Analysis complete")
+
+# =============================================================================
+# APPENDICES: PLAIN-ENGLISH PSEUDOCODE
+# =============================================================================
+# These appendices describe the existing functions and major analysis blocks.
+# They are explanatory only and do not change the statistical analysis.
+#
+# SECTION 1
+# Appendix 1.1 — Send a progress message to the workflow log immediately.
+# Appendix 1.2 — Read ten arguments, validate settings and input tables, then create result directories.
+#
+# SECTION 2
+# Appendix 2.1 — Read, clean, deduplicate, and validate transcript-to-gene mappings.
+# Appendix 2.2 — Import Kallisto abundance tables with tximport using that validated mapping.
+#
+# SECTION 3
+# Appendix 3.1 — Save one ggplot as both PNG and PDF.
+# Appendix 3.2 — Draw and save a scaled expression heatmap with sample-group colors.
+# Appendix 3.3 — Escape special text before inserting it into HTML.
+# Appendix 3.4 — Project calculated PCA coordinates into a self-contained HTML SVG plot.
+# Appendix 3.5 — Write the reason an optional analysis class was skipped.
+#
+# SECTION 4
+# Appendix 4.1 — Build all-gene, mRNA, and lncRNA gene sets, recording unavailable classes.
+# Appendix 4.2 — Convert the internal all_genes name to the reader-facing all-gene label.
+# Appendix 4.3 — Return true only for an existing, non-empty output file.
+# Appendix 4.4 — Convert an absolute result path into a portable path relative to the output root.
+# Appendix 4.5 — Add one status row to the in-memory output contract.
+# Appendix 4.6 — Record a generated file as successful, or record its expected path as failed.
+# Appendix 4.7 — Record an intentionally skipped artifact with its explanation.
+#
+# SECTION 5
+# Appendix 5.1 — Make a safe, timestamped, unique filename stem for a custom figure.
+# Appendix 5.2 — Apply valid user-requested x/y limits without discarding plotted data.
+# Appendix 5.3 — Return the requested DESeq2 result metric, or no value for an unsupported metric.
+# Appendix 5.4 — Create each requested custom figure from existing results and record its outcome.
+# Appendix 5.5 — Mark every standard artifact as skipped when its gene class is unavailable.
+#
+# SECTION 6
+# Appendix 6.1 — Fit DESeq2 normally; for very small gene sets, use the documented gene-wise fallback.
+# Appendix 6.2 — For each comparison, select samples, fit the requested design, export results and figures, and record provenance.
+#
+# SECTION 7
+# Appendix 7.1 — Combine per-comparison statuses and export cross-comparison summaries, software versions, and the output contract.

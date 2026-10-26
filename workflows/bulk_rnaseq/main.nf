@@ -35,16 +35,19 @@ nextflow.enable.dsl = 2
 // a task is submitted. They are used by the processes and workflow below.
 
 // Safely wrap one value for use in the shell command embedded in a process.
+// APPENDIX: 1.1
 String shellQuote(value) {
     "'" + value.toString().replace("'", "'\"'\"'") + "'"
 }
 
 // Normalize either one staged file or a collection of lane files into a list.
+// APPENDIX: 1.2
 List asFileList(value) {
     value instanceof Collection ? value.toList() : [value]
 }
 
 // Require a whole-number resource/admission parameter greater than zero.
+// APPENDIX: 1.3
 Integer positiveIntegerParameter(value, String parameterName) {
     try {
         def parsed = Integer.parseInt(value.toString())
@@ -56,6 +59,7 @@ Integer positiveIntegerParameter(value, String parameterName) {
 }
 
 // Require a finite decimal resource/admission parameter greater than zero.
+// APPENDIX: 1.4
 Double positiveFiniteParameter(value, String parameterName) {
     try {
         def parsed = Double.parseDouble(value.toString())
@@ -75,6 +79,7 @@ Double positiveFiniteParameter(value, String parameterName) {
  * Examines the original paired FASTQ reads and produces per-read quality
  * reports. It runs before trimming so users can see the incoming data quality.
  * On a retry it preserves the existing one-read-at-a-time native workaround.
+ * APPENDIX: 2.1
  */
 process FASTQC_RAW {
     tag "${sample_id}"
@@ -129,6 +134,7 @@ process FASTQC_RAW {
 /* PROCESS: MULTIQC_RAW
  * Combines the FastQC archive outputs into one raw-read QC report for review
  * before the reads move to Cutadapt.
+ * APPENDIX: 2.2
  */
 process MULTIQC_RAW {
     label 'multiqc'
@@ -151,6 +157,7 @@ process MULTIQC_RAW {
  * Removes configured adapter sequence and low-quality ends from paired reads.
  * Multiple lanes for one sample are concatenated exactly as before, then the
  * trimmed paired FASTQ files and Cutadapt log feed the next QC and Kallisto.
+ * APPENDIX: 2.3
  */
 process CUTADAPT_PAIRED {
     tag "${sample_id}"
@@ -199,6 +206,7 @@ process CUTADAPT_PAIRED {
 /* PROCESS: FASTQC_CLEAN
  * Repeats FastQC after trimming, allowing the raw and cleaned quality reports
  * to be compared. Its retry command intentionally matches FASTQC_RAW.
+ * APPENDIX: 2.4
  */
 process FASTQC_CLEAN {
     tag "${sample_id}"
@@ -251,6 +259,7 @@ process FASTQC_CLEAN {
 
 /* PROCESS: MULTIQC_CLEAN
  * Combines cleaned-read FastQC archives into the post-trimming QC report.
+ * APPENDIX: 2.5
  */
 process MULTIQC_CLEAN {
     label 'multiqc'
@@ -277,6 +286,7 @@ process MULTIQC_CLEAN {
  * Estimates transcript abundance from each trimmed paired FASTQ sample using
  * the supplied transcript index. Its abundance table is the input to the R
  * analysis; run_with_timeout protects this long-running external command.
+ * APPENDIX: 3.1
  */
 process KALLISTO_QUANT {
     tag "${sample_id}"
@@ -310,6 +320,7 @@ process KALLISTO_QUANT {
  * the R script expects, then runs that script once across all samples. The
  * script imports Kallisto results, performs the existing DESeq2 analysis, and
  * writes figures, tables, and differential-expression outputs.
+ * APPENDIX: 3.2
  */
 process BULK_RNASEQ_ANALYSIS {
     label 'analysis'
@@ -367,6 +378,7 @@ process BULK_RNASEQ_ANALYSIS {
  * Reads the validated manifest, checks existing design constraints, constructs
  * sample metadata, and invokes the processes above in their established order.
  * It produces the published results consumed by the desktop application.
+ * APPENDIX: 4.1
  */
 workflow {
     positiveIntegerParameter(params.max_cpus, 'max_cpus')
@@ -583,3 +595,68 @@ workflow {
         manifest_data.figure_configuration ?: [:]
     )
 }
+
+// =============================================================================
+// APPENDICES: PLAIN-ENGLISH PSEUDOCODE
+// =============================================================================
+// These appendices summarize the executable blocks above. They explain the
+// existing behavior; they do not define additional pipeline behavior.
+
+// SECTION 1: SMALL WORKFLOW HELPERS AND PARAMETER VALIDATION
+// Appendix 1.1 — shellQuote
+// - Convert one value to text and wrap it safely for a shell command.
+// - Escape any embedded single quote so the shell keeps the value intact.
+//
+// Appendix 1.2 — asFileList
+// - If the input already contains several files, return those files as a list.
+// - Otherwise, put the single input file in a one-item list.
+//
+// Appendix 1.3 — positiveIntegerParameter
+// - Try to read the setting as a whole number.
+// - Stop the workflow unless that number is at least one.
+//
+// Appendix 1.4 — positiveFiniteParameter
+// - Try to read the setting as a decimal number.
+// - Stop the workflow unless it is finite and greater than zero.
+
+// SECTION 2: RAW-READ QUALITY CONTROL AND ADAPTER TRIMMING
+// Appendix 2.1 — FASTQC_RAW
+// - For each sample, inspect every original R1 and R2 FASTQ file with FastQC.
+// - Publish the HTML reports and ZIP archives.
+// - On a Nextflow retry, inspect one file at a time and retry only native-crash exits.
+//
+// Appendix 2.2 — MULTIQC_RAW
+// - Gather all raw-read FastQC ZIP archives.
+// - Build and publish one combined raw-read MultiQC report.
+//
+// Appendix 2.3 — CUTADAPT_PAIRED
+// - For each sample, use its single lane directly or concatenate its same-read lanes.
+// - Trim configured adapters and low-quality ends while preserving read pairs.
+// - Publish the trimmed R1/R2 FASTQs and Cutadapt log.
+//
+// Appendix 2.4 — FASTQC_CLEAN
+// - Inspect each trimmed R1 and R2 FASTQ file with FastQC.
+// - Publish reports so raw and trimmed read quality can be compared.
+// - Use the same one-file-at-a-time recovery path as FASTQC_RAW on retry.
+//
+// Appendix 2.5 — MULTIQC_CLEAN
+// - Gather all cleaned-read FastQC ZIP archives.
+// - Build and publish one combined post-trimming MultiQC report.
+
+// SECTION 3: TRANSCRIPT QUANTIFICATION AND GENE-LEVEL ANALYSIS
+// Appendix 3.1 — KALLISTO_QUANT
+// - Receive one sample's trimmed paired FASTQs, transcript index, and strandedness setting.
+// - Run Kallisto with the assigned CPUs and a two-hour timeout.
+// - Publish the sample directory containing its transcript-abundance table.
+//
+// Appendix 3.2 — BULK_RNASEQ_ANALYSIS
+// - Build samples.tsv, comparisons.tsv, and custom_figures.tsv for all included samples.
+// - Limit numerical-library threads so Nextflow controls the task's CPU use.
+// - Run the R analysis once and publish its differential-expression, figure, and table directories.
+
+// SECTION 4: MANIFEST VALIDATION, CHANNELS, AND EXECUTION ORDER
+// Appendix 4.1 — workflow
+// - Validate workflow limits, manifest fields, references, and comparison design before tools run.
+// - For quantification runs, route FASTQs through QC, trimming, and Kallisto.
+// - For analysis-only runs, use the supplied abundance tables instead.
+// - Align each abundance table with its sample metadata, sort samples, and run the final R analysis.

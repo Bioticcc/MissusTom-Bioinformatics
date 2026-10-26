@@ -15,6 +15,7 @@
 set -o nounset -o pipefail
 
 # Print the stable calling convention used by main.nf and exit as bad input.
+# APPENDIX: 1.1
 usage() {
   echo "Usage: run_with_timeout TIMEOUT_SECONDS TERM_GRACE_SECONDS COMMAND..." >&2
   exit 2
@@ -48,6 +49,7 @@ watchdog_marker=$(mktemp)
 watchdog_cancel="${watchdog_marker}.cancel"
 
 # Remove coordination files on every normal or error exit.
+# APPENDIX: 1.2
 cleanup() {
   rm -f "$watchdog_marker" "$watchdog_cancel"
 }
@@ -67,6 +69,7 @@ child_pid=$!
 child_pgid=$child_pid
 
 # Count down in the background, then request TERM and finally KILL if needed.
+# APPENDIX: 2.1
 watchdog_main() {
   local remaining=$timeout_seconds
   while (( remaining > 0 )); do
@@ -97,6 +100,7 @@ watchdog_pid=$!
 # =============================================================================
 
 # Forward runner cancellation to the child process group and clean up both jobs.
+# APPENDIX: 3.1
 finish_external_signal() {
   local received_signal=$1
   local signal_status=$2
@@ -140,3 +144,16 @@ if [[ -s $watchdog_marker ]]; then
 fi
 
 exit "$status"
+
+# =============================================================================
+# APPENDICES: PLAIN-ENGLISH PSEUDOCODE
+# =============================================================================
+# SECTION 1
+# Appendix 1.1 — Print the required arguments and exit with a bad-input status.
+# Appendix 1.2 — Delete temporary watchdog files whenever this helper exits.
+#
+# SECTION 2
+# Appendix 2.1 — Count down; on expiry, mark the timeout, send TERM, wait, then send KILL if needed.
+#
+# SECTION 3
+# Appendix 3.1 — Forward cancellation signals to the supervised command, stop the watchdog, and return the matching signal status.
