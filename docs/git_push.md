@@ -46,13 +46,14 @@ git status --short
 git add .
 git commit -m "Missus Tom v0.4.5: BRS Learn and Modify scripts readability improved"
 git push origin main
+git rev-parse HEAD
 ```
 
 ## 4. Create the release
 
 ```bash
 git fetch origin --tags
-git tag -a v<version> <commit-sha> -m "Missus Tom v<version>: <short title>"
-git push origin v<version>
+git tag -a v0.4.5 <commit-sha> -m "Missus Tom v0.4.5: BRS Learn and Modify scripts readability improved"
+git push origin v0.4.5
 ```
 
