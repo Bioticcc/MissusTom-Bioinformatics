@@ -1,5 +1,41 @@
 #!/usr/bin/env Rscript
 
+# =============================================================================
+# MISSUS-TOM BULK RNA-SEQ STATISTICAL ANALYSIS
+# =============================================================================
+#
+# PURPOSE
+# This script is the final analysis stage of the Bulk RNA-seq workflow. It
+# imports Kallisto transcript-abundance tables, combines transcripts into
+# genes, runs the existing DESeq2 comparisons, and writes tables and figures.
+#
+# PIPELINE PLACEMENT
+# main.nf runs this after FastQC checks raw and trimmed FASTQ reads, Cutadapt
+# trims adapters, and Kallisto quantifies each sample. Its outputs are the
+# differential-expression results, quality-control figures, and provenance
+# files published by the workflow and displayed by Missus-Tom.
+#
+# INPUTS AND OUTPUTS
+# Inputs are sample metadata, a transcript-to-gene map, comparison definitions,
+# numerical thresholds, design settings, custom-figure settings, and Kallisto
+# abundance.tsv files. Outputs are tables/, figures/, and
+# differential_expression/ directories beneath the supplied output directory.
+#
+# TERMS
+# FASTQ is the standard text format for sequenced reads. A transcript is one
+# RNA product of a gene. Normalization accounts for differing sequencing depth.
+# A log2 fold change describes the expression ratio between two groups on a
+# symmetric scale. An adjusted p-value controls false discoveries when many
+# genes are tested. A batch is a technical grouping that can optionally be
+# included in the statistical design.
+# =============================================================================
+
+# =============================================================================
+# SECTION 1: CONSTANTS, PACKAGES, AND COMMAND-LINE INPUT VALIDATION
+# =============================================================================
+# The workflow calls this script with exactly ten positional arguments. Keep
+# their order synchronized with BULK_RNASEQ_ANALYSIS in main.nf.
+
 # Optional gene-class outputs use exact biotype matches only (no pattern grep).
 # Accepted lncRNA gene_biotype values are listed in ACCEPTED_LNCRNA_GENE_BIOTYPES
 # below and in docs/workflows/bulk_rnaseq/README.md.
@@ -50,11 +86,17 @@ if (!adjust_for_batch_effects %in% c("true", "false")) {
 }
 adjust_for_batch_effects <- adjust_for_batch_effects == "true"
 
+# -----------------------------------------------------------------------------
+# FUNCTION: Report progress to the workflow log
+# PURPOSE: Write a message immediately so the desktop log shows the current
+# analysis step. INPUTS: message fragments. OUTPUT: no data value.
+# -----------------------------------------------------------------------------
 progress_message <- function(...) {
   message(...)
   flush.console()
 }
 
+# Create the stable output layout before any result is written.
 for (directory in c("differential_expression", "figures", "tables")) {
   dir.create(file.path(output_root, directory), recursive = TRUE, showWarnings = FALSE)
 }
@@ -94,6 +136,16 @@ if (!all(requested_interventions %in% unique(samples$intervention))) {
   stop("One or more comparisons reference an unknown intervention")
 }
 
+# =============================================================================
+# SECTION 2: INPUT TABLES AND TRANSCRIPT-TO-GENE MAPPING
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# FUNCTION: Read and validate the transcript-to-gene map
+# PURPOSE: Ensure every transcript identifier maps consistently to one gene
+# before tximport combines Kallisto transcript estimates. INPUT: TSV path.
+# OUTPUT: validated two-column mapping table. Stops on malformed mappings.
+# -----------------------------------------------------------------------------
 read_transcript_to_gene <- function(path) {
   progress_message("Loading transcript-to-gene mapping")
   mapping <- read.delim(path, stringsAsFactors = FALSE, check.names = FALSE)
@@ -267,11 +319,19 @@ txi <- tximport(
   countsFromAbundance = "no"
 )
 
+# =============================================================================
+# SECTION 3: PLOTTING AND HUMAN-READABLE REPORT HELPERS
+# =============================================================================
+
+# Save one ggplot in the existing PDF and PNG formats. Inputs are the plot,
+# filename stem, and dimensions; the two image files are its side effects.
 save_ggplot <- function(plot, stem, width = 8, height = 6) {
   ggsave(paste0(stem, ".png"), plot, width = width, height = height, dpi = 160)
   ggsave(paste0(stem, ".pdf"), plot, width = width, height = height)
 }
 
+# Draw an expression heatmap with sample-group annotation. The matrix contains
+# genes by samples; this writes the requested image without changing its data.
 plot_heatmap <- function(matrix, annotation_groups, case_group, filename, title, width = 1100, height = 900) {
   colors <- colorRampPalette(c("#173331", "#f7faf8", "#a23b3b"))(100)
   png(filename, width = width, height = height, res = 130)
@@ -288,6 +348,7 @@ plot_heatmap <- function(matrix, annotation_groups, case_group, filename, title,
   }, finally = dev.off())
 }
 
+# Escape text before it is inserted into the self-contained PCA HTML report.
 html_escape <- function(value) {
   value <- gsub("&", "&amp;", value, fixed = TRUE)
   value <- gsub("<", "&lt;", value, fixed = TRUE)
@@ -295,10 +356,13 @@ html_escape <- function(value) {
   value
 }
 
+# Write the interactive-free HTML PCA summary from already calculated PCA data.
+# PCA (principal component analysis) summarizes major expression variation.
 write_pca_html <- function(pca_df, percent_var, filename, title, case_group) {
   if (!all(c("PC1", "PC2", "PC3") %in% colnames(pca_df))) {
     stop("3D PCA HTML requires PC1, PC2, and PC3 columns")
   }
+  # Map a numerical PCA coordinate into the fixed SVG drawing area.
   project <- function(values, low, high) {
     span <- diff(range(values))
     if (!is.finite(span) || span == 0) return(rep((low + high) / 2, length(values)))
@@ -324,12 +388,19 @@ write_pca_html <- function(pca_df, percent_var, filename, title, case_group) {
   writeLines(html, filename, useBytes = TRUE)
 }
 
+# Record why a requested analysis class was skipped, preserving provenance.
 write_skip_rationale <- function(output_root, analysis_name, comparison_id, rationale) {
   table_dir <- file.path(output_root, "tables", analysis_name, comparison_id)
   dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
   writeLines(rationale, file.path(table_dir, "skip_rationale.txt"), useBytes = TRUE)
 }
 
+# =============================================================================
+# SECTION 4: OUTPUT PROVENANCE AND OPTIONAL GENE CLASSES
+# =============================================================================
+
+# Build the existing all-gene and, when annotated, biotype-specific analysis
+# classes. Inputs are gene results and annotations; output is named gene sets.
 build_analysis_classes <- function(all_genes, gene_annotation, has_gene_biotype) {
   classes <- list(all_genes = all_genes)
   skips <- list()
@@ -369,14 +440,17 @@ optional_skip_log <- list()
 optional_de_generated <- c(mRNA = FALSE, lncRNA = FALSE)
 output_contract_rows <- list()
 
+# Convert an internal class key into the existing reader-facing label.
 analysis_class_label <- function(analysis_name) {
   if (analysis_name == "all_genes") "all-gene" else analysis_name
 }
 
+# Check whether an expected output exists and is not an empty file.
 artifact_path_nonempty <- function(path) {
   isTRUE(file.exists(path)) && isTRUE(file.info(path)$size > 0)
 }
 
+# Store output paths relative to the result root for portable provenance tables.
 relative_output_path <- function(path) {
   root <- normalizePath(output_root, winslash = "/", mustWork = FALSE)
   normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
@@ -384,6 +458,7 @@ relative_output_path <- function(path) {
   sub(pattern, "", normalized)
 }
 
+# Add one artifact row to the in-memory output contract used at export time.
 record_output_contract <- function(
   comparison_id,
   analysis_class,
@@ -408,6 +483,7 @@ record_output_contract <- function(
   )
 }
 
+# Record a generated file only when it is present and non-empty.
 record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_path, rationale = "") {
   rel <- relative_output_path(abs_path)
   if (artifact_path_nonempty(abs_path)) {
@@ -424,10 +500,16 @@ record_artifact_file <- function(comparison_id, analysis_class, artifact, abs_pa
   }
 }
 
+# Record an intentionally skipped artifact with an explanation for the user.
 record_artifact_skipped <- function(comparison_id, analysis_class, artifact, rationale) {
   record_output_contract(comparison_id, analysis_class, artifact, "skipped", "", rationale)
 }
 
+# =============================================================================
+# SECTION 5: OPTIONAL CUSTOM-FIGURE HELPERS
+# =============================================================================
+
+# Make a safe, unique existing filename stem from the requested title and ID.
 safe_figure_filename <- function(title, figure_id, prior_stems) {
   stem <- gsub("[^A-Za-z0-9._-]+", "_", trimws(title))
   stem <- gsub("_+", "_", stem)
@@ -438,7 +520,9 @@ safe_figure_filename <- function(title, figure_id, prior_stems) {
   stem
 }
 
+# Apply only the already validated optional manual axis limits to a ggplot.
 apply_custom_axes <- function(plot, spec) {
+  # Read an optional numeric axis bound while preserving invalid values as NA.
   numeric_value <- function(column) suppressWarnings(as.numeric(spec[[column]][[1]]))
   x_min <- numeric_value("x_axis_minimum"); x_max <- numeric_value("x_axis_maximum")
   y_min <- numeric_value("y_axis_minimum"); y_max <- numeric_value("y_axis_maximum")
@@ -448,6 +532,7 @@ apply_custom_axes <- function(plot, spec) {
   plot
 }
 
+# Select the requested existing DESeq2 result metric for a custom scatterplot.
 metric_values <- function(result_df, variable) {
   source <- switch(variable,
     base_mean = result_df$baseMean,
@@ -464,6 +549,8 @@ metric_values <- function(result_df, variable) {
   as.numeric(source)
 }
 
+# Generate configured figures from existing analysis objects. It writes files
+# and metadata; it does not change any DESeq2 calculation or default figure.
 generate_custom_figures <- function(comparison_id, class_label, result_df, rlog_matrix, normalized_counts, selected_samples, significant) {
   if (nrow(custom_figures) == 0) return(invisible(NULL))
   custom_root <- file.path(output_root, "figures", "custom", comparison_id)
@@ -542,12 +629,19 @@ analysis_artifacts <- c(
   "comparison status table"
 )
 
+# Record every standard artifact as skipped for an unavailable gene class.
 record_class_skipped <- function(comparison_id, analysis_class, rationale) {
   for (artifact in analysis_artifacts) {
     record_artifact_skipped(comparison_id, analysis_class, artifact, rationale)
   }
 }
 
+# =============================================================================
+# SECTION 6: DESEQ2 FITTING AND COMPARISON ANALYSIS
+# =============================================================================
+
+# Fit the existing DESeq2 model, using gene-wise dispersions only for very
+# small valid gene sets where the standard dispersion trend cannot be fitted.
 run_deseq_robust <- function(dds) {
   tryCatch(
     DESeq(dds, quiet = TRUE),
@@ -567,6 +661,8 @@ run_deseq_robust <- function(dds) {
   )
 }
 
+# Each comparison is analyzed independently so its requested numerator,
+# denominator, optional intervention, and output directory remain traceable.
 for (comparison_index in seq_len(nrow(comparisons))) {
   comparison_id <- comparisons$comparison_id[[comparison_index]]
   progress_message(sprintf("Preparing comparison %s", comparison_id))
@@ -580,6 +676,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     reference_group,
     if (nzchar(intervention_filter)) paste("within", intervention_filter) else ""
   )
+  # Select only the samples represented by this comparison before building the
+  # DESeq2 design. An intervention filter narrows the same comparison further.
   selected_samples <- samples[samples$condition %in% c(reference_group, case_group), , drop = FALSE]
   if (nzchar(intervention_filter)) {
     selected_samples <- selected_samples[
@@ -628,6 +726,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     col_data$biological_replicate <- factor(selected_samples$biological_replicate)
   }
   if (adjust_for_batch_effects) col_data$batch <- factor(selected_samples$batch)
+  # The formula tells DESeq2 which variation is condition of interest and
+  # whether paired subjects and/or technical batches are existing covariates.
   design_formula <- as.formula(paste(
     "~",
     paste(c(
@@ -664,6 +764,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
 
   analysis_results <- list()
 
+  # Run the unchanged analysis once for all genes and, where annotation permits,
+  # once for each optional biological gene class.
   for (analysis_name in names(analysis_classes)) {
     class_label <- analysis_class_label(analysis_name)
     selected_genes <- intersect(rownames(comparison_txi$counts), analysis_classes[[analysis_name]])
@@ -700,6 +802,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
 
     dds <- DESeqDataSetFromTximport(class_txi, colData = col_data, design = design_formula)
+    # Retain genes with sufficient observed counts in at least the smaller
+    # condition group; this existing filter avoids testing uninformative genes.
     keep <- rowSums(counts(dds) >= 10) >= min(condition_counts[c(reference_group, case_group)])
     dds <- dds[keep, ]
     if (nrow(dds) < 2) {
@@ -728,6 +832,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     )
     progress_message(sprintf("Running DESeq2 for %s (%s)", progress_label, comparison_id))
     dds <- run_deseq_robust(dds)
+    # DESeq2 tests the requested condition contrast. Shrinkage stabilizes noisy
+    # effect-size estimates while retaining the existing statistical method.
     raw_result <- results(dds, contrast = contrast, alpha = q_value)
     result <- lfcShrink(dds, contrast = contrast, res = raw_result, type = "normal")
     result_df <- as.data.frame(result)
@@ -739,6 +845,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       "lfcSE", "stat", "pvalue", "padj"
     )]
     result_df <- result_df[order(result_df$padj, result_df$pvalue, na.last = TRUE), ]
+    # A significant gene meets both the adjusted-p-value and absolute-effect
+    # thresholds supplied by the project manifest.
     significant <- result_df[
       !is.na(result_df$padj) & result_df$padj < q_value & abs(result_df$log2FoldChange) > lfc_threshold,
     ]
@@ -805,6 +913,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     )
 
     progress_message(sprintf("Computing rlog/PCA for %s (%s)", progress_label, comparison_id))
+    # rlog transforms normalized counts for visualization; it is not used to
+    # replace the count-based DESeq2 test above.
     rld <- rlog(dds, blind = FALSE, fitType = "mean")
     rlog_matrix <- assay(rld)
     write.table(
@@ -827,6 +937,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       file.path(table_dir, "rlog_normalized_expression.tsv")
     )
 
+    # PCA summarizes the strongest sample-to-sample expression patterns.
     pca <- prcomp(t(rlog_matrix), scale. = FALSE)
     variance <- 100 * pca$sdev^2 / sum(pca$sdev^2)
     n_pc <- ncol(pca$x)
@@ -956,6 +1067,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       )
     )
     result_df$minus_log10_padj <- -log10(pmax(result_df$padj, .Machine$double.xmin))
+    # The volcano plot combines effect size (x) and statistical evidence (y).
     volcano <- ggplot(
       result_df[is.finite(result_df$log2FoldChange) & is.finite(result_df$minus_log10_padj), ],
       aes(log2FoldChange, minus_log10_padj, color = category)
@@ -1162,6 +1274,12 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     )
   }
 }
+
+# =============================================================================
+# SECTION 7: CROSS-COMPARISON SUMMARY EXPORTS
+# =============================================================================
+# After all comparisons finish, combine their recorded status rows into the
+# existing project-level summary tables and figures.
 
 summary_root <- file.path(output_root, "tables", "summary")
 dir.create(summary_root, recursive = TRUE, showWarnings = FALSE)

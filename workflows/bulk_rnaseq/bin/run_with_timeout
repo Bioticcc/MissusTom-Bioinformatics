@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
-# Run a foreground command under a helper-owned wall-clock watchdog.
-# Exit 240 only when this script initiated the timeout TERM/KILL sequence.
+# =============================================================================
+# BULK RNA-SEQ COMMAND TIMEOUT HELPER
+# =============================================================================
+# PURPOSE: Starts one external command with a wall-clock watchdog. main.nf uses
+# it for Kallisto so an unresponsive quantification task cannot run forever.
+# INPUTS: timeout seconds, termination grace seconds, then the command and args.
+# OUTPUT: the command's normal status, or 240 only when this helper timed out.
+# TERMS: TERM asks a process to stop cleanly; KILL forcibly stops it afterwards.
+# =============================================================================
+
+# =============================================================================
+# SECTION 1: ARGUMENT VALIDATION AND CLEANUP
+# =============================================================================
 set -o nounset -o pipefail
 
+# Print the stable calling convention used by main.nf and exit as bad input.
 usage() {
   echo "Usage: run_with_timeout TIMEOUT_SECONDS TERM_GRACE_SECONDS COMMAND..." >&2
   exit 2
@@ -30,13 +42,21 @@ if [[ $# -lt 1 ]]; then
   usage
 fi
 
+# These temporary files let the parent and watchdog coordinate without changing
+# the command being supervised.
 watchdog_marker=$(mktemp)
 watchdog_cancel="${watchdog_marker}.cancel"
+
+# Remove coordination files on every normal or error exit.
 cleanup() {
   rm -f "$watchdog_marker" "$watchdog_cancel"
 }
 trap cleanup EXIT
 
+# =============================================================================
+# SECTION 2: START THE ISOLATED COMMAND AND WATCHDOG
+# =============================================================================
+# Start a new process group where supported so a timeout can stop child tools.
 set +e
 if command -v setsid >/dev/null 2>&1; then
   setsid "$@" &
@@ -46,6 +66,7 @@ fi
 child_pid=$!
 child_pgid=$child_pid
 
+# Count down in the background, then request TERM and finally KILL if needed.
 watchdog_main() {
   local remaining=$timeout_seconds
   while (( remaining > 0 )); do
@@ -71,6 +92,11 @@ watchdog_main() {
 watchdog_main &
 watchdog_pid=$!
 
+# =============================================================================
+# SECTION 3: FORWARDED CANCELLATION AND FINAL EXIT STATUS
+# =============================================================================
+
+# Forward runner cancellation to the child process group and clean up both jobs.
 finish_external_signal() {
   local received_signal=$1
   local signal_status=$2

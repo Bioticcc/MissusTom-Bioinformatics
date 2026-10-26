@@ -241,6 +241,8 @@ class PipelineSourceService:
             if not active or path != "START_HERE.md":
                 raise
             relative = self._relative(self.official_root(pipeline_identifier), path)
+        if relative.name == "Output_Log_Key.md":
+            raise ValueError("Output_Log_Key.md is read-only reference documentation")
         destination_parent = self._pipeline_root(pipeline_identifier) / "revisions"
         destination_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         revision_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"

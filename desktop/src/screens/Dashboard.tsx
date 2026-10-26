@@ -252,6 +252,10 @@ export function Dashboard({
           {error ? (
             <>
               <div className="inline-error" role="alert">{error}</div>
+              <div className="warning-list" role="status">
+                <strong>Setup may be needed</strong>
+                <p>Often backend problems are caused by missing dependencies. Go to Setup and install the desired pipeline packages, then return to Dashboard; it should refresh.</p>
+              </div>
               {backendStatus?.packaged && (backendStatus.startup_error || backendStatus.startup_log) && !showBackendDiagnostics && (
                 <details className="diagnostic-details">
                   <summary>Backend startup diagnostics</summary>

@@ -1,34 +1,19 @@
 # AGENT_TODO.md
+# NOTE: From now own, KEEP completed todolist items as an archive of changes.
 
-## General TODOs
+## General TODOs:
+1.
 
-## BRS — Batch-Effect Adjustment [CODEX]
+2.
 
-- Add optional batch-effect adjustment to Bulk RNA-seq differential-expression analysis.
-- Add an **Adjust for Batch Effects** setting in Experimental Design, disabled by default.
-- Reuse the existing Batch column to identify processing batches.
-- When adjustment is enabled, include batch in the DESeq2 statistical model:
-  - **Independent samples:** `~ batch + condition`
-  - **Paired samples:** `~ batch + biological_replicate + condition`, when statistically valid.
-- Preserve the existing `~ condition` model when neither pairing nor batch adjustment is enabled.
-- Validate that required batch assignments are present and consistent.
-- Detect statistical confounding, including cases where batch and condition cannot be distinguished.
-- Detect invalid combinations of subject, batch, and condition, including models with redundant factors.
-- Block invalid designs rather than silently dropping factors or generating potentially misleading results.
-- Apply batch adjustment consistently to all-gene, mRNA, and lncRNA analyses.
-- Record batch assignments, adjustment settings, and the actual statistical model in output metadata.
-- Preserve backward compatibility with existing projects and unadjusted results.
-- Keep batch adjustment optional and avoid introducing unnecessary complexity into the default workflow.
+3.
 
-### Validation Requirements
 
-- Compare adjusted results against a trusted DESeq2 batch-adjusted example.
-- Verify unadjusted analysis preserves existing behavior.
-- Test missing batch values, confounded designs, and invalid paired/batch combinations.
-- Confirm appropriate model selection for independent, paired, batch-adjusted, and combined designs.
-- Verify batch metadata and statistical models are accurately recorded in the output.
-- Run relevant frontend, backend, and R analysis tests.
+## Completed (2026-10-26)
 
+- Marked the Bulk RNA-seq Figures step as **(Experimental)** in its stepper and page heading.
+- When Dashboard cannot reach the backend for readiness, it now points users to Setup to install the selected pipeline dependencies before returning to Dashboard.
+- The launch-time `libEGL`/Mesa/Zink output is from the WSLg graphics stack failing to initialize hardware acceleration, not Missus Tom's backend or scientific workflows. No application-source change is appropriate. Verify the Windows GPU driver and WSL/WSLg installation with `wsl --version`, then update from an elevated PowerShell with `wsl --update` and restart it with `wsl --shutdown`. If the app window renders correctly after that, the remaining terminal output is non-blocking; if not, inspect `/mnt/wslg/{weston,stderr}.log`.
 
 ## ------------------------------------- End of TODO List Items -------------------------------------
 ## Required Focused and Final Validation [CODEX]

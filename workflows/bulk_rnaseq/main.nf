@@ -1,13 +1,50 @@
+/*
+ * =============================================================================
+ * MISSUS-TOM BULK RNA-SEQ WORKFLOW
+ * =============================================================================
+ *
+ * PURPOSE
+ * This is the pipeline's traffic controller.  It describes the existing order
+ * of quality control, adapter trimming, transcript quantification, and R-based
+ * statistical analysis; it does not itself calculate gene-expression results.
+ *
+ * PIPELINE PLACEMENT
+ * The app supplies a validated project manifest before this file starts.  This
+ * workflow turns that manifest into inputs for FastQC, Cutadapt, Kallisto, and
+ * bulk_rnaseq_analysis.R, then publishes their reports and result tables.
+ *
+ * INPUTS AND OUTPUTS
+ * Inputs include paired FASTQ read files (sequencer text files), a Kallisto
+ * transcript index, transcript-to-gene mapping, and manifest comparisons.
+ * Outputs are QC reports, trimmed reads, Kallisto abundance tables, figures,
+ * differential-expression tables, and provenance tables for the application.
+ *
+ * TERMS
+ * A read is one sequenced fragment. A transcript is an RNA product; a gene can
+ * have several transcripts. Quantification estimates transcript abundance.
+ * A process is one scheduled Nextflow task, and a channel carries its outputs
+ * to the next process.
+ * =============================================================================
+ */
 nextflow.enable.dsl = 2
 
+// =============================================================================
+// SECTION 1: SMALL WORKFLOW HELPERS AND PARAMETER VALIDATION
+// =============================================================================
+// These helpers quote shell values and reject invalid resource settings before
+// a task is submitted. They are used by the processes and workflow below.
+
+// Safely wrap one value for use in the shell command embedded in a process.
 String shellQuote(value) {
     "'" + value.toString().replace("'", "'\"'\"'") + "'"
 }
 
+// Normalize either one staged file or a collection of lane files into a list.
 List asFileList(value) {
     value instanceof Collection ? value.toList() : [value]
 }
 
+// Require a whole-number resource/admission parameter greater than zero.
 Integer positiveIntegerParameter(value, String parameterName) {
     try {
         def parsed = Integer.parseInt(value.toString())
@@ -18,6 +55,7 @@ Integer positiveIntegerParameter(value, String parameterName) {
     }
 }
 
+// Require a finite decimal resource/admission parameter greater than zero.
 Double positiveFiniteParameter(value, String parameterName) {
     try {
         def parsed = Double.parseDouble(value.toString())
@@ -28,6 +66,16 @@ Double positiveFiniteParameter(value, String parameterName) {
     }
 }
 
+// =============================================================================
+// SECTION 2: RAW-READ QUALITY CONTROL AND ADAPTER TRIMMING
+// =============================================================================
+
+/*
+ * PROCESS: FASTQC_RAW
+ * Examines the original paired FASTQ reads and produces per-read quality
+ * reports. It runs before trimming so users can see the incoming data quality.
+ * On a retry it preserves the existing one-read-at-a-time native workaround.
+ */
 process FASTQC_RAW {
     tag "${sample_id}"
     label 'fastqc'
@@ -78,6 +126,10 @@ process FASTQC_RAW {
     """
 }
 
+/* PROCESS: MULTIQC_RAW
+ * Combines the FastQC archive outputs into one raw-read QC report for review
+ * before the reads move to Cutadapt.
+ */
 process MULTIQC_RAW {
     label 'multiqc'
     publishDir "${params.outdir}/qc/raw", mode: 'copy', overwrite: true
@@ -95,6 +147,11 @@ process MULTIQC_RAW {
     """
 }
 
+/* PROCESS: CUTADAPT_PAIRED
+ * Removes configured adapter sequence and low-quality ends from paired reads.
+ * Multiple lanes for one sample are concatenated exactly as before, then the
+ * trimmed paired FASTQ files and Cutadapt log feed the next QC and Kallisto.
+ */
 process CUTADAPT_PAIRED {
     tag "${sample_id}"
     label 'cutadapt'
@@ -139,6 +196,10 @@ process CUTADAPT_PAIRED {
     """
 }
 
+/* PROCESS: FASTQC_CLEAN
+ * Repeats FastQC after trimming, allowing the raw and cleaned quality reports
+ * to be compared. Its retry command intentionally matches FASTQC_RAW.
+ */
 process FASTQC_CLEAN {
     tag "${sample_id}"
     label 'fastqc'
@@ -188,6 +249,9 @@ process FASTQC_CLEAN {
     """
 }
 
+/* PROCESS: MULTIQC_CLEAN
+ * Combines cleaned-read FastQC archives into the post-trimming QC report.
+ */
 process MULTIQC_CLEAN {
     label 'multiqc'
     publishDir "${params.outdir}/qc/clean", mode: 'copy', overwrite: true
@@ -205,6 +269,15 @@ process MULTIQC_CLEAN {
     """
 }
 
+// =============================================================================
+// SECTION 3: TRANSCRIPT QUANTIFICATION AND GENE-LEVEL ANALYSIS
+// =============================================================================
+
+/* PROCESS: KALLISTO_QUANT
+ * Estimates transcript abundance from each trimmed paired FASTQ sample using
+ * the supplied transcript index. Its abundance table is the input to the R
+ * analysis; run_with_timeout protects this long-running external command.
+ */
 process KALLISTO_QUANT {
     tag "${sample_id}"
     label 'kallisto'
@@ -232,6 +305,12 @@ process KALLISTO_QUANT {
     """
 }
 
+/* PROCESS: BULK_RNASEQ_ANALYSIS
+ * Builds the tab-separated sample, comparison, and custom-figure inputs that
+ * the R script expects, then runs that script once across all samples. The
+ * script imports Kallisto results, performs the existing DESeq2 analysis, and
+ * writes figures, tables, and differential-expression outputs.
+ */
 process BULK_RNASEQ_ANALYSIS {
     label 'analysis'
     publishDir "${params.outdir}", mode: 'copy', overwrite: true
@@ -276,6 +355,19 @@ process BULK_RNASEQ_ANALYSIS {
     """
 }
 
+// =============================================================================
+// SECTION 4: MANIFEST VALIDATION, CHANNELS, AND EXECUTION ORDER
+// =============================================================================
+// The workflow validates app-provided settings first, then connects outputs of
+// each process to its consumer. Analysis-only runs begin with supplied Kallisto
+// abundance files; quantification runs begin with FASTQ inputs.
+
+/*
+ * WORKFLOW: BULK RNA-SEQ
+ * Reads the validated manifest, checks existing design constraints, constructs
+ * sample metadata, and invokes the processes above in their established order.
+ * It produces the published results consumed by the desktop application.
+ */
 workflow {
     positiveIntegerParameter(params.max_cpus, 'max_cpus')
     positiveFiniteParameter(params.max_memory_gb, 'max_memory_gb')
@@ -289,6 +381,7 @@ workflow {
         error "A validated project manifest is required (--manifest)."
     }
 
+    // Load only the app-validated manifest and derive the included samples.
     manifest_file = file(params.manifest, checkIfExists: true)
     manifest_data = new groovy.json.JsonSlurper().parse(manifest_file.toFile())
     included_samples = manifest_data.samples.findAll { it.included }
@@ -336,6 +429,7 @@ workflow {
     if (!(adjust_for_batch_effects instanceof Boolean)) {
         error "adjust_for_batch_effects must be true or false."
     }
+    // Check each requested comparison before costly external tools begin.
     manifest_data.comparisons.each { comparison ->
         [comparison.numerator, comparison.denominator].each { group ->
             def matching_samples = included_samples.findAll { sample ->
@@ -373,6 +467,7 @@ workflow {
         }
     }
 
+    // Read existing manifest defaults without changing their values or meaning.
     adapter_r1 = (manifest_data.parameters.adapter_r1 ?: 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA') as String
     adapter_r2 = (manifest_data.parameters.adapter_r2 ?: 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT') as String
     trim_quality = (
@@ -399,6 +494,11 @@ workflow {
         file(manifest_data.reference_resources.transcript_to_gene as String, checkIfExists: true)
     )
 
+    // =============================================================================
+    // SECTION 5: QUANTIFICATION OR ANALYSIS-ONLY CHANNEL ASSEMBLY
+    // =============================================================================
+    // Quantification starts from paired reads. Analysis-only starts from the
+    // abundance files recorded in the manifest, skipping read-processing tasks.
     if (start_stage == 'quantification') {
         strand_flag = [reverse: '--rf-stranded', forward: '--fr-stranded', unstranded: ''][manifest_data.strandedness]
         if (strand_flag == null) {
@@ -420,6 +520,7 @@ workflow {
             file(manifest_data.reference_resources.kallisto_index as String, checkIfExists: true)
         )
 
+        // Connect each process output to the next existing workflow stage.
         FASTQC_RAW(sample_pairs)
         MULTIQC_RAW(FASTQC_RAW.out.archives.flatten().collect())
         CUTADAPT_PAIRED(sample_pairs, adapter_r1, adapter_r2, trim_quality, trim_minimum_length)

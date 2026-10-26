@@ -19,6 +19,11 @@ test("Dashboard runs the bulk RNA-seq demo through prepare and project endpoints
   assert.doesNotMatch(source, /Load human demo/);
 });
 
+test("Dashboard directs an unavailable backend to dependency setup", () => {
+  assert.match(source, /Often backend problems are caused by missing dependencies/);
+  assert.match(source, /Go to Setup and install the desired pipeline packages/);
+});
+
 test("Desktop dialogs use app-owned pickers and host-owned text exports", () => {
   assert.match(source, /import \{ isDesktopShell, selectFiles \} from "\.\.\/native"/);
   assert.match(source, /\{isDesktopShell\(\) && \([\s\S]*Open project[\s\S]*\)\}/);

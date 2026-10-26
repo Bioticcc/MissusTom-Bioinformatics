@@ -17,6 +17,15 @@ def test_start_here_guide_is_first(
     assert status.files[0].language == "markdown"
 
 
+@pytest.mark.parametrize("pipeline_identifier", ["bulk-rnaseq", "ont-analysis"])
+def test_output_log_key_is_available(
+    pipeline_identifier: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    paths = {item.path for item in PipelineSourceService().status(pipeline_identifier).files}
+    assert "Output_Log_Key.md" in paths
+
+
 def test_custom_revision_never_changes_official_source(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -57,3 +66,9 @@ def test_source_paths_are_allowlisted(tmp_path, monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
     with pytest.raises(ValueError):
         PipelineSourceService().read("bulk-rnaseq", path)
+
+
+def test_output_log_key_is_read_only(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="read-only reference"):
+        PipelineSourceService().save("bulk-rnaseq", "Output_Log_Key.md", "changed", None)

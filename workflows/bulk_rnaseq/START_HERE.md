@@ -1,5 +1,8 @@
 # Start here: Bulk RNA-seq
 
+> Pipeline guide: This introductory file comes first in Learn and Modify. It
+> explains how the executable source files fit together; it is not executed.
+
 This pipeline turns paired RNA sequencing reads into gene counts, comparisons,
 tables, and figures.
 

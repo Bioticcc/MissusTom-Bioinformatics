@@ -26,6 +26,8 @@ test("Learn and Modify uses CodeMirror with read-only and editing states", () =>
   assert.doesNotMatch(screen, /learn-introduction/);
   assert.match(screen, /Save Changes/);
   assert.match(screen, /Discard them/);
+  assert.match(screen, /Output_Log_Key\.md/);
+  assert.match(screen, /cannot be modified/);
 });
 
 test("Settings gates guided Debian uninstall behind exact confirmation", () => {
@@ -33,4 +35,11 @@ test("Settings gates guided Debian uninstall behind exact confirmation", () => {
   assert.match(settings, /getUninstallStatus/);
   assert.match(settings, /isRunActive \|\| !uninstall\.supported/);
   assert.match(settings, /Proceed to Uninstall/);
+  assert.match(settings, /button primary/);
+  assert.match(settings, /warning-actions/);
+  assert.match(settings, /Restored successfully/);
+  assert.match(settings, /restore-pipelines-status/);
+  assert.match(settings, /Command copied to your clipboard/);
+  assert.match(settings, /The command could not be copied automatically/);
+  assert.match(settings, /Uninstall command ready/);
 });

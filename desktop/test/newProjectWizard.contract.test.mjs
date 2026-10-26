@@ -167,7 +167,8 @@ test("wizard UI encodes production bulk controls", () => {
   assert.match(wizardSource, /Jump to latest/);
   assert.match(wizardSource, /validationFollow/);
   assert.match(wizardSource, /busy === "plan"/);
-  assert.match(wizardSource, /const bulkSteps = \[\s*"Project & directories",\s*"FASTQ discovery",\s*"Sample review",\s*"Experimental design",\s*"Figures",\s*"Comparisons",\s*"Pipeline options",\s*"Preflight validation",\s*"Review & save"/);
+  assert.match(wizardSource, /const bulkSteps = \[\s*"Project & directories",\s*"FASTQ discovery",\s*"Sample review",\s*"Experimental design",\s*"Figures \(Experimental\)",\s*"Comparisons",\s*"Pipeline options",\s*"Preflight validation",\s*"Review & save"/);
+  assert.match(wizardSource, /<h2>Figures \(Experimental\)<\/h2>/);
   assert.match(wizardSource, /const ontSteps = \[\s*"Project & directories",\s*"BAM selection",\s*"Sample review"/);
   assert.doesNotMatch(wizardSource, /Manage sample inputs/);
   assert.doesNotMatch(wizardSource, /sample-id-inline/);

@@ -70,7 +70,7 @@ const bulkSteps = [
   "FASTQ discovery",
   "Sample review",
   "Experimental design",
-  "Figures",
+  "Figures (Experimental)",
   "Comparisons",
   "Pipeline options",
   "Preflight validation",
@@ -1279,7 +1279,7 @@ export function NewProjectWizard({
         );
         return (
           <section className="wizard-card form-stack">
-            <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Figures</h2></div></div>
+            <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Figures (Experimental)</h2></div></div>
             <p className="helper-copy">Examples only — default figures are generated automatically when their data are available.</p>
             <div className="figure-gallery">{DEFAULT_FIGURES.map(([name, description]) => <article key={name}><div className="figure-thumbnail"><FigureThumbnail type={name} /></div><strong>{name}</strong><p>{description}</p><small>Example · included automatically</small></article>)}{figureConfiguration.custom_figures.map((figure) => <article className="custom-figure-card" key={figure.figure_id}><div className="figure-thumbnail"><FigureThumbnail type={FIGURE_TYPES[figure.figure_type].label} /></div><strong>{figure.title}</strong><p>{FIGURE_TYPES[figure.figure_type].label}{figure.x_variable ? ` · ${figure.x_variable}${figure.y_variable ? ` vs ${figure.y_variable}` : ""}` : ""}{figure.top_n ? ` · Top ${figure.top_n}` : ""}</p><small>Custom</small><div className="card-actions"><button className="text-button" type="button" onClick={() => { setFigureDraft({ ...figure, x_axis: { ...figure.x_axis }, y_axis: { ...figure.y_axis } }); setEditingFigureId(figure.figure_id); }}>Edit</button><button className="text-button danger" type="button" onClick={() => { setFigureConfiguration((current) => ({ ...current, custom_figures: current.custom_figures.filter((item) => item.figure_id !== figure.figure_id) })); invalidateValidation(); }}>Remove</button></div></article>)}</div>
             <div className="section-heading"><div><h3>Additional figures</h3><p className="helper-copy">Configure reproducible plots from the same DESeq2 model. No setup-time preview is generated.</p></div><button className="button secondary" type="button" onClick={() => { setFigureDraft(newCustomFigure("gene_metric_scatter")); setEditingFigureId(null); }}>Add a figure</button></div>

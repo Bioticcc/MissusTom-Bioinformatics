@@ -2,6 +2,11 @@
 
 ## GitHub Push/Releases
 
+- Name every release commit, annotated tag message, and GitHub release title
+  using `Missus Tom v<version>: <short title>`. Keep release-candidate versions
+  in the existing SemVer tag form. Examples:
+  - Stable: `Missus Tom v0.4.3: Learn and Modify`
+  - Release candidate: `Missus Tom v0.4.4-rc.1: Learn and Modify`
 - Do not create a release tag until the exact intended commit has passed the
   complete CI check.
 - Push the validated branch commit first, inspect the GitHub Actions result,
