@@ -56,6 +56,16 @@ def test_packaging_extra_includes_python_311_tarfile_backport() -> None:
     )
 
 
+def test_release_build_lock_includes_python_311_tarfile_backport() -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    requirements_input = (backend_root / "requirements-build.in").read_text(encoding="utf-8")
+    requirements_lock = (backend_root / "requirements-build.lock").read_text(encoding="utf-8")
+
+    assert "backports.tarfile==1.2.0; python_version < '3.12'" in requirements_input
+    assert 'backports-tarfile==1.2.0 ; python_version < "3.12"' in requirements_lock
+    assert "# via -r" in requirements_lock
+
+
 def test_sidecar_build_defaults_to_backend_venv_and_stops_without_pyinstaller(
     tmp_path: Path,
 ) -> None:
