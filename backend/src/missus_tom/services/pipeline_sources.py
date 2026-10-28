@@ -59,12 +59,25 @@ class PipelineSourceService:
         return self._pipeline_root(pipeline_identifier) / "active.json"
 
     def _read_active(self, pipeline_identifier: str) -> str | None:
-        try:
-            payload = json.loads(self._active_path(pipeline_identifier).read_text(encoding="utf-8"))
-            value = payload.get("revision_id")
-            return value if isinstance(value, str) and value else None
-        except (OSError, json.JSONDecodeError):
+        path = self._active_path(pipeline_identifier)
+        if not path.exists():
             return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError
+            value = payload.get("revision_id")
+            if not isinstance(value, str) or not value:
+                raise ValueError
+            # Reject an unsafe value here too, before any caller can treat this
+            # activation as if no custom workflow had been selected.
+            if "/" in value or "\\" in value or ".." in value:
+                raise ValueError
+            return value
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                "custom pipeline activation is invalid; restore or select a valid custom revision"
+            ) from exc
 
     def _revision_root(self, pipeline_identifier: str, revision_id: str) -> Path:
         if not revision_id or "/" in revision_id or "\\" in revision_id or ".." in revision_id:

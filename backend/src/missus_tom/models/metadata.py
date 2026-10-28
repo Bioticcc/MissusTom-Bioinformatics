@@ -22,6 +22,8 @@ class MetadataRow(BaseModel):
     biological_replicate: str | None = None
     intervention: str | None = None
     matched_sample_id: str | None = None
+    # The unmodified CSV identifier selected for this imported project sample.
+    source_sample_id: str | None = None
 
 
 class MetadataCsvResult(BaseModel):

@@ -82,7 +82,13 @@ project inputs or reference genomes.
 
 The managed ONT installer downloads the reviewed official Dorado 2.1.2 archive
 and verifies its pinned SHA-256 before extraction. Existing managed environments
-remain isolated from new installations.
+remain isolated from new installations. Bulk and ONT environments are rebuilt
+from committed explicit Linux locks; ONT includes its R/Bioconductor packages.
+Each run records its selected workflow revision and dependency-lock identity.
+
+Packaged local API changes require a random token created for that app launch.
+It protects loopback state-changing requests, but it does not protect against a
+program running as the same OS user that can inspect or control the desktop app.
 
 ## Install a Linux release
 

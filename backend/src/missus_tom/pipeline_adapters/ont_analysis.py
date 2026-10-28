@@ -9,7 +9,12 @@ from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.preflight import PreflightCheck
 from missus_tom.models.run import PipelineStatusResult, PlannedStage, RunPlan, RunStartStage
 from missus_tom.pipeline_adapters.base import PipelineAdapter
-from missus_tom.services.dependencies import ONT_R_PACKAGES, runtime_environment, runtime_tool
+from missus_tom.services.dependencies import (
+    ONT_R_PACKAGES,
+    ont_lock_provenance,
+    runtime_environment,
+    runtime_tool,
+)
 from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import ont_analysis_preflight
 from missus_tom.services.projects import read_project_manifest
@@ -183,6 +188,10 @@ class OntAnalysisAdapter(PipelineAdapter):
         if source_type == "custom":
             warnings.append(
                 "Custom Modified Pipeline: this run will use user-modified workflow code."
+            )
+        if not ont_lock_provenance()["lock_sha256"]:
+            warnings.append(
+                "ONT dependency lock is unavailable; Setup cannot reproduce this environment."
             )
         return RunPlan(
             project_identifier=str(manifest.project_identifier),

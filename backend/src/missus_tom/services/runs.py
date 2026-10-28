@@ -37,7 +37,11 @@ from missus_tom.services.bulk_references import (
     ReferenceCommandRunner,
     read_build_log_excerpt,
 )
-from missus_tom.services.dependencies import runtime_environment
+from missus_tom.services.dependencies import (
+    bulk_lock_provenance,
+    ont_lock_provenance,
+    runtime_environment,
+)
 from missus_tom.services.nextflow_task_output import NextflowTaskOutput
 from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.projects import read_project_manifest
@@ -205,6 +209,13 @@ class RunManager:
                 pipeline_source_type=source_type,
                 pipeline_revision_id=revision_id,
                 pipeline_source_checksums=source_checksums,
+                dependency_lock=(
+                    bulk_lock_provenance()
+                    if manifest.pipeline_identifier == "bulk-rnaseq"
+                    else ont_lock_provenance()
+                    if manifest.pipeline_identifier == "ont-analysis"
+                    else {}
+                ),
             )
             self._records[job_identifier] = record
             self._locks[job_identifier] = locks

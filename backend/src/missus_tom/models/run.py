@@ -122,6 +122,7 @@ class RunRecord(BaseModel):
     pipeline_source_type: str = "official"
     pipeline_revision_id: str | None = None
     pipeline_source_checksums: dict[str, str] = Field(default_factory=dict)
+    dependency_lock: dict[str, object] = Field(default_factory=dict)
 
 
 class RunLog(BaseModel):

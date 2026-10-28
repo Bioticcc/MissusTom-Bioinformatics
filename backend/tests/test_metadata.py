@@ -81,7 +81,7 @@ def test_legacy_duplicate_metadata_can_fill_old_and_new_sample_names(tmp_path: P
     metadata.write_text(
         "Patient,SampleID,Condition,Intervention,Batch\n"
         "107,107_O_W12,OW12,D,1\n"
-        "107,n107_O_W12,OW12,D,5\n",
+        "107,n107_O_W12,OW12,D,1\n",
         encoding="utf-8",
     )
 
@@ -95,5 +95,18 @@ def test_legacy_duplicate_metadata_can_fill_old_and_new_sample_names(tmp_path: P
         "107-O_W12",
         "P50Large_107_O_W12",
     }
-    assert all(row.batch == "5" for row in result.rows)
-    assert any("preferred leading-n rows" in warning for warning in result.warnings)
+    assert all(row.batch == "1" for row in result.rows)
+    assert all(row.source_sample_id == "n107_O_W12" for row in result.rows)
+    assert any("biologically equivalent" in warning for warning in result.warnings)
+
+
+def test_conflicting_normalized_legacy_duplicates_block_import(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.csv"
+    metadata.write_text(
+        "SampleID,condition,batch,biological_replicate\n"
+        "107_O_W12,control,1,mouse_a\n"
+        "n107_O_W12,treated,2,mouse_b\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="conflicting legacy identifiers"):
+        read_metadata_csv(str(metadata), ["107-O_W12"])

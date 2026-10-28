@@ -148,11 +148,12 @@ labels. The application does not enumerate the environment or transmit logs.
 
 ## Sidecar evolution
 
-Development uses separate Vite and Uvicorn processes. Later, build the Python
-API into a pinned Linux executable, register it in Tauri `externalBin`, allocate
-a loopback port, pass only named safe configuration, poll `/health`, and shut it
-down with the window. API routes and frontend types remain stable through that
-packaging change.
+Development uses separate Vite and Uvicorn processes. The packaged Python API
+is a pinned Linux executable registered in Tauri `externalBin`. The host passes
+a random per-launch token only through the sidecar environment; all mutating
+loopback requests must include it. This prevents unrelated local web clients
+from using the API, but it is not a defense against software running as the
+same OS user. The token is kept out of URLs, logs, and run provenance.
 
 ## Extensibility
 

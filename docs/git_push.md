@@ -12,6 +12,7 @@ ssh -T git@github.com
 
 ```bash
 ./scripts/dev-backend.sh
+
 cd desktop
 npm run tauri dev
 ```
@@ -34,7 +35,7 @@ git tag --list 'v*' --sort=-v:refname | head
 Use the version-update script instead of editing these fields by hand:
 
 ```bash
-./scripts/update-release-version.sh v0.4.5
+./scripts/update-release-version.sh v0.4.8
 ```
 
 ## 3. Create and push the release commit
@@ -44,7 +45,7 @@ Note: I use git add . for most things, but if you want to push specific files, b
 ```bash
 git status --short
 git add .
-git commit -m "Missus Tom v0.4.5: BRS Learn and Modify scripts readability improved"
+git commit -m "Missus Tom v0.4.: Api and metadata safety improvements"
 git push origin main
 git rev-parse HEAD
 ```
@@ -53,7 +54,7 @@ git rev-parse HEAD
 
 ```bash
 git fetch origin --tags
-git tag -a v0.4.5 <commit-sha> -m "Missus Tom v0.4.5: BRS Learn and Modify scripts readability improved"
-git push origin v0.4.5
+git tag -a v0.4.7 e633b0a6aec3adcea0f28bd0f0be9d13022e70f1 -m "Missus Tom v0.4.7: BRS Learn and Modify scripts readability improved"
+git push origin v0.4.7
 ```
 

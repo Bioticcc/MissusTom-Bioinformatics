@@ -90,20 +90,35 @@ def read_metadata_csv(path_value: str, sample_ids: list[str] | None = None) -> M
     for index, row in enumerate(rows):
         rows_by_normalized.setdefault(_normalize_sample_id(row.sample_id), []).append(index)
     chosen_by_normalized: dict[str, int] = {}
-    duplicate_metadata_ids: list[str] = []
+    equivalent_duplicate_ids: list[str] = []
     for normalized_id, indexes in rows_by_normalized.items():
+        identities = {
+            (
+                rows[index].condition,
+                rows[index].batch,
+                rows[index].biological_replicate,
+                rows[index].intervention,
+            )
+            for index in indexes
+        }
+        if len(identities) > 1:
+            originals = ", ".join(rows[index].sample_id for index in indexes)
+            raise ValueError(
+                "Metadata CSV has conflicting legacy identifiers that normalize to "
+                f"{normalized_id}: {originals}. Resolve the biological metadata before import."
+            )
         chosen_by_normalized[normalized_id] = min(
             indexes,
             key=lambda index: (not rows[index].sample_id.lower().startswith("n"), index),
         )
         if len(indexes) > 1:
-            duplicate_metadata_ids.append(normalized_id)
-    if duplicate_metadata_ids:
-        examples = ", ".join(sorted(duplicate_metadata_ids)[:8])
-        more = len(duplicate_metadata_ids) - min(len(duplicate_metadata_ids), 8)
+            equivalent_duplicate_ids.append(normalized_id)
+    if equivalent_duplicate_ids:
+        examples = ", ".join(sorted(equivalent_duplicate_ids)[:8])
+        more = len(equivalent_duplicate_ids) - min(len(equivalent_duplicate_ids), 8)
         warnings.append(
-            f"{len(duplicate_metadata_ids)} metadata identifier(s) have legacy duplicates; "
-            f"preferred leading-n rows when available: {examples}"
+            f"{len(equivalent_duplicate_ids)} metadata identifier(s) have biologically equivalent "
+            f"legacy duplicates; selected leading-n rows when available: {examples}"
             + (f" (+{more} more)" if more else "")
         )
 
@@ -118,7 +133,14 @@ def read_metadata_csv(path_value: str, sample_ids: list[str] | None = None) -> M
             unmatched_samples.append(sample_id)
             continue
         matched_row_indexes.add(row_index)
-        matched_rows.append(rows[row_index].model_copy(update={"matched_sample_id": sample_id}))
+        matched_rows.append(
+            rows[row_index].model_copy(
+                update={
+                    "matched_sample_id": sample_id,
+                    "source_sample_id": rows[row_index].sample_id,
+                }
+            )
+        )
 
     if legacy_healthy_matches:
         warnings.append(

@@ -18,9 +18,11 @@ node --input-type=module -e 'import React from "react"; import { renderToStaticM
 - Keep the polling effect stable when callers recreate the fetch function. Skip polling closed logs and stop the one-second clock for terminal logs.
 - Start finished Jobs logs closed. Show at most 131,072 recent characters while retaining all loaded text for Copy and Save.
 - Frontend lint, typecheck, complete `npm test` (57 passed, none failed or skipped), and production `npm run build` passed after the final edit.
+- Settings now provides a state-labelled diagnostics recorder with a configurable in-app start/stop shortcut. It writes timestamped NDJSON samples below the application's local data directory and records app/WebKit process-tree CPU/RAM, packaged-backend CPU/RAM, local health latency, platform/WSL context, and NVIDIA-driver presence. It never changes projects or workflows. The resulting path is shown after stopping.
 
 ## Remaining validation
 
 - On native Linux and WSL2, record the actual Missus Tom WebKit renderer, whether hardware or software rendering is in use, app/WebKit CPU and memory, and GPU activity. WebKitGTK documents `webkit://gpu/stdout` for graphics reports ([WebKitGTK release](https://webkitgtk.org/2024/09/02/webkitgtk2.45.92-released.html)); Mesa documents `glxinfo` for the OpenGL renderer ([Mesa FAQ](https://docs.mesa3d.org/faq.html)). The latter reports the display's OpenGL renderer, not proof of the renderer chosen by this WebKit view. This checkout has an NVIDIA RTX 4060 driver, WebKitGTK 2.50.6, and Mesa 22.3.6, but no running Missus Tom process, `glxinfo`, or `eglinfo`; it cannot establish the app renderer. Do not force a renderer from startup warnings alone.
 - Measure navigation time, scroll frame behavior, API latency, and resource use before and after this patch on both platforms, during idle use, validation, an active run, and large log output. Preserve scientific inputs and active runs. Compare the same workload and log size.
 - Inspect the backend only if API timing or resource measurements implicate it. Run the final non-destructive suite after the complete backlog work.
+- Manually verify the Settings control, shortcut, output path, and report contents in the packaged Linux and WSL2 applications before treating the recorder itself as accepted.

@@ -69,6 +69,30 @@ async def test_backend_shutdown_stops_owned_work(
     assert stopped is True
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/v1/runs/start",
+        "/api/v1/runs/no-such-run/cancel",
+        "/api/v1/projects/save",
+        "/api/v1/pipelines/ont-analysis/dependencies/install",
+        "/api/v1/backend/shutdown",
+    ),
+)
+async def test_mutating_requests_require_packaged_launch_token(
+    monkeypatch: pytest.MonkeyPatch, client: AsyncClient, path: str
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_API_TOKEN", "test-launch-secret")
+    unauthorized = await client.post(path)
+    assert unauthorized.status_code == 401
+    assert unauthorized.json()["errors"][0]["code"] == "local_api_unauthorized"
+
+    authorized = await client.post(
+        "/api/v1/backend/shutdown", headers={"X-Missus-Tom-Token": "test-launch-secret"}
+    )
+    assert authorized.status_code == 200
+
+
 async def test_cancel_endpoint_records_user_intent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -216,6 +240,7 @@ async def test_metadata_csv_endpoint(tmp_path: Path, client: AsyncClient) -> Non
         "biological_replicate": None,
         "intervention": None,
         "matched_sample_id": None,
+        "source_sample_id": None,
     }
 
 

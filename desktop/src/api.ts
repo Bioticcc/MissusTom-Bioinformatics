@@ -26,6 +26,7 @@ export type BackendStatus = {
 };
 
 let backendBasePromise: Promise<string> | undefined;
+let backendTokenPromise: Promise<string> | undefined;
 
 function isDesktopShell() {
   return "__TAURI_INTERNALS__" in window;
@@ -84,6 +85,25 @@ export async function getBackendStatus(): Promise<BackendStatus | undefined> {
   }
 }
 
+async function desktopAuthToken(): Promise<string | undefined> {
+  if (!isDesktopShell() || import.meta.env.VITE_API_BASE_URL) return undefined;
+  backendTokenPromise ??= invoke<string>("backend_auth_token");
+  try {
+    return await backendTokenPromise;
+  } catch (error) {
+    backendTokenPromise = undefined;
+    throw error;
+  }
+}
+
+async function requestHeaders(init: RequestInit | undefined): Promise<Headers> {
+  const headers = new Headers(init?.headers);
+  if (init?.body != null && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const token = await desktopAuthToken();
+  if (token) headers.set("X-Missus-Tom-Token", token);
+  return headers;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -133,11 +153,6 @@ export async function apiRequest<T>(
   init?: RequestInit,
   options: ApiRequestOptions = {},
 ): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body != null && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
   const controller = new AbortController();
   const timeoutMs = timeoutFor(options);
   const timeoutMessage = options.timeoutMessage ?? `The local backend request timed out after ${timeoutMs / 1000} seconds. The operation may still be running.`;
@@ -150,6 +165,7 @@ export async function apiRequest<T>(
     let response: Response;
     try {
       const apiBase = await resolveWithin(controller.signal);
+      const headers = await requestHeaders(init);
       response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal });
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
@@ -204,8 +220,9 @@ export async function streamProjectValidation(
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const apiBase = await resolveWithin(controller.signal);
+    const headers = await requestHeaders({ headers: { "Content-Type": "application/json" } });
     const response = await fetch(`${apiBase}/api/v1/projects/validate/stream`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(manifest), signal: controller.signal,
     });
     if (!response.ok) {

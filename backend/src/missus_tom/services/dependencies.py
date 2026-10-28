@@ -153,13 +153,36 @@ _BULK_LOCK_PACKAGES: Final[tuple[str, ...]] = (
     "bioconductor-tximport",
     "r-ggplot2",
 )
+_ONT_LOCK_PACKAGES: Final[tuple[str, ...]] = (
+    "samtools",
+    "htslib",
+    "mosdepth",
+    "ont-modkit",
+    "minimap2",
+    "python",
+    "r-base",
+    "r-data.table",
+    "r-ggplot2",
+    "r-ggrepel",
+    "r-scales",
+    "r-patchwork",
+    "bioconductor-genomicranges",
+    "bioconductor-iranges",
+    "bioconductor-genomeinfodb",
+    "bioconductor-rtracklayer",
+    "r-jsonlite",
+)
 
 
 def bulk_conda_lock_path() -> Path:
     return settings.packaged_resources_root / "locks" / "bulk-rnaseq-linux-64.lock"
 
 
-def _lock_package_versions(lock_path: Path) -> dict[str, str]:
+def ont_conda_lock_path() -> Path:
+    return settings.packaged_resources_root / "locks" / "ont-analysis-linux-64.lock"
+
+
+def _lock_package_versions(lock_path: Path, package_names: tuple[str, ...]) -> dict[str, str]:
     versions: dict[str, str] = {}
     if not lock_path.is_file():
         return versions
@@ -172,7 +195,7 @@ def _lock_package_versions(lock_path: Path) -> dict[str, str]:
             if filename.endswith(suffix):
                 filename = filename[: -len(suffix)]
                 break
-        for name in _BULK_LOCK_PACKAGES:
+        for name in package_names:
             token = f"{name}-"
             if filename.startswith(token):
                 versions[name] = filename[len(token) :].rsplit("-", 1)[0]
@@ -212,6 +235,22 @@ def bulk_lock_provenance(prefix: Path | None = None) -> dict[str, object]:
         "lock_sha256": digest,
         "resolved_versions": {
             name: installed[name] for name in _BULK_LOCK_PACKAGES if name in installed
+        },
+    }
+
+
+def ont_lock_provenance(prefix: Path | None = None) -> dict[str, object]:
+    lock_path = ont_conda_lock_path()
+    digest = hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else ""
+    installed = _prefix_package_versions(prefix) if prefix is not None else {}
+    if prefix is None:
+        with suppress(OSError, ValueError):
+            installed = _prefix_package_versions(_managed_bin("ont-analysis").parent)
+    return {
+        "lock_path": str(lock_path),
+        "lock_sha256": digest,
+        "resolved_versions": {
+            name: installed[name] for name in _ONT_LOCK_PACKAGES if name in installed
         },
     }
 
@@ -693,12 +732,16 @@ class DependencyInstaller:
             activated = False
             mamba = self._ensure_micromamba(staging, job)
             self._safe_directory(environment.parent)
-            if job.pipeline_identifier == "bulk-rnaseq":
-                lock_path = bulk_conda_lock_path()
+            if job.pipeline_identifier in {"bulk-rnaseq", "ont-analysis"}:
+                lock_path = (
+                    bulk_conda_lock_path()
+                    if job.pipeline_identifier == "bulk-rnaseq"
+                    else ont_conda_lock_path()
+                )
                 if not lock_path.is_file():
                     raise RuntimeError(
-                        "Bulk RNA-seq conda lock is missing. Generate it with "
-                        "scripts/generate-bulk-conda-lock.sh before Setup."
+                        f"{job.pipeline_identifier} conda lock is missing. "
+                        "Generate it before Setup."
                     )
                 self._run(
                     job,
@@ -736,7 +779,6 @@ class DependencyInstaller:
                     environment=self._mamba_environment(job.pipeline_identifier),
                 )
             if job.pipeline_identifier == "ont-analysis":
-                self._install_r_packages(job, mamba, environment)
                 self._install_dorado(job, environment.parent)
             self._verify_environment(job, environment)
             self._activate(root, environment)
@@ -791,6 +833,8 @@ class DependencyInstaller:
             )
         if job.pipeline_identifier == "bulk-rnaseq":
             self._verify_bulk_lock_versions(job, prefix)
+        elif job.pipeline_identifier == "ont-analysis":
+            self._verify_ont_lock_versions(job, prefix)
 
     @staticmethod
     def _packages_for(pipeline_identifier: str) -> list[str]:
@@ -798,7 +842,7 @@ class DependencyInstaller:
 
     def _verify_bulk_lock_versions(self, job: DependencyInstallJob, prefix: Path) -> None:
         lock_path = bulk_conda_lock_path()
-        expected = _lock_package_versions(lock_path)
+        expected = _lock_package_versions(lock_path, _BULK_LOCK_PACKAGES)
         installed = _prefix_package_versions(prefix)
         missing = [name for name in _BULK_LOCK_PACKAGES if name not in installed]
         if missing:
@@ -819,6 +863,30 @@ class DependencyInstaller:
             job,
             "Verified locked Bulk versions: "
             + ", ".join(f"{name}={installed[name]}" for name in _BULK_LOCK_PACKAGES),
+        )
+
+    def _verify_ont_lock_versions(self, job: DependencyInstallJob, prefix: Path) -> None:
+        expected = _lock_package_versions(ont_conda_lock_path(), _ONT_LOCK_PACKAGES)
+        installed = _prefix_package_versions(prefix)
+        missing = [name for name in _ONT_LOCK_PACKAGES if name not in installed]
+        if missing:
+            raise RuntimeError(
+                "new environment is missing locked ONT packages: " + ", ".join(missing)
+            )
+        mismatches = [
+            f"{name} expected {expected[name]} installed {installed[name]}"
+            for name in _ONT_LOCK_PACKAGES
+            if name in expected and installed.get(name) != expected[name]
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "installed ONT package versions do not match the conda lock: "
+                + "; ".join(mismatches)
+            )
+        self._log(
+            job,
+            "Verified locked ONT versions: "
+            + ", ".join(f"{name}={installed[name]}" for name in _ONT_LOCK_PACKAGES),
         )
 
     def _remove_failed_candidate(self, job: DependencyInstallJob, environment: Path) -> None:

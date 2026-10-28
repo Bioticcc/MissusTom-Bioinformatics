@@ -27,10 +27,10 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - name: Select stable Rust toolchain
+      - name: Select pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
       - name: Install Linux Tauri prerequisites
         run: |
           sudo apt-get update
@@ -49,8 +49,8 @@ jobs:
       - name: Create backend build environment
         run: |
           python3 -m venv backend/.venv
-          backend/.venv/bin/python -m pip install --upgrade pip
-          backend/.venv/bin/python -m pip install -e './backend[dev,packaging]'
+          backend/.venv/bin/python -m pip install --require-hashes -r backend/requirements-build.lock
+          backend/.venv/bin/python -m pip install --no-deps -e ./backend
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci

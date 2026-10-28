@@ -116,6 +116,7 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
     lock_dir = repository_root / "backend" / "src" / "missus_tom" / "resources" / "locks"
     lock_dir.mkdir(parents=True)
     (lock_dir / "bulk-rnaseq-linux-64.lock").write_text("@EXPLICIT\n", encoding="utf-8")
+    (lock_dir / "ont-analysis-linux-64.lock").write_text("@EXPLICIT\n", encoding="utf-8")
 
     result = _run_script(
         script,
@@ -150,6 +151,8 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
         / "bulk-rnaseq-linux-64.lock"
     )
     assert staged_lock.read_bytes() == (lock_dir / staged_lock.name).read_bytes()
+    staged_ont_lock = staged_lock.with_name("ont-analysis-linux-64.lock")
+    assert staged_ont_lock.read_bytes() == (lock_dir / staged_ont_lock.name).read_bytes()
     assert not (repository_root / "backend" / "build" / "sidecar-resources" / "locks").exists()
 
 

@@ -38,6 +38,11 @@ if [[ ! -s "${lock_source}" ]] || ! grep -qx '@EXPLICIT' "${lock_source}"; then
   echo "Required explicit Bulk dependency lock is missing or invalid: ${lock_source}" >&2
   exit 1
 fi
+ont_lock_source="${backend_root}/src/missus_tom/resources/locks/ont-analysis-linux-64.lock"
+if [[ ! -s "${ont_lock_source}" ]] || ! grep -qx '@EXPLICIT' "${ont_lock_source}"; then
+  echo "Required explicit ONT dependency lock is missing or invalid: ${ont_lock_source}" >&2
+  exit 1
+fi
 mkdir -p "${resource_stage}/scripts"
 cp -a "${repository_root}/workflows" "${resource_stage}/workflows"
 cp -a "${repository_root}/scripts/build-analysis-image.sh" "${resource_stage}/scripts/"

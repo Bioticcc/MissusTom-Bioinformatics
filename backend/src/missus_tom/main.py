@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from secrets import compare_digest
 from typing import Any
 
 import uvicorn
@@ -43,13 +44,37 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-Missus-Tom-Token"],
 )
 app.include_router(router)
+
+_AUTH_HEADER = "X-Missus-Tom-Token"
+_TRUSTED_ORIGINS = {
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "tauri://localhost",
+    "http://tauri.localhost",
+}
 
 
 @app.middleware("http")
 async def record_request_timing(request: Request, call_next: Any) -> Any:
+    # CORS does not authenticate a loopback client.  When the desktop host
+    # supplies its per-launch token, protect every mutating endpoint before it
+    # reaches route handlers.  Origin is deliberately defense in depth only.
+    token = settings.api_auth_token
+    if token and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        supplied = request.headers.get(_AUTH_HEADER, "")
+        if (origin and origin not in _TRUSTED_ORIGINS) or not compare_digest(supplied, token):
+            return _error_response(
+                401,
+                [
+                    ErrorDetail(
+                        code="local_api_unauthorized", message="Local API request is unauthorized."
+                    )
+                ],
+            )
     started = request_timer()
     response = await call_next(request)
     backend_observability.record_request(

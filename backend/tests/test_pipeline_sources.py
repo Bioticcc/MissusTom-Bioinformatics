@@ -72,3 +72,35 @@ def test_output_log_key_is_read_only(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="read-only reference"):
         PipelineSourceService().save("bulk-rnaseq", "Output_Log_Key.md", "changed", None)
+
+
+@pytest.mark.parametrize("active_content", ["{", "[]", "{}", '{"revision_id":"../outside"}'])
+def test_invalid_declared_activation_blocks_official_fallback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, active_content: str
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    active = tmp_path / "custom-pipelines" / "bulk-rnaseq" / "active.json"
+    active.parent.mkdir(parents=True)
+    active.write_text(active_content, encoding="utf-8")
+    with pytest.raises(ValueError, match="activation is invalid"):
+        PipelineSourceService().resolve_active_root("bulk-rnaseq")
+
+
+def test_missing_activation_preserves_official_execution(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    _, source_type, revision = PipelineSourceService().resolve_active_root("bulk-rnaseq")
+    assert (source_type, revision) == ("official", None)
+
+
+def test_unreadable_declared_activation_blocks_official_fallback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    # A directory reliably raises OSError even when the test account can bypass
+    # restrictive file permissions.
+    active = tmp_path / "custom-pipelines" / "bulk-rnaseq" / "active.json"
+    active.mkdir(parents=True)
+    with pytest.raises(ValueError, match="activation is invalid"):
+        PipelineSourceService().resolve_active_root("bulk-rnaseq")

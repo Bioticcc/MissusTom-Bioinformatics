@@ -9,7 +9,9 @@ import { LearnAndModify } from "./screens/LearnAndModify";
 import { Setup } from "./screens/Setup";
 import { apiRequest, getBackendStatus } from "./api";
 import { TitleBar } from "./components/TitleBar";
-import { isDesktopShell, setDependencyInstallActive, setRunOverlayActive } from "./native";
+import { getPerformanceDiagnosticsStatus, isDesktopShell, setDependencyInstallActive, setRunOverlayActive, startPerformanceDiagnostics, stopPerformanceDiagnostics } from "./native";
+import { matchesPerformanceDiagnosticsShortcut } from "./performanceDiagnostics";
+import { loadPerformanceDiagnosticsPreferences } from "./preferences";
 import { selectActiveRun } from "./runOverlayState";
 import { loadSetupState, resetSetupState } from "./setupState";
 import type { DependencyJobStatus, HealthStatus, ProjectManifest, RunPlan, RunRecord, ViewId } from "./types";
@@ -39,9 +41,11 @@ export default function App() {
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null);
   const [polledRuns, setPolledRuns] = useState<RunRecord[] | null>(null);
   const [runPollError, setRunPollError] = useState("");
+  const [performanceDiagnosticNotice, setPerformanceDiagnosticNotice] = useState("");
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const runLifecycleGeneration = useRef(0);
   const runStartPending = useRef(false);
+  const performanceShortcutPending = useRef(false);
 
   useEffect(() => {
     let live = true;
@@ -54,6 +58,31 @@ export default function App() {
         if (live) setHealth(null);
       });
     return () => { live = false; controller.abort(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    const listener = (event: KeyboardEvent) => {
+      const target = event.target;
+      const preferences = loadPerformanceDiagnosticsPreferences();
+      if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || !matchesPerformanceDiagnosticsShortcut(event, preferences.hotkey) || performanceShortcutPending.current) return;
+      event.preventDefault();
+      performanceShortcutPending.current = true;
+      void getPerformanceDiagnosticsStatus()
+        .then(async (status) => {
+          if (status.active) {
+            const result = await stopPerformanceDiagnostics();
+            setPerformanceDiagnosticNotice(`Saved ${result.sample_count} performance samples to ${result.path}`);
+          } else {
+            const result = await startPerformanceDiagnostics(preferences.stateLabel.trim());
+            setPerformanceDiagnosticNotice(`Recording performance diagnostics for ${result.state_label}.`);
+          }
+        })
+        .catch((reason) => setPerformanceDiagnosticNotice(reason instanceof Error ? reason.message : "Performance diagnostics could not be updated."))
+        .finally(() => { performanceShortcutPending.current = false; });
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
   }, []);
 
   useEffect(() => {
@@ -221,6 +250,7 @@ export default function App() {
 
         <main className="main-content" id="main-content">
         {runPollError && <div className="inline-error" role="alert">{runPollError}</div>}
+        {performanceDiagnosticNotice && <p className="settings-message" role="status">{performanceDiagnosticNotice}</p>}
         {activeView === "dashboard" && (
           <Dashboard onNew={newProject} onDemo={projectReady} onOpen={projectReady} />
         )}

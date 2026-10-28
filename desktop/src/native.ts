@@ -4,6 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type TextExportKind = "settings" | "log";
 export type UninstallStatus = { supported: boolean; package_name?: string | null; command?: string | null; message: string };
+export type PerformanceDiagnosticsStatus = { active: boolean; state_label?: string | null; started_at?: string | null; sample_count: number; };
+export type PerformanceDiagnosticsResult = { path: string; state_label: string; started_at: string; stopped_at: string; sample_count: number; };
 
 export function isDesktopShell() {
   return "__TAURI_INTERNALS__" in window;
@@ -99,4 +101,19 @@ export async function isMainWindowMaximized(): Promise<boolean> {
 export async function getUninstallStatus(): Promise<UninstallStatus> {
   if (!isDesktopShell()) return { supported: false, message: "Application removal is unavailable from a development build." };
   return invoke<UninstallStatus>("uninstall_status");
+}
+
+export async function getPerformanceDiagnosticsStatus(): Promise<PerformanceDiagnosticsStatus> {
+  if (!isDesktopShell()) return { active: false, sample_count: 0 };
+  return invoke<PerformanceDiagnosticsStatus>("performance_diagnostics_status");
+}
+
+export async function startPerformanceDiagnostics(stateLabel: string): Promise<PerformanceDiagnosticsStatus> {
+  if (!isDesktopShell()) throw new Error("Performance diagnostics are available in the desktop application.");
+  return invoke<PerformanceDiagnosticsStatus>("start_performance_diagnostics", { stateLabel });
+}
+
+export async function stopPerformanceDiagnostics(): Promise<PerformanceDiagnosticsResult> {
+  if (!isDesktopShell()) throw new Error("Performance diagnostics are available in the desktop application.");
+  return invoke<PerformanceDiagnosticsResult>("stop_performance_diagnostics");
 }

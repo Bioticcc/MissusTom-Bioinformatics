@@ -445,11 +445,28 @@ def test_packaged_bulk_lock_is_explicit_complete_and_has_provenance() -> None:
     assert len(artifacts) > len(dependencies._BULK_LOCK_PACKAGES)
     assert all(line.startswith("https://") and "#" in line for line in artifacts)
     assert all(len(line.rsplit("#", 1)[1]) in {32, 64} for line in artifacts)
-    versions = dependencies._lock_package_versions(lock)
+    versions = dependencies._lock_package_versions(lock, dependencies._BULK_LOCK_PACKAGES)
     assert set(dependencies._BULK_LOCK_PACKAGES) <= versions.keys()
     provenance = dependencies.bulk_lock_provenance(prefix=lock.parent / "not-installed")
     digest = provenance["lock_sha256"]
     assert isinstance(digest, str) and len(digest) == 64
+
+
+def test_packaged_ont_lock_is_explicit_complete_and_has_provenance() -> None:
+    lock = dependencies.ont_conda_lock_path()
+    lines = [
+        line.strip()
+        for line in lock.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert lines[0] == "@EXPLICIT"
+    assert len(lines) > len(dependencies._ONT_LOCK_PACKAGES)
+    assert all(line.startswith("https://") and "#" in line for line in lines[1:])
+    versions = dependencies._lock_package_versions(lock, dependencies._ONT_LOCK_PACKAGES)
+    assert set(dependencies._ONT_LOCK_PACKAGES) <= versions.keys()
+    provenance = dependencies.ont_lock_provenance(prefix=lock.parent / "not-installed")
+    assert isinstance(provenance["lock_sha256"], str)
+    assert len(provenance["lock_sha256"]) == 64
 
 
 def test_bulk_verification_checks_kallisto_and_r_packages(

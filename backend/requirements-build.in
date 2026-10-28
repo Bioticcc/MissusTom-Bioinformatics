@@ -1,0 +1,12 @@
+# Input for the hash-checked sidecar build environment. Regenerate with
+# scripts/generate-python-build-lock.sh; do not hand-edit requirements-build.lock.
+fastapi==0.141.1
+pydantic==2.13.4
+uvicorn[standard]==0.52.4
+pyinstaller==6.11.1
+httpx==0.28.1
+jsonschema==4.26.0
+mypy==1.20.2
+pytest==8.4.2
+pytest-cov==6.3.0
+ruff==0.16.4

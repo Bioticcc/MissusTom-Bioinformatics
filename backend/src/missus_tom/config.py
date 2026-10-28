@@ -121,6 +121,16 @@ class Settings:
         return port
 
     @property
+    def api_auth_token(self) -> str | None:
+        """Per-launch secret injected by the packaged desktop host.
+
+        Development remains usable without it; packaged launches always provide
+        it and the API then rejects every mutating request without the header.
+        """
+        value = os.getenv("MISSUS_TOM_API_TOKEN", "").strip()
+        return value or None
+
+    @property
     def human_demo_manifest(self) -> Path | None:
         configured = os.getenv("MISSUS_TOM_HUMAN_DEMO_MANIFEST")
         return Path(configured).expanduser().resolve(strict=False) if configured else None

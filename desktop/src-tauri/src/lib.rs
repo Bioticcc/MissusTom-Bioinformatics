@@ -1,15 +1,16 @@
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use rand::RngCore;
 use tauri::{
     AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -26,6 +27,7 @@ const HEALTH_ATTEMPTS: u8 = 30;
 const HEALTH_RETRY_DELAY: Duration = Duration::from_millis(200);
 const BACKEND_LOG_TAIL_BYTES: usize = 64 * 1024;
 const BACKEND_PID_FILE: &str = "backend.pid";
+const PERFORMANCE_DIAGNOSTICS_DIRECTORY: &str = "performance-diagnostics";
 
 struct RunOverlayState {
     active: Arc<AtomicBool>,
@@ -35,12 +37,29 @@ struct DependencyInstallState {
     active: AtomicBool,
 }
 
+struct PerformanceDiagnosticsState {
+    recording: Mutex<Option<Arc<PerformanceRecording>>>,
+}
+
+struct PerformanceRecording {
+    active: AtomicBool,
+    state_label: String,
+    started_at: String,
+    path: PathBuf,
+    writer: Mutex<BufWriter<File>>,
+    sample_count: AtomicUsize,
+    sampling: Mutex<()>,
+    previous_app: Mutex<Option<(Instant, u64)>>,
+    previous_backend: Mutex<Option<(Instant, u64)>>,
+}
+
 struct BackendState {
     child: Mutex<Option<Child>>,
     pid_file: Mutex<Option<PathBuf>>,
     diagnostics: Mutex<BackendDiagnostics>,
     ready: AtomicBool,
     closing: AtomicBool,
+    auth_token: String,
 }
 
 #[derive(Default)]
@@ -52,12 +71,16 @@ struct BackendDiagnostics {
 
 impl Default for BackendState {
     fn default() -> Self {
+        let mut bytes = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let auth_token = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         Self {
             child: Mutex::new(None),
             pid_file: Mutex::new(None),
             diagnostics: Mutex::new(BackendDiagnostics::default()),
             ready: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            auth_token,
         }
     }
 }
@@ -78,6 +101,23 @@ struct UninstallStatus {
     package_name: Option<String>,
     command: Option<String>,
     message: String,
+}
+
+#[derive(Serialize)]
+struct PerformanceDiagnosticsStatus {
+    active: bool,
+    state_label: Option<String>,
+    started_at: Option<String>,
+    sample_count: usize,
+}
+
+#[derive(Serialize)]
+struct PerformanceDiagnosticsResult {
+    path: String,
+    state_label: String,
+    started_at: String,
+    stopped_at: String,
+    sample_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +280,14 @@ impl Default for DependencyInstallState {
     fn default() -> Self {
         Self {
             active: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Default for PerformanceDiagnosticsState {
+    fn default() -> Self {
+        Self {
+            recording: Mutex::new(None),
         }
     }
 }
@@ -569,6 +617,7 @@ fn start_packaged_backend(app: &AppHandle) -> Result<(), String> {
         .args([] as [&str; 0])
         .env("MISSUS_TOM_API_HOST", PACKAGED_API_HOST)
         .env("MISSUS_TOM_API_PORT", PACKAGED_API_PORT.to_string())
+        .env("MISSUS_TOM_API_TOKEN", &state.auth_token)
         .env("MISSUS_TOM_RESOURCE_ROOT", &resource_dir)
         .env("MISSUS_TOM_STATE_DIR", &app_data_dir)
         .env("MISSUS_TOM_ONT_RUNNER", &ont_runner)
@@ -697,6 +746,199 @@ fn require_caller(window: &WebviewWindow, expected_label: &str) -> Result<(), St
     }
 }
 
+fn utc_timestamp() -> Result<String, String> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Could not read the system clock: {error}"))?
+        .as_secs();
+    #[cfg(unix)]
+    {
+        let time = seconds as libc::time_t;
+        let mut utc = unsafe { std::mem::zeroed::<libc::tm>() };
+        if unsafe { libc::gmtime_r(&time, &mut utc) }.is_null() {
+            return Err("Could not convert the system clock to UTC.".to_string());
+        }
+        return Ok(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            utc.tm_year + 1900,
+            utc.tm_mon + 1,
+            utc.tm_mday,
+            utc.tm_hour,
+            utc.tm_min,
+            utc.tm_sec
+        ));
+    }
+    #[cfg(not(unix))]
+    Ok(format!("unix-{seconds}"))
+}
+
+fn valid_performance_state_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 64
+        && label.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_')
+        })
+}
+
+fn performance_state_file_component(label: &str) -> String {
+    label.trim().replace(' ', "-").to_ascii_lowercase()
+}
+
+fn append_diagnostic_line(
+    recording: &PerformanceRecording,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let mut writer = recording
+        .writer
+        .lock()
+        .map_err(|_| "Performance diagnostics writer is unavailable.".to_string())?;
+    serde_json::to_writer(&mut *writer, &value)
+        .map_err(|error| format!("Could not write performance diagnostics: {error}"))?;
+    writer
+        .write_all(b"\n")
+        .map_err(|error| format!("Could not finalize performance diagnostics: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn process_tree_metrics(root: u32) -> (usize, u64, u64) {
+    let mut pending = vec![root];
+    let mut process_count = 0;
+    let mut cpu_ticks = 0;
+    let mut rss_kib = 0;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    while let Some(pid) = pending.pop() {
+        let children_path = format!("/proc/{pid}/task/{pid}/children");
+        if let Ok(children) = std::fs::read_to_string(children_path) {
+            pending.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|child| child.parse::<u32>().ok()),
+            );
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let fields = fields.split_whitespace().collect::<Vec<_>>();
+        let (Some(utime), Some(stime), Some(rss_pages)) =
+            (fields.get(11), fields.get(12), fields.get(21))
+        else {
+            continue;
+        };
+        let (Ok(utime), Ok(stime), Ok(rss_pages)) = (
+            utime.parse::<u64>(),
+            stime.parse::<u64>(),
+            rss_pages.parse::<i64>(),
+        ) else {
+            continue;
+        };
+        process_count += 1;
+        cpu_ticks += utime + stime;
+        rss_kib += (rss_pages.max(0) as u64).saturating_mul(page_size) / 1024;
+    }
+    (process_count, cpu_ticks, rss_kib)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_tree_metrics(_root: u32) -> (usize, u64, u64) {
+    (0, 0, 0)
+}
+
+fn cpu_percent(previous: &Mutex<Option<(Instant, u64)>>, cpu_ticks: u64) -> f64 {
+    let now = Instant::now();
+    let mut previous = previous
+        .lock()
+        .expect("performance diagnostics CPU state is available");
+    let percent = previous
+        .as_ref()
+        .and_then(|(before, before_ticks)| {
+            let elapsed = now.duration_since(*before).as_secs_f64();
+            (elapsed > 0.0).then(|| {
+                let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+                cpu_ticks.saturating_sub(*before_ticks) as f64 / ticks_per_second / elapsed * 100.0
+            })
+        })
+        .unwrap_or(0.0);
+    *previous = Some((now, cpu_ticks));
+    percent
+}
+
+fn local_health_sample() -> (String, f64) {
+    let port = if cfg!(debug_assertions) {
+        8000
+    } else {
+        PACKAGED_API_PORT
+    };
+    let started = Instant::now();
+    let address = format!("127.0.0.1:{port}");
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &address
+            .parse()
+            .expect("performance health address is valid"),
+        Duration::from_millis(500),
+    ) else {
+        return (
+            "unavailable".to_string(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return (
+            "write_failed".to_string(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let mut response = String::new();
+    let status = if stream.read_to_string(&mut response).is_ok() {
+        response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("invalid_response")
+            .to_string()
+    } else {
+        "read_failed".to_string()
+    };
+    (status, started.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn record_performance_sample(app: &AppHandle, recording: &PerformanceRecording) {
+    let Ok(_sampling) = recording.sampling.lock() else {
+        return;
+    };
+    if !recording.active.load(Ordering::Acquire) {
+        return;
+    }
+    let (app_processes, app_ticks, app_rss_kib) = process_tree_metrics(std::process::id());
+    let backend_pid = app
+        .state::<BackendState>()
+        .child
+        .lock()
+        .ok()
+        .and_then(|child| child.as_ref().map(Child::id));
+    let (backend_processes, backend_ticks, backend_rss_kib) =
+        backend_pid.map(process_tree_metrics).unwrap_or((0, 0, 0));
+    let (health_status, health_latency_ms) = local_health_sample();
+    let timestamp = utc_timestamp().unwrap_or_else(|_| "unavailable".to_string());
+    let value = serde_json::json!({
+        "kind": "sample",
+        "timestamp": timestamp,
+        "app": { "processes": app_processes, "cpu_percent": cpu_percent(&recording.previous_app, app_ticks), "rss_kib": app_rss_kib },
+        "backend": { "processes": backend_processes, "cpu_percent": cpu_percent(&recording.previous_backend, backend_ticks), "rss_kib": backend_rss_kib },
+        "health": { "status": health_status, "latency_ms": health_latency_ms },
+    });
+    if append_diagnostic_line(recording, value).is_ok() {
+        recording.sample_count.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 #[tauri::command]
 fn set_run_overlay_active(
     window: WebviewWindow,
@@ -718,6 +960,156 @@ fn set_dependency_install_active(
     require_caller(&window, MAIN_WINDOW_LABEL)?;
     state.active.store(active, Ordering::Release);
     Ok(())
+}
+
+#[tauri::command]
+fn performance_diagnostics_status(
+    window: WebviewWindow,
+    state: State<'_, PerformanceDiagnosticsState>,
+) -> Result<PerformanceDiagnosticsStatus, String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    let recording = state
+        .recording
+        .lock()
+        .map_err(|_| "Performance diagnostics state is unavailable.".to_string())?;
+    Ok(recording.as_ref().map_or(
+        PerformanceDiagnosticsStatus {
+            active: false,
+            state_label: None,
+            started_at: None,
+            sample_count: 0,
+        },
+        |recording| PerformanceDiagnosticsStatus {
+            active: recording.active.load(Ordering::Acquire),
+            state_label: Some(recording.state_label.clone()),
+            started_at: Some(recording.started_at.clone()),
+            sample_count: recording.sample_count.load(Ordering::Acquire),
+        },
+    ))
+}
+
+#[tauri::command]
+fn start_performance_diagnostics(
+    window: WebviewWindow,
+    state: State<'_, PerformanceDiagnosticsState>,
+    state_label: String,
+) -> Result<PerformanceDiagnosticsStatus, String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    let state_label = state_label.trim();
+    if !valid_performance_state_label(state_label) {
+        return Err(
+            "The diagnostics state must be 1-64 letters, numbers, spaces, hyphens, or underscores."
+                .to_string(),
+        );
+    }
+    let mut current = state
+        .recording
+        .lock()
+        .map_err(|_| "Performance diagnostics state is unavailable.".to_string())?;
+    if current.is_some() {
+        return Err("Performance diagnostics are already recording. Stop the current recording before starting another.".to_string());
+    }
+    let started_at = utc_timestamp()?;
+    let app_data_dir = window
+        .app_handle()
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate application data: {error}"))?;
+    let diagnostics_dir = app_data_dir.join(PERFORMANCE_DIAGNOSTICS_DIRECTORY);
+    std::fs::create_dir_all(&diagnostics_dir)
+        .map_err(|error| format!("Could not create the diagnostics directory: {error}"))?;
+    let file_timestamp = started_at.replace(['-', ':'], "").replace("Z", "Z");
+    let path = diagnostics_dir.join(format!(
+        "desktop-performance-{}-{file_timestamp}.ndjson",
+        performance_state_file_component(state_label)
+    ));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("Could not create the diagnostics file: {error}"))?;
+    let recording = Arc::new(PerformanceRecording {
+        active: AtomicBool::new(true),
+        state_label: state_label.to_string(),
+        started_at: started_at.clone(),
+        path,
+        writer: Mutex::new(BufWriter::new(file)),
+        sample_count: AtomicUsize::new(0),
+        sampling: Mutex::new(()),
+        previous_app: Mutex::new(None),
+        previous_backend: Mutex::new(None),
+    });
+    append_diagnostic_line(
+        &recording,
+        serde_json::json!({
+            "kind": "metadata",
+            "started_at": started_at,
+            "state_label": state_label,
+            "application_version": env!("CARGO_PKG_VERSION"),
+            "process_id": std::process::id(),
+            "platform": std::env::consts::OS,
+            "wsl": is_wsl(),
+            "nvidia_driver_present": Path::new("/proc/driver/nvidia/version").is_file(),
+        }),
+    )?;
+    record_performance_sample(&window.app_handle(), &recording);
+    let app = window.app_handle().clone();
+    let sampler = recording.clone();
+    std::thread::spawn(move || {
+        while sampler.active.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_secs(1));
+            record_performance_sample(&app, &sampler);
+        }
+    });
+    let status = PerformanceDiagnosticsStatus {
+        active: true,
+        state_label: Some(recording.state_label.clone()),
+        started_at: Some(recording.started_at.clone()),
+        sample_count: recording.sample_count.load(Ordering::Acquire),
+    };
+    *current = Some(recording);
+    Ok(status)
+}
+
+#[tauri::command]
+fn stop_performance_diagnostics(
+    window: WebviewWindow,
+    state: State<'_, PerformanceDiagnosticsState>,
+) -> Result<PerformanceDiagnosticsResult, String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    let recording = state
+        .recording
+        .lock()
+        .map_err(|_| "Performance diagnostics state is unavailable.".to_string())?
+        .take()
+        .ok_or_else(|| "Performance diagnostics are not recording.".to_string())?;
+    recording.active.store(false, Ordering::Release);
+    let _sampling = recording
+        .sampling
+        .lock()
+        .map_err(|_| "Performance diagnostics sampling state is unavailable.".to_string())?;
+    let stopped_at = utc_timestamp()?;
+    append_diagnostic_line(
+        &recording,
+        serde_json::json!({
+            "kind": "completed",
+            "stopped_at": stopped_at,
+            "sample_count": recording.sample_count.load(Ordering::Acquire),
+        }),
+    )?;
+    recording
+        .writer
+        .lock()
+        .map_err(|_| "Performance diagnostics writer is unavailable.".to_string())?
+        .flush()
+        .map_err(|error| format!("Could not finalize performance diagnostics: {error}"))?;
+    Ok(PerformanceDiagnosticsResult {
+        path: recording.path.to_string_lossy().into_owned(),
+        state_label: recording.state_label.clone(),
+        started_at: recording.started_at.clone(),
+        stopped_at,
+        sample_count: recording.sample_count.load(Ordering::Acquire),
+    })
 }
 
 #[tauri::command]
@@ -751,6 +1143,14 @@ fn backend_status(state: State<'_, BackendState>) -> BackendStatus {
         startup_log_path,
         startup_log,
     }
+}
+
+/// Exposed only to the bundled Tauri webview. The random value is never put in
+/// a URL, log, persisted state, or run provenance; it exists only in memory for
+/// this desktop launch and is sent as an HTTP request header.
+#[tauri::command]
+fn backend_auth_token(state: State<'_, BackendState>) -> String {
+    state.auth_token.clone()
 }
 
 #[tauri::command]
@@ -1014,6 +1414,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(RunOverlayState::default());
             app.manage(DependencyInstallState::default());
+            app.manage(PerformanceDiagnosticsState::default());
             app.manage(BackendState::default());
             if !cfg!(debug_assertions) {
                 let backend = app.state::<BackendState>();
@@ -1079,8 +1480,12 @@ pub fn run() {
             open_directory,
             set_run_overlay_active,
             set_dependency_install_active,
+            performance_diagnostics_status,
+            start_performance_diagnostics,
+            stop_performance_diagnostics,
             restore_main_window,
             backend_status,
+            backend_auth_token,
             uninstall_status,
             close_main_window
         ])

@@ -78,10 +78,13 @@ if [[ -n "${debian_root}" ]]; then
   [[ -d "${debian_root}" ]] || fail "Extracted Debian tree is missing: ${debian_root}"
   workflow_script=$(find "${debian_root}" -type f -path '*/workflows/bulk_rnaseq/bin/bulk_rnaseq_analysis.R' -print -quit)
   lock_file=$(find "${debian_root}" -type f -path '*/resources/locks/bulk-rnaseq-linux-64.lock' -print -quit)
+  ont_lock_file=$(find "${debian_root}" -type f -path '*/resources/locks/ont-analysis-linux-64.lock' -print -quit)
   [[ -n "${workflow_script}" ]] || fail "Packaged workflow is missing bulk_rnaseq_analysis.R"
   [[ -x "${workflow_script}" ]] || fail "Packaged workflow helper is not executable: ${workflow_script}"
   [[ -n "${lock_file}" ]] || fail "Packaged backend is missing the explicit Bulk dependency lock"
   [[ -s "${lock_file}" ]] || fail "Packaged Bulk dependency lock is empty: ${lock_file}"
+  [[ -n "${ont_lock_file}" ]] || fail "Packaged backend is missing the explicit ONT dependency lock"
+  [[ -s "${ont_lock_file}" ]] || fail "Packaged ONT dependency lock is empty: ${ont_lock_file}"
   if [[ -z "${sidecar}" ]]; then
     sidecar=$(find "${debian_root}" -type f -name 'missus-tom-backend*' -perm -u+x -print -quit)
   fi
