@@ -11,7 +11,8 @@ readonly FASTQC_IMAGE='quay.io/biocontainers/fastqc@sha256:e194048df39c3145d9b4e
 readonly CUTADAPT_IMAGE='quay.io/biocontainers/cutadapt@sha256:c96a44c18f58660e853652c7efb303b3f426aa12f1ee7af007d03a54c39b87a5'
 readonly KALLISTO_IMAGE='quay.io/biocontainers/kallisto@sha256:7615f563aa2948fd087f7e4a666e252f275c60b2070729bc9a3804c8873527e5'
 readonly MULTIQC_IMAGE='quay.io/biocontainers/multiqc@sha256:dfd9fde2c48b896b884e79a71ddc16c72c97a0ee5c5c8e45aaba50f55d07d263'
-readonly ANALYSIS_IMAGE='missus-tom/rnaseq-analysis:0.3.0'
+ANALYSIS_IMAGE=$(bash "$repo_root/scripts/build-analysis-image.sh" --print-tag)
+readonly ANALYSIS_IMAGE
 
 usage() {
   cat <<'EOF'
@@ -186,11 +187,13 @@ docker run --rm --label "missus_tom.run_id=$run_id" --network none --cpus 2 --me
   kallisto index -i /smoke/references/kallisto.idx /smoke/references/transcripts.fa
 
 TMPDIR="$smoke_root/tmp" NXF_TEMP="$smoke_root/tmp" NXF_HOME="$smoke_base/nxf" NXF_OPTS='-Xms256m -Xmx1g' \
+  NXF_VER=24.04.4 NXF_OFFLINE=true NXF_DISABLE_CHECK_LATEST=true \
   nextflow -log "$smoke_root/logs/nextflow-engine.log" run "$workflow" -profile docker \
     -work-dir "$smoke_root/work" \
     --manifest "$smoke_root/manifest.json" \
     --outdir "$smoke_root/results" \
-    --max_cpus 2 --max_memory_gb 4 --max_parallel_tasks 1 --run_id "$run_id"
+    --max_cpus 2 --max_memory_gb 4 --max_parallel_tasks 1 --run_id "$run_id" \
+    --analysis_container "$(docker image inspect --format '{{.Id}}' "$ANALYSIS_IMAGE")"
 
 for output_directory in qc trimmed counts differential_expression figures tables; do
   output_path="$smoke_root/results/$output_directory"

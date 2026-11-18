@@ -1,0 +1,113 @@
+name: Scientific and native checks
+
+on:
+  workflow_call:
+    inputs:
+      run_oom:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      run_oom:
+        description: Run the isolated 50 MiB OOM containment probe
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 10 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  scientific:
+    name: Locked R scientific regression tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install locked test and scientific environments
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install --require-hashes -r backend/requirements-build.lock
+          backend/.venv/bin/pip install --no-deps -e backend
+          curl --fail --location --retry 3 https://github.com/mamba-org/micromamba-releases/releases/download/2.3.2-0/micromamba-linux-64.tar.bz2 -o "$RUNNER_TEMP/micromamba.tar.bz2"
+          echo "5512233cdd8564a671626081026dc861537a963baa06706baab08fac6f3bb9d2  $RUNNER_TEMP/micromamba.tar.bz2" | sha256sum --check -
+          tar -xjf "$RUNNER_TEMP/micromamba.tar.bz2" -C "$RUNNER_TEMP" bin/micromamba
+          "$RUNNER_TEMP/bin/micromamba" create --yes --no-rc --prefix "$RUNNER_TEMP/bulk" --file backend/src/missus_tom/resources/locks/bulk-rnaseq-linux-64.lock
+      - name: Run every R regression test and reject skipped coverage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$RUNNER_TEMP/bulk/bin:$PATH"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/bulk/lib"
+          export R_LIBS_USER="$RUNNER_TEMP/bulk/lib/R/library"
+          export R_LIBS_SITE="$RUNNER_TEMP/bulk/lib/R/site-library"
+          export R_ENVIRON_USER=/dev/null R_PROFILE_USER=/dev/null
+          export R_ENVIRON_SITE=/dev/null R_PROFILE_SITE=/dev/null
+          backend/.venv/bin/pytest backend/tests/test_bulk_rnaseq_analysis_r.py --junitxml="$RUNNER_TEMP/scientific.xml"
+          python scripts/assert-test-execution.py "$RUNNER_TEMP/scientific.xml"
+
+  containment:
+    name: Native Linux containment integration tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Prepare test environment and systemd user session
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install --require-hashes -r backend/requirements-build.lock
+          backend/.venv/bin/pip install --no-deps -e backend
+          sudo loginctl enable-linger "$(id -un)"
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          printf '[Service]\nDelegate=cpu memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/missus-tom.conf
+          sudo systemctl daemon-reload
+          sudo systemctl restart "user@$(id -u).service"
+      - name: Verify real descendant containment without skips
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          backend/.venv/bin/pytest backend/tests/test_run_containment.py -k 'linux_descendants_join_capped_scope or stopping_run_slice_ends_scoped_workload_and_descendants' --junitxml="$RUNNER_TEMP/containment.xml"
+          python scripts/assert-test-execution.py "$RUNNER_TEMP/containment.xml"
+      - name: Isolated controlled OOM probe
+        if: github.event_name == 'schedule' || inputs.run_oom
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          MISSUS_TOM_CONTAINMENT_OOM_TEST=1 backend/.venv/bin/pytest backend/tests/test_run_containment.py -k controlled_memory_budget_violation --junitxml="$RUNNER_TEMP/oom.xml"
+          python scripts/assert-test-execution.py "$RUNNER_TEMP/oom.xml"
+
+  ont-modkit:
+    name: ONT Modkit ambiguity repair
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Prepare native build prerequisites
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake libclang-dev libssl-dev libbz2-dev liblzma-dev zlib1g-dev samtools
+      - name: Build pinned repair and verify retained modification calls
+        run: |
+          python scripts/build-modkit-repair.py
+          export ONT_TEST_MODKIT="$PWD/backend/build/analysis-tools/modkit-repair/modkit"
+          export ONT_TEST_SAMTOOLS=/usr/bin/samtools
+          python -m unittest discover -s workflows/ont_analysis/tests -p test_modkit_ambiguity.py

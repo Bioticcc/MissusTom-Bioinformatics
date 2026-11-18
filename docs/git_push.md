@@ -45,7 +45,7 @@ Note: I use git add . for most things, but if you want to push specific files, b
 ```bash
 git status --short
 git add .
-git commit -m "Missus Tom v0.4.: Api and metadata safety improvements"
+git commit -m "Missus Tom v0.4.8: Api and metadata safety improvements"
 git push origin main
 git rev-parse HEAD
 ```
@@ -54,7 +54,7 @@ git rev-parse HEAD
 
 ```bash
 git fetch origin --tags
-git tag -a v0.4.7 e633b0a6aec3adcea0f28bd0f0be9d13022e70f1 -m "Missus Tom v0.4.7: BRS Learn and Modify scripts readability improved"
-git push origin v0.4.7
+git tag -a v0.4.8 1bf62a238cbcea36d0fa0b307bd4c85df480fe2a -m "Missus Tom v0.4.8: Api and metadata safety improvements"
+git push origin v0.4.8
 ```
 

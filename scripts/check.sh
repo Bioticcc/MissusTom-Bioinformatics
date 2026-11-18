@@ -22,6 +22,7 @@ cd "${project_root}/backend"
 "${venv_bin}/pytest"
 
 cd "${project_root}/desktop"
+node "${project_root}/scripts/audit-dependencies.mjs"
 npm run lint
 npm test
 npm run typecheck

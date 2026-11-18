@@ -12,6 +12,8 @@ permissions:
   contents: read
 
 jobs:
+  scientific:
+    uses: ./.github/workflows/scientific.yml
   check:
     name: Application checks
     runs-on: ubuntu-22.04
