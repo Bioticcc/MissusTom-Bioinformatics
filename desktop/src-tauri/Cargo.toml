@@ -1,6 +1,6 @@
 [package]
 name = "missus-tom"
-version = "0.4.8"
+version = "0.5.0-rc.1"
 description = "Local bioinformatics workbench"
 authors = ["Missus Tom contributors"]
 edition = "2021"

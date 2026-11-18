@@ -1,4 +1,4 @@
-export const APP_VERSION = "0.4.8";
+export const APP_VERSION = "0.5.0-rc.1";
 export const DEVELOPMENT_BUILD_REVISION = "development";
 export const BUILD_REVISION =
   (import.meta.env.VITE_BUILD_REVISION ?? "").trim() || DEVELOPMENT_BUILD_REVISION;
