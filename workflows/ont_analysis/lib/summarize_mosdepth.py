@@ -14,11 +14,12 @@ import gzip
 import math
 import sys
 from collections import OrderedDict
+from contextlib import ExitStack
 from itertools import zip_longest
 from pathlib import Path
 
 
-def fail(message: str) -> "None":
+def fail(message: str) -> None:
     raise ValueError(message)
 
 
@@ -39,6 +40,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--low-window-min-1x-breadth", required=True, type=float)
     parser.add_argument("--exclude-flags", required=True, type=int)
     parser.add_argument("--min-mapq", required=True, type=int)
+    parser.add_argument(
+        "--alignment-idxstats",
+        type=Path,
+        help="BAM idxstats corroborating wholly unaligned reference contigs",
+    )
+    parser.add_argument(
+        "--per-base-out", type=Path, help="Reference-complete BED output; '-' streams to stdout"
+    )
     return parser.parse_args()
 
 
@@ -91,7 +100,7 @@ def parse_threshold_list(raw: str) -> list[int]:
     return values
 
 
-def read_mosdepth_summary(path: Path, contigs: OrderedDict[str, int]):
+def read_mosdepth_summary(path: Path, contigs: OrderedDict[str, int], allowed_missing: set[str]):
     rows: dict[str, tuple[int, int, float]] = {}
     total: tuple[int, int, float] | None = None
     with path.open("rt", encoding="utf-8") as handle:
@@ -105,16 +114,72 @@ def read_mosdepth_summary(path: Path, contigs: OrderedDict[str, int]):
                 parsed = (int(row["length"]), int(row["bases"]), float(row["mean"]))
             except (TypeError, ValueError):
                 fail(f"{path}: invalid numeric value in row {name!r}")
+            if parsed[0] < 0 or parsed[1] < 0 or not math.isfinite(parsed[2]) or parsed[2] < 0:
+                fail(f"{path}: invalid length, depth sum or mean in row {name!r}")
             if name == "total":
+                if total is not None:
+                    fail(f"{path}: duplicate total row")
                 total = parsed
             elif name in contigs:
+                if name in rows:
+                    fail(f"{path}: duplicate contig summary: {name}")
                 rows[name] = parsed
     if total is None:
         fail(f"{path}: missing total row")
     missing = [name for name in contigs if name not in rows]
-    if missing:
-        fail(f"{path}: missing contig summaries (first: {missing[0]})")
-    return rows, total
+    unverified = [name for name in missing if name not in allowed_missing]
+    if unverified:
+        fail(f"{path}: missing contig summaries (first: {unverified[0]})")
+    raw_reference_bases = sum(contigs[name] for name in rows)
+    for name in missing:
+        rows[name] = (contigs[name], 0, 0.0)
+    return rows, total, raw_reference_bases, missing
+
+
+def read_idxstats(path: Path | None, contigs: OrderedDict[str, int]) -> set[str]:
+    """Return wholly unaligned contigs only when BAM and FAI lengths agree."""
+    if path is None:
+        return set()
+    seen: dict[str, tuple[int, int]] = {}
+    for line_number, fields in data_rows(path):
+        if len(fields) != 4:
+            fail(f"{path}:{line_number}: expected four idxstats columns")
+        name = fields[0]
+        try:
+            length, mapped, unmapped = map(int, fields[1:])
+        except ValueError:
+            fail(f"{path}:{line_number}: invalid idxstats counts")
+        if min(length, mapped, unmapped) < 0 or name in seen:
+            fail(f"{path}:{line_number}: negative or duplicate idxstats row")
+        seen[name] = (length, mapped)
+    for name, length in contigs.items():
+        if name not in seen or seen[name][0] != length:
+            fail(f"BAM idxstats and FAI disagree for {name}")
+    return {name for name in contigs if seen[name][1] == 0}
+
+
+def reference_complete_rows(
+    path: Path, contigs: OrderedDict[str, int], verified_zero: set[str], padded: list[str]
+):
+    """Fill only entire absent zero-read contigs; never fill gaps within a contig."""
+    iterator = iter(data_rows(path))
+    pending = next(iterator, None)
+    for name, length in contigs.items():
+        if pending is None or pending[1][0] != name:
+            if name not in verified_zero:
+                fail(
+                    "Mosdepth per-base track does not span the FAI "
+                    f"(first incomplete contig: {name}); "
+                    "omitted contigs require zero BAM alignments and zero window coverage"
+                )
+            padded.append(name)
+            yield 0, [name, "0", str(length), "0"]
+        else:
+            while pending is not None and pending[1][0] == name:
+                yield pending
+                pending = next(iterator, None)
+    if pending is not None:
+        fail(f"{path}: unknown, duplicated or out-of-order per-base contig: {pending[1][0]}")
 
 
 def fmt_float(value: float) -> str:
@@ -224,6 +289,17 @@ def main() -> int:
     if incomplete:
         fail(f"Mosdepth windows do not span the FAI (first incomplete contig: {incomplete[0]})")
 
+    zero_alignment_contigs = read_idxstats(args.alignment_idxstats, contigs)
+    verified_zero = {
+        name
+        for name in zero_alignment_contigs
+        if chromosome_depth_sum[name] == 0 and not any(chromosome_counts[name])
+    }
+    mosdepth_rows, mosdepth_total, raw_reference_bases, missing_summaries = read_mosdepth_summary(
+        args.mosdepth_summary, contigs, verified_zero
+    )
+    padded_contigs: list[str] = []
+
     low_interval_count = 0
     zero_interval_count = 0
     per_base_depth_sum = 0
@@ -234,10 +310,30 @@ def main() -> int:
     observed_per_base_end = {name: 0 for name in contigs}
     active: dict[str, int | str] | None = None
 
-    with args.low_interval_out.open("wt", encoding="utf-8", newline="") as low_handle:
+    with (
+        args.low_interval_out.open("wt", encoding="utf-8", newline="") as low_handle,
+        ExitStack() as stack,
+    ):
+        normalized_writer = None
+        if args.per_base_out is not None:
+            destination = (
+                sys.stdout
+                if args.per_base_out == Path("-")
+                else stack.enter_context(args.per_base_out.open("wt", encoding="utf-8", newline=""))
+            )
+            normalized_writer = csv.writer(destination, delimiter="\t", lineterminator="\n")
         writer = csv.writer(low_handle, delimiter="\t", lineterminator="\n")
         writer.writerow(
-            ["#chrom", "start", "end", "coverage_class", "interval_bases", "mean_depth", "min_depth", "max_depth"]
+            [
+                "#chrom",
+                "start",
+                "end",
+                "coverage_class",
+                "interval_bases",
+                "mean_depth",
+                "min_depth",
+                "max_depth",
+            ]
         )
 
         def flush_active() -> None:
@@ -264,7 +360,9 @@ def main() -> int:
             active = None
 
         previous_contig_index = -1
-        for line_number, fields in data_rows(args.per_base):
+        for line_number, fields in reference_complete_rows(
+            args.per_base, contigs, verified_zero, padded_contigs
+        ):
             if len(fields) != 4:
                 fail(f"{args.per_base}:{line_number}: expected 4 columns")
             chrom = fields[0]
@@ -275,13 +373,20 @@ def main() -> int:
             except ValueError:
                 fail(f"{args.per_base}:{line_number}: invalid numeric value")
             length = end - start
-            if start != observed_per_base_end[chrom] or length <= 0 or end > contigs[chrom] or depth < 0:
+            if (
+                start != observed_per_base_end[chrom]
+                or length <= 0
+                or end > contigs[chrom]
+                or depth < 0
+            ):
                 fail(f"{args.per_base}:{line_number}: invalid or discontinuous interval")
             current_index = contig_index[chrom]
             if current_index < previous_contig_index:
                 fail("Mosdepth per-base intervals are not in FAI contig order")
             previous_contig_index = current_index
             observed_per_base_end[chrom] = end
+            if normalized_writer is not None:
+                normalized_writer.writerow([chrom, start, end, depth])
             per_base_bases += length
             per_base_depth_sum += depth * length
             per_base_chromosome_depth_sum[chrom] += depth * length
@@ -324,20 +429,25 @@ def main() -> int:
 
     incomplete = [name for name, length in contigs.items() if observed_per_base_end[name] != length]
     if incomplete:
-        fail(f"Mosdepth per-base track does not span the FAI (first incomplete contig: {incomplete[0]})")
+        fail(
+            "Mosdepth per-base track does not span the FAI "
+            f"(first incomplete contig: {incomplete[0]})"
+        )
 
-    mosdepth_rows, mosdepth_total = read_mosdepth_summary(args.mosdepth_summary, contigs)
     reference_bases = sum(contigs.values())
     if per_base_bases != reference_bases:
         fail("per-base interval length does not equal reference length")
-    total_counts = [sum(chromosome_counts[name][i] for name in contigs) for i in range(len(thresholds))]
+    total_counts = [
+        sum(chromosome_counts[name][i] for name in contigs) for i in range(len(thresholds))
+    ]
     one_x_index = thresholds.index(1)
-    if mosdepth_total[0] != reference_bases or mosdepth_total[1] != per_base_depth_sum:
+    if mosdepth_total[0] != raw_reference_bases or mosdepth_total[1] != per_base_depth_sum:
         fail("Mosdepth summary totals disagree with per-base depth totals")
     if total_counts[one_x_index] != per_base_covered_bases:
         fail("Mosdepth threshold totals disagree with per-base covered bases")
     exact_mean_depth = per_base_depth_sum / reference_bases
-    if abs(exact_mean_depth - mosdepth_total[2]) > 0.000002:
+    raw_mean_depth = per_base_depth_sum / raw_reference_bases if raw_reference_bases else 0.0
+    if abs(raw_mean_depth - mosdepth_total[2]) > 0.000002:
         fail("Mosdepth per-base mean disagrees with Mosdepth summary mean")
 
     with args.chromosome_out.open("wt", encoding="utf-8", newline="") as handle:
@@ -348,11 +458,17 @@ def main() -> int:
         writer.writerow(header)
         for chrom, length in contigs.items():
             summary_length, summary_depth_sum, summary_mean = mosdepth_rows[chrom]
-            if summary_length != length or summary_depth_sum != per_base_chromosome_depth_sum[chrom]:
+            if (
+                summary_length != length
+                or summary_depth_sum != per_base_chromosome_depth_sum[chrom]
+            ):
                 fail(f"Mosdepth chromosome summary disagrees for {chrom}")
+            exact_chromosome_mean = per_base_chromosome_depth_sum[chrom] / length
+            if abs(summary_mean - exact_chromosome_mean) > 0.000002:
+                fail(f"Mosdepth chromosome mean disagrees for {chrom}")
             if chromosome_counts[chrom][one_x_index] != per_base_chromosome_covered_bases[chrom]:
                 fail(f"Mosdepth chromosome threshold breadth disagrees for {chrom}")
-            output = [chrom, length, fmt_float(summary_mean)]
+            output = [chrom, length, fmt_float(exact_chromosome_mean)]
             for count in chromosome_counts[chrom]:
                 output.extend([count, fmt_float(pct(count, length))])
             writer.writerow(output)
@@ -361,21 +477,111 @@ def main() -> int:
     with args.coverage_summary_out.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["metric", "value", "definition"])
-        writer.writerow(["reference_bases", reference_bases, "FAI bases included in Mosdepth analysis"])
-        writer.writerow(["mean_depth", fmt_float(exact_mean_depth), "sum(depth*bases)/reference_bases"])
-        for threshold, count in zip(thresholds, total_counts):
-            writer.writerow([f"bases_ge_{threshold}x", count, f"reference bases with depth >= {threshold}"])
-            writer.writerow([f"pct_ge_{threshold}x", fmt_float(pct(count, reference_bases)), f"percent of reference bases with depth >= {threshold}"])
+        writer.writerow(
+            [
+                "reference_bases",
+                reference_bases,
+                "all FAI bases, including verified unaligned contigs",
+            ]
+        )
+        writer.writerow(
+            [
+                "mosdepth_raw_summary_reference_bases",
+                raw_reference_bases,
+                "bases represented in the original Mosdepth total row",
+            ]
+        )
+        writer.writerow(
+            [
+                "zero_alignment_contigs_padded",
+                len(padded_contigs),
+                ",".join(padded_contigs) or "none",
+            ]
+        )
+        writer.writerow(
+            [
+                "zero_alignment_bases_padded",
+                sum(contigs[name] for name in padded_contigs),
+                "zero-depth bases corroborated by idxstats and complete window tables",
+            ]
+        )
+        writer.writerow(
+            [
+                "zero_alignment_summaries_completed",
+                len(missing_summaries),
+                ",".join(missing_summaries) or "none",
+            ]
+        )
+        writer.writerow(
+            ["mean_depth", fmt_float(exact_mean_depth), "sum(depth*bases)/reference_bases"]
+        )
+        for threshold, count in zip(thresholds, total_counts, strict=True):
+            writer.writerow(
+                [f"bases_ge_{threshold}x", count, f"reference bases with depth >= {threshold}"]
+            )
+            writer.writerow(
+                [
+                    f"pct_ge_{threshold}x",
+                    fmt_float(pct(count, reference_bases)),
+                    f"percent of reference bases with depth >= {threshold}",
+                ]
+            )
         writer.writerow(["zero_coverage_bases", zero_bases, "reference bases with depth 0"])
-        writer.writerow(["pct_zero_coverage", fmt_float(pct(zero_bases, reference_bases)), "percent of reference bases with depth 0"])
-        writer.writerow(["coverage_window_count", window_count, f"zero-based half-open windows, target size {args.window_size}"])
-        writer.writerow(["zero_coverage_window_count", zero_window_count, "windows with no bases at >=1x"])
-        writer.writerow(["low_1x_breadth_window_count", low_window_count, f"nonzero windows with <{args.low_window_min_1x_breadth:g}% of bases at >=1x"])
-        writer.writerow(["zero_coverage_interval_count", zero_interval_count, "contiguous run-length intervals at depth 0"])
-        writer.writerow(["low_depth_interval_count", low_interval_count, f"contiguous run-length intervals at depth 1 to {args.low_depth_threshold - 1}"])
-        writer.writerow(["mosdepth_exclude_flag_mask", args.exclude_flags, "SAM flag mask excluded from coverage"])
-        writer.writerow(["minimum_mapping_quality", args.min_mapq, "minimum MAPQ included in coverage"])
+        writer.writerow(
+            [
+                "pct_zero_coverage",
+                fmt_float(pct(zero_bases, reference_bases)),
+                "percent of reference bases with depth 0",
+            ]
+        )
+        writer.writerow(
+            [
+                "coverage_window_count",
+                window_count,
+                f"zero-based half-open windows, target size {args.window_size}",
+            ]
+        )
+        writer.writerow(
+            ["zero_coverage_window_count", zero_window_count, "windows with no bases at >=1x"]
+        )
+        writer.writerow(
+            [
+                "low_1x_breadth_window_count",
+                low_window_count,
+                f"nonzero windows with <{args.low_window_min_1x_breadth:g}% of bases at >=1x",
+            ]
+        )
+        writer.writerow(
+            [
+                "zero_coverage_interval_count",
+                zero_interval_count,
+                "contiguous run-length intervals at depth 0",
+            ]
+        )
+        writer.writerow(
+            [
+                "low_depth_interval_count",
+                low_interval_count,
+                f"contiguous run-length intervals at depth 1 to {args.low_depth_threshold - 1}",
+            ]
+        )
+        writer.writerow(
+            [
+                "mosdepth_exclude_flag_mask",
+                args.exclude_flags,
+                "SAM flag mask excluded from coverage",
+            ]
+        )
+        writer.writerow(
+            ["minimum_mapping_quality", args.min_mapq, "minimum MAPQ included in coverage"]
+        )
 
+    if padded_contigs:
+        print(
+            f"COVERAGE: included {len(padded_contigs)} verified zero-alignment contigs "
+            f"({sum(contigs[name] for name in padded_contigs)} bases) in reference-wide coverage",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -384,4 +590,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

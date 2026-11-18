@@ -44,6 +44,7 @@ from missus_tom.models.errors import (
     WORKFLOW_ADMISSION_LOCKED,
     ApiCodedError,
 )
+from missus_tom.services import modkit_repair
 from missus_tom.services.resources import admission_free_bytes, inspect_storage
 
 ONT_R_PACKAGES: Final[tuple[str, ...]] = (
@@ -178,8 +179,49 @@ def bulk_conda_lock_path() -> Path:
     return settings.packaged_resources_root / "locks" / "bulk-rnaseq-linux-64.lock"
 
 
+def bulk_analysis_image() -> str:
+    recipe = settings.resource_root / "workflows/bulk_rnaseq/docker/Dockerfile.analysis"
+    identity = hashlib.sha256(recipe.read_bytes() + b"\0" + bulk_conda_lock_path().read_bytes())
+    return "missus-tom/rnaseq-analysis:locked-" + identity.hexdigest()
+
+
+def resolve_bulk_analysis_image_id() -> str:
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", bulk_analysis_image()],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    image_id = result.stdout.strip()
+    if result.returncode or len(image_id) != 71 or not image_id.startswith("sha256:"):
+        raise ValueError(
+            "The locked Bulk analysis image is unavailable; rebuild it with build-analysis-image.sh"
+        )
+    try:
+        int(image_id[7:], 16)
+    except ValueError as exc:
+        raise ValueError("Docker returned an invalid analysis image identity") from exc
+    return image_id
+
+
 def ont_conda_lock_path() -> Path:
     return settings.packaged_resources_root / "locks" / "ont-analysis-linux-64.lock"
+
+
+def ont_runtime_lock_mismatches() -> list[str]:
+    prefix = _managed_bin("ont-analysis").parent
+    repair_problems = modkit_repair.problems(prefix)
+    if not (prefix / "conda-meta").is_dir():
+        return repair_problems
+    expected = _lock_package_versions(ont_conda_lock_path(), _ONT_LOCK_PACKAGES)
+    installed = _prefix_package_versions(prefix)
+    return repair_problems + [
+        f"{name}: expected {expected.get(name, 'unavailable')}, "
+        f"installed {installed.get(name, 'missing')}"
+        for name in _ONT_LOCK_PACKAGES
+        if name not in expected or installed.get(name) != expected[name]
+    ]
 
 
 def _lock_package_versions(lock_path: Path, package_names: tuple[str, ...]) -> dict[str, str]:
@@ -246,12 +288,17 @@ def ont_lock_provenance(prefix: Path | None = None) -> dict[str, object]:
     if prefix is None:
         with suppress(OSError, ValueError):
             installed = _prefix_package_versions(_managed_bin("ont-analysis").parent)
+    repair: dict[str, object] = {}
+    with suppress(OSError, ValueError, TypeError):
+        selected = prefix if prefix is not None else _managed_bin("ont-analysis").parent
+        repair = modkit_repair.validate(selected / "bin/modkit", selected / "modkit-repair.json")
     return {
         "lock_path": str(lock_path),
         "lock_sha256": digest,
         "resolved_versions": {
             name: installed[name] for name in _ONT_LOCK_PACKAGES if name in installed
         },
+        "modkit_repair": repair,
     }
 
 
@@ -290,6 +337,7 @@ def _version_arguments(tool: str) -> list[str]:
 def _environment_for_prefix(pipeline_identifier: str, prefix: Path) -> dict[str, str]:
     managed_bin = prefix / "bin"
     environment = os.environ.copy()
+    environment.pop("MISSUS_TOM_API_TOKEN", None)
     for key in tuple(environment):
         if key == "JAVA_HOME" or key.startswith(("R_", "PYTHON", "CONDA_", "LD_")):
             environment.pop(key, None)
@@ -486,6 +534,16 @@ class DependencyInstaller:
                     )
                 )
             if pipeline_identifier == "ont-analysis":
+                mismatches = ont_runtime_lock_mismatches()
+                if mismatches:
+                    items.append(
+                        DependencyRequirement(
+                            name="Locked ONT environment",
+                            installed=False,
+                            managed=managed,
+                            detail="Reinstall ONT dependencies in Setup: " + "; ".join(mismatches),
+                        )
+                    )
                 items.append(
                     self._r_requirement(
                         pipeline_identifier, managed, ONT_R_PACKAGES, "ONT R packages"
@@ -623,7 +681,7 @@ class DependencyInstaller:
             )
         try:
             result = subprocess.run(
-                [docker, "image", "inspect", "missus-tom/rnaseq-analysis:0.3.0", *_DOCKER_IMAGES],
+                [docker, "image", "inspect", bulk_analysis_image(), *_DOCKER_IMAGES],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -670,6 +728,7 @@ class DependencyInstaller:
             data = handle.read(limit)
         truncated = truncated or clamped + len(data) < size
         return CommandLogChunk(
+            log_path=str(path),
             text=data.decode("utf-8", errors="replace"),
             truncated=truncated,
             next_offset=clamped + len(data),
@@ -780,6 +839,7 @@ class DependencyInstaller:
                 )
             if job.pipeline_identifier == "ont-analysis":
                 self._install_dorado(job, environment.parent)
+                self._install_modkit_repair(job, environment)
             self._verify_environment(job, environment)
             self._activate(root, environment)
             activated = True
@@ -866,6 +926,8 @@ class DependencyInstaller:
         )
 
     def _verify_ont_lock_versions(self, job: DependencyInstallJob, prefix: Path) -> None:
+        repair = modkit_repair.validate(prefix / "bin/modkit", prefix / "modkit-repair.json")
+        self._log(job, "Verified Modkit repair: " + str(repair["repair_id"]))
         expected = _lock_package_versions(ont_conda_lock_path(), _ONT_LOCK_PACKAGES)
         installed = _prefix_package_versions(prefix)
         missing = [name for name in _ONT_LOCK_PACKAGES if name not in installed]
@@ -888,6 +950,24 @@ class DependencyInstaller:
             "Verified locked ONT versions: "
             + ", ".join(f"{name}={installed[name]}" for name in _ONT_LOCK_PACKAGES),
         )
+
+    def _install_modkit_repair(self, job: DependencyInstallJob, prefix: Path) -> None:
+        artifact = modkit_repair.artifact_directory()
+        try:
+            manifest = modkit_repair.validate(artifact / "modkit", artifact / "manifest.json")
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "Verified Modkit repair artifact unavailable. Development builds must run "
+                "scripts/build-modkit-repair.py before installing ONT dependencies."
+            ) from exc
+        # Unlink first: conda may hardlink package-cache files into the prefix.
+        binary = prefix / "bin/modkit"
+        binary.unlink(missing_ok=True)
+        shutil.copyfile(artifact / "modkit", binary)
+        binary.chmod(0o755)
+        (prefix / "modkit-repair.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        modkit_repair.validate(binary, prefix / "modkit-repair.json")
+        self._log(job, "Installed " + str(manifest["repair_id"]))
 
     def _remove_failed_candidate(self, job: DependencyInstallJob, environment: Path) -> None:
         root = _managed_root(job.pipeline_identifier).resolve()

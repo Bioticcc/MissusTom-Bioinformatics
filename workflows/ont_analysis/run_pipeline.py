@@ -9,16 +9,19 @@ configuration from this repository.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+REFERENCE_CONTRACT = runpy.run_path(str(ROOT / "reference_contract.py"))
 STAGES = tuple(ROOT / "stages" / f"{number:02d}_{name}.sh" for number, name in (
     (1, "align_modbam"), (2, "finalize_alignment"), (3, "ont_qc_and_coverage"),
     (4, "methylation_analysis"), (5, "methylation_exploration"),
@@ -119,15 +122,26 @@ def validate_settings(settings: dict[str, object], cpus: int, memory_gb: float) 
     merged["coverage_thresholds"] = thresholds
     return merged
 
-def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
+def load_manifest(
+    path: Path,
+    outdir: Path,
+    run_id: str,
+    *,
+    sample_id: str | None = None,
+    expected_bam_count: int | None = None,
+    use_selected_sample_bam_count: bool = False,
+    reference_output: Path | None = None,
+) -> dict[str, str]:
     try: data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc: raise ManifestError(f"cannot read JSON manifest: {exc}") from exc
     if not isinstance(data, dict): raise ManifestError("manifest must be a JSON object")
     if data.get("schema_version") != "1.0.0": raise ManifestError("schema_version must be '1.0.0'")
     if data.get("pipeline_identifier") != "ont-analysis" or data.get("pipeline_version") != "0.1.0":
         raise ManifestError("ONT runner requires pipeline_identifier 'ont-analysis' and pipeline_version '0.1.0'")
-    if data.get("organism") != "Mus musculus" or data.get("reference_genome") != "GRCm38p6":
-        raise ManifestError("ONT runner supports only Mus musculus GRCm38p6")
+    try:
+        REFERENCE_CONTRACT["reference_profile"](data.get("organism"), data.get("reference_genome"))
+    except ValueError as exc:
+        raise ManifestError(str(exc)) from exc
     if data.get("execution_profile") != "local": raise ManifestError("ONT runner supports only the local execution profile")
     resources = data.get("reference_resources")
     samples = data.get("samples")
@@ -136,6 +150,9 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
     input_directory = data.get("input_directory")
     if not isinstance(resources, dict) or not isinstance(samples, list) or not isinstance(parameters, dict) or not isinstance(profile, dict):
         raise ManifestError("reference_resources, samples, parameters, and resource_profile must be objects/arrays")
+    modification_mode = parameters.get("modification_mode", "5mc_5hmc")
+    if modification_mode not in ("5mc_5hmc", "5mc_only"):
+        raise ManifestError("modification_mode must be 5mc_5hmc or 5mc_only")
     if not isinstance(input_directory, str): raise ManifestError("input_directory must be a path string")
     input_root = Path(input_directory).resolve()
     if not input_root.is_dir(): raise ManifestError(f"input_directory is not a directory: {input_root}")
@@ -143,7 +160,12 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
     if not isinstance(reference_name, str) or not reference_name.strip():
         raise ManifestError("reference_genome must be a non-empty string")
     included = [item for item in samples if isinstance(item, dict) and item.get("included") is True]
-    if len(included) != 1: raise ManifestError("ONT execution requires exactly one included sample")
+    if sample_id is not None:
+        included = [item for item in included if item.get("sample_id") == sample_id]
+        if len(included) != 1:
+            raise ManifestError(f"ONT execution could not select included sample: {sample_id}")
+    elif len(included) != 1:
+        raise ManifestError("load_manifest requires exactly one included sample")
     if data.get("comparisons"):
         raise ManifestError("ONT single-sample execution does not accept comparisons")
     sample = included[0]
@@ -160,7 +182,13 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
     if len(set(bams)) != len(bams): raise ManifestError("sample.ont_bam_files contains duplicate paths")
     names = [bam.name for bam in bams]
     if len(set(names)) != len(names): raise ManifestError("sample.ont_bam_files contains duplicate BAM basenames")
-    expected_count = parameters.get("expected_pass_bam_count", len(bams))
+    expected_count = (
+        expected_bam_count
+        if expected_bam_count is not None
+        else len(bams)
+        if use_selected_sample_bam_count
+        else parameters.get("expected_pass_bam_count", len(bams))
+    )
     if (
         not isinstance(expected_count, int)
         or isinstance(expected_count, bool)
@@ -171,8 +199,24 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
             "parameters.expected_pass_bam_count must match the assigned ONT BAM count"
         )
     ref = path_value(resources.get("reference_fasta"), base, "resources.reference_fasta")
-    mmi = path_value(resources.get("minimap2_index"), base, "resources.minimap2_index")
+    supplied_mmi = "minimap2_index" in resources
+    mmi = (
+        path_value(resources["minimap2_index"], base, "resources.minimap2_index")
+        if supplied_mmi
+        else (reference_output or outdir / "reference") / "reference.lr-hq.mmi"
+    )
+    if not supplied_mmi:
+        reject_symlink_components(mmi, "generated reference index")
+        mmi = mmi.resolve()
+    if supplied_mmi and mmi.stat().st_size == 0:
+        raise ManifestError("resources.minimap2_index must not be empty")
     reference_fai = path_value(resources.get("reference_fai"), base, "resources.reference_fai")
+    try:
+        chromosomes = REFERENCE_CONTRACT["main_chromosomes"](
+            reference_fai, data["organism"], data["reference_genome"]
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ManifestError(f"Invalid ONT reference FAI: {exc}") from exc
     annotation_keys = ("gencode_gff3", "cpg_islands", "ccre_table", "intergenic_bed")
     supplied_annotations = [key for key in annotation_keys if key in resources]
     if supplied_annotations and len(supplied_annotations) != len(annotation_keys):
@@ -205,6 +249,10 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
     if output.is_relative_to(input_root) or input_root.is_relative_to(output):
         raise ManifestError("outdir must be separate from and outside input_directory")
     values = {
+        "MODIFICATION_MODE": modification_mode,
+        "REFERENCE_MMI_GENERATED": "0" if supplied_mmi else "1",
+        "MINIMAP2_BIN": "" if supplied_mmi else path_tool("minimap2"),
+        "ORGANISM": data["organism"], "MAIN_CHROMOSOMES": ",".join(chromosomes),
         "WORKFLOW_ROOT": str(ROOT), "RUN_ID": run_id, "SAMPLE_ID": sample_id, "REFERENCE_NAME": reference_name.strip(),
         "SAMPLE_OUTPUT": str(output), "REFERENCE_FASTA": str(ref), "REFERENCE_FAI": str(reference_fai), "REFERENCE_MMI": str(mmi),
         "ANNOTATION_EXPLORATION_ENABLED": "1" if annotations else "0",
@@ -225,6 +273,48 @@ def load_manifest(path: Path, outdir: Path, run_id: str) -> dict[str, str]:
     values["MANIFEST_PATH"] = str(path.resolve())
     values["BAM_FILES"] = "\n".join(str(item) for item in bams) + "\n"
     return values
+
+
+def included_sample_ids(path: Path) -> list[str]:
+    """Read only enough of a project manifest to schedule isolated sample runs."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManifestError(f"cannot read JSON manifest: {exc}") from exc
+    samples = data.get("samples") if isinstance(data, dict) else None
+    if not isinstance(samples, list):
+        raise ManifestError("samples must be an array")
+    selected = [item for item in samples if isinstance(item, dict) and item.get("included") is True]
+    identifiers = [item.get("sample_id") for item in selected]
+    if not identifiers:
+        raise ManifestError("ONT execution requires at least one included sample")
+    if any(not isinstance(value, str) or not RUN_ID.fullmatch(value) for value in identifiers):
+        raise ManifestError("included sample.sample_id must be a safe identifier")
+    if len(set(identifiers)) != len(identifiers):
+        raise ManifestError("included ONT sample identifiers must be unique")
+    if data.get("comparisons"):
+        raise ManifestError(
+            "ONT comparative analysis is not implemented; remove comparisons to run independent samples"
+        )
+    parameters = data.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise ManifestError("parameters must be an object")
+    expected_count = parameters.get("expected_pass_bam_count")
+    assigned_count = sum(
+        len(item.get("ont_bam_files", []))
+        for item in selected
+        if isinstance(item.get("ont_bam_files"), list)
+    )
+    if expected_count is not None and (
+        not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count <= 0
+        or expected_count != assigned_count
+    ):
+        raise ManifestError(
+            "parameters.expected_pass_bam_count must match the assigned ONT BAM count"
+        )
+    return identifiers
 
 def write_config(values: dict[str, str], output: Path) -> Path:
     reject_symlink_components(output, "outdir")
@@ -278,24 +368,62 @@ def main() -> int:
     parser.add_argument("--outdir", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--reports-only", action="store_true", help="Refresh Stage 05 from existing published outputs; do not align or call methylation")
     args = parser.parse_args()
     if not RUN_ID.fullmatch(args.run_id): parser.error("--run-id may contain only letters, numbers, dot, underscore, and hyphen")
+    report_lock = None
     try:
         if not args.manifest.is_file(): raise ManifestError(f"manifest not found: {args.manifest}")
         requested_output = args.outdir.expanduser()
         reject_symlink_components(requested_output, "outdir")
         output = requested_output.resolve()
-        values = load_manifest(args.manifest.resolve(), output, args.run_id)
-        env_path = write_config(values, output)
-        if args.check_only:
-            print(f"CHECK-ONLY: manifest, contained BAM paths, resources, PATH tools, and generated config validate: {env_path}")
+        if args.reports_only:
+            report_lock = os.open(output.parent / "logs/.active-run.lock", os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(report_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ManifestError("Cannot refresh reports while this project has an active run") from exc
+        sample_ids = included_sample_ids(args.manifest.resolve())
+        environments: list[tuple[str, Path]] = []
+        for sample_id in sample_ids:
+            if args.reports_only:
+                env_path = output / "samples" / sample_id / "config/project.env"
+                reject_symlink_components(env_path, "report configuration")
+                if not env_path.is_file():
+                    raise ManifestError(f"No existing report configuration: {env_path}")
+                environments.append((sample_id, env_path))
+                continue
+            values = load_manifest(
+                args.manifest.resolve(),
+                output / "samples" / sample_id,
+                args.run_id,
+                sample_id=sample_id,
+                use_selected_sample_bam_count=True,
+                reference_output=output / "reference",
+            )
+            environments.append((sample_id, write_config(values, output / "samples" / sample_id)))
+        if args.check_only and args.reports_only:
+            for _, env_path in environments:
+                subprocess.run(["bash", str(STAGES[-1]), "--check-only"], check=True, env=os.environ | {"PIPELINE_ENV": str(env_path)})
             return 0
-        for stage in STAGES:
-            command = ["bash", str(stage)]
-            print("RUN:", " ".join(command), flush=True)
-            environment = os.environ | {"PIPELINE_ENV": str(env_path)}
-            subprocess.run(command, check=True, env=environment)  # fixed argv; never a shell
+        if args.check_only:
+            print(
+                "CHECK-ONLY: manifest, contained BAM paths, resources, PATH tools, and "
+                f"generated config validate for {len(environments)} sample(s)"
+            )
+            return 0
+        for sample_id, env_path in environments:
+            print(f"RUN SAMPLE: {sample_id}", flush=True)
+            for stage in (STAGES[-1:] if args.reports_only else STAGES):
+                command = ["bash", str(stage)]
+                print("RUN:", " ".join(command), flush=True)
+                environment = os.environ | {"PIPELINE_ENV": str(env_path)}
+                subprocess.run(command, check=True, env=environment)  # fixed argv; never a shell
+        subprocess.run([sys.executable, str(ROOT / "lib/build_qc_overview.py"), "--manifest", str(args.manifest.resolve()), "--results", str(output)], check=True)
     except (ManifestError, OSError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr); return 1
+    finally:
+        if report_lock is not None:
+            os.close(report_lock)
     return 0
 if __name__ == "__main__": raise SystemExit(main())

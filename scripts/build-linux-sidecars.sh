@@ -32,6 +32,7 @@ if ! "${sidecar_python}" -c "import PyInstaller"; then
 fi
 
 resource_stage="${backend_root}/build/sidecar-resources"
+"${sidecar_python}" "${repository_root}/scripts/build-modkit-repair.py"
 rm -rf "${resource_stage}"
 lock_source="${backend_root}/src/missus_tom/resources/locks/bulk-rnaseq-linux-64.lock"
 if [[ ! -s "${lock_source}" ]] || ! grep -qx '@EXPLICIT' "${lock_source}"; then
@@ -48,6 +49,9 @@ cp -a "${repository_root}/workflows" "${resource_stage}/workflows"
 cp -a "${repository_root}/scripts/build-analysis-image.sh" "${resource_stage}/scripts/"
 mkdir -p "${resource_stage}/resources/locks"
 cp -a "${backend_root}/src/missus_tom/resources/locks/." "${resource_stage}/resources/locks/"
+cp -a "${backend_root}/src/missus_tom/resources/modkit-repair" "${resource_stage}/resources/"
+mkdir -p "${resource_stage}/resources/analysis-tools"
+cp -a "${backend_root}/build/analysis-tools/modkit-repair" "${resource_stage}/resources/analysis-tools/"
 if git -C "${repository_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "${repository_root}" rev-parse HEAD > "${resource_stage}/resources/build_revision.txt"
 fi

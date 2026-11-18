@@ -12,7 +12,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-
 COUNTER_KEYS = (
     "reference_cpg_sites",
     "covered_cpg_sites",
@@ -31,7 +30,7 @@ def empty_counts() -> dict[str, int]:
     return {key: 0 for key in COUNTER_KEYS}
 
 
-def fail(message: str) -> "None":
+def fail(message: str) -> None:
     raise ValueError(message)
 
 
@@ -46,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chromosome-out", required=True, type=Path)
     parser.add_argument("--window-out", required=True, type=Path)
     parser.add_argument("--call-coverage-out", required=True, type=Path)
+    parser.add_argument(
+        "--modification-mode", choices=("5mc_5hmc", "5mc_only"), default="5mc_5hmc"
+    )
     return parser.parse_args()
 
 
@@ -76,7 +78,13 @@ def pct(numerator: int, denominator: int) -> str:
 
 
 def observation_total(counts: dict[str, int]) -> int:
-    return counts["valid"] + counts["fail"] + counts["nocall"] + counts["delete"] + counts["diff"]
+    return (
+        counts["valid"]
+        + counts["fail"]
+        + counts["nocall"]
+        + counts["delete"]
+        + counts["diff"]
+    )
 
 
 def add_counts(target: dict[str, int], source: dict[str, int]) -> None:
@@ -98,7 +106,9 @@ def count_reference_cpgs(
 
     def finish_contig() -> None:
         if current is not None and offset != contigs[current]:
-            fail(f"FASTA length disagrees with FAI for {current}: {offset} != {contigs[current]}")
+            fail(
+                f"FASTA length disagrees with FAI for {current}: {offset} != {contigs[current]}"
+            )
 
     with fasta.open("rt", encoding="ascii") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -129,7 +139,9 @@ def count_reference_cpgs(
                     break
                 c_position = joined_start + found
                 chromosome_counts[current]["reference_cpg_sites"] += 1
-                window_counts[current][c_position // window_size]["reference_cpg_sites"] += 1
+                window_counts[current][c_position // window_size][
+                    "reference_cpg_sites"
+                ] += 1
                 search_from = found + 1
             offset += len(sequence)
             previous = sequence[-1:]
@@ -166,7 +178,9 @@ def bed_rows(path: Path):
                 continue
             fields = line.rstrip("\n").split("\t")
             if len(fields) != 18:
-                fail(f"{path}:{line_number}: expected 18 tab-delimited bedMethyl columns")
+                fail(
+                    f"{path}:{line_number}: expected 18 tab-delimited bedMethyl columns"
+                )
             try:
                 row = BedRow(
                     chrom=fields[0],
@@ -217,7 +231,10 @@ def validate_single_row(path: Path, line_number: int, row: BedRow) -> None:
     if row.valid != component_valid:
         fail(f"{path}:{line_number}: invalid valid-coverage identity")
     expected_percent = 100.0 * row.modified / row.valid if row.valid else 0.0
-    if not math.isfinite(row.percent_modified) or abs(expected_percent - row.percent_modified) > 0.011:
+    if (
+        not math.isfinite(row.percent_modified)
+        or abs(expected_percent - row.percent_modified) > 0.011
+    ):
         fail(f"{path}:{line_number}: percent modified disagrees with counts")
 
 
@@ -227,6 +244,7 @@ def aggregate_bedmethyl(
     chromosome_counts: dict[str, dict[str, int]],
     window_counts: dict[str, list[dict[str, int]]],
     window_size: int,
+    modification_mode: str = "5mc_5hmc",
 ) -> int:
     iterator = iter(bed_rows(path))
     contig_order = {name: index for index, name in enumerate(contigs)}
@@ -238,38 +256,75 @@ def aggregate_bedmethyl(
             line_a, row_a = next(iterator)
         except StopIteration:
             break
-        try:
-            line_b, row_b = next(iterator)
-        except StopIteration:
-            fail(f"{path}: final CpG position has only one modification row")
+        if modification_mode == "5mc_only":
+            validate_single_row(path, line_a, row_a)
+            if row_a.code != "m" or row_a.other_modified != 0:
+                fail(
+                    f"{path}:{line_a}: 5mC-only mode requires m rows "
+                    "with no other modification counts"
+                )
+            m_row, h_row = row_a, None
+        else:
+            try:
+                line_b, row_b = next(iterator)
+            except StopIteration:
+                fail(f"{path}: final CpG position has only one modification row")
 
-        validate_single_row(path, line_a, row_a)
-        validate_single_row(path, line_b, row_b)
-        if (row_a.chrom, row_a.start, row_a.end) != (row_b.chrom, row_b.start, row_b.end):
-            fail(f"{path}:{line_a}: 5mC/5hmC rows are not paired by coordinate")
-        rows = {row_a.code: row_a, row_b.code: row_b}
-        if set(rows) != {"m", "h"}:
-            fail(f"{path}:{line_a}: expected exactly one m row and one h row")
-        m_row, h_row = rows["m"], rows["h"]
-        if m_row.chrom not in contigs or m_row.start < 0 or m_row.end > contigs[m_row.chrom]:
+            validate_single_row(path, line_a, row_a)
+            validate_single_row(path, line_b, row_b)
+            if (row_a.chrom, row_a.start, row_a.end) != (
+                row_b.chrom,
+                row_b.start,
+                row_b.end,
+            ):
+                fail(f"{path}:{line_a}: 5mC/5hmC rows are not paired by coordinate")
+            rows = {row_a.code: row_a, row_b.code: row_b}
+            if set(rows) != {"m", "h"}:
+                fail(f"{path}:{line_a}: expected exactly one m row and one h row")
+            m_row, h_row = rows["m"], rows["h"]
+        if (
+            m_row.chrom not in contigs
+            or m_row.start < 0
+            or m_row.end > contigs[m_row.chrom]
+        ):
             fail(f"{path}:{line_a}: coordinate absent from FAI")
         key = (contig_order[m_row.chrom], m_row.start)
         if previous_key is not None and key <= previous_key:
             fail(f"{path}:{line_a}: CpG coordinates are duplicated or unsorted")
         previous_key = key
-        shared_a = (m_row.valid, m_row.canonical, m_row.delete, m_row.failed, m_row.different, m_row.nocall)
-        shared_b = (h_row.valid, h_row.canonical, h_row.delete, h_row.failed, h_row.different, h_row.nocall)
-        if shared_a != shared_b:
-            fail(f"{path}:{line_a}: paired m/h rows disagree on shared counts")
-        if m_row.other_modified != h_row.modified or h_row.other_modified != m_row.modified:
-            fail(f"{path}:{line_a}: paired other-modified counts do not cross-match")
+        if h_row is not None:
+            shared_a = (
+                m_row.valid,
+                m_row.canonical,
+                m_row.delete,
+                m_row.failed,
+                m_row.different,
+                m_row.nocall,
+            )
+            shared_b = (
+                h_row.valid,
+                h_row.canonical,
+                h_row.delete,
+                h_row.failed,
+                h_row.different,
+                h_row.nocall,
+            )
+            if shared_a != shared_b:
+                fail(f"{path}:{line_a}: paired m/h rows disagree on shared counts")
+            if (
+                m_row.other_modified != h_row.modified
+                or h_row.other_modified != m_row.modified
+            ):
+                fail(
+                    f"{path}:{line_a}: paired other-modified counts do not cross-match"
+                )
 
         site = empty_counts()
         site["covered_cpg_sites"] = 1
         site["valid"] = m_row.valid
         site["canonical"] = m_row.canonical
         site["mod_m"] = m_row.modified
-        site["mod_h"] = h_row.modified
+        site["mod_h"] = h_row.modified if h_row is not None else 0
         site["fail"] = m_row.failed
         site["nocall"] = m_row.nocall
         site["delete"] = m_row.delete
@@ -279,7 +334,7 @@ def aggregate_bedmethyl(
         site_count += 1
 
     if site_count == 0:
-        fail(f"{path}: no paired CpG bedMethyl records")
+        fail(f"{path}: no valid CpG bedMethyl records")
     return site_count
 
 
@@ -287,11 +342,22 @@ def validate_modkit_stats(
     path: Path,
     contigs: OrderedDict[str, int],
     chromosome_counts: dict[str, dict[str, int]],
+    modification_mode: str = "5mc_5hmc",
 ) -> None:
     seen: set[str] = set()
     with path.open("rt", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        required = {"#chrom", "start", "end", "count_h", "count_valid_h", "count_m", "count_valid_m"}
+        required = {
+            "#chrom",
+            "start",
+            "end",
+            "count_h",
+            "count_valid_h",
+            "count_m",
+            "count_valid_m",
+        }
+        if modification_mode == "5mc_only":
+            required -= {"count_h", "count_valid_h"}
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             fail(f"{path}: unexpected Modkit stats header")
         for row in reader:
@@ -302,8 +368,8 @@ def validate_modkit_stats(
             try:
                 start = int(row["start"])
                 end = int(row["end"])
-                count_h = int(row["count_h"])
-                valid_h = int(row["count_valid_h"])
+                count_h = int(row.get("count_h", "0"))
+                valid_h = int(row.get("count_valid_h", "0"))
                 count_m = int(row["count_m"])
                 valid_m = int(row["count_valid_m"])
             except ValueError:
@@ -314,13 +380,30 @@ def validate_modkit_stats(
                 or end != contigs[chrom]
                 or count_h != counts["mod_h"]
                 or count_m != counts["mod_m"]
-                or valid_h != counts["valid"]
+                or (modification_mode == "5mc_5hmc" and valid_h != counts["valid"])
                 or valid_m != counts["valid"]
             ):
-                fail(f"{path}: Modkit stats disagree with bedMethyl aggregation for {chrom}")
-    missing = [name for name in contigs if name not in seen]
+                fail(
+                    f"{path}: Modkit stats disagree with bedMethyl aggregation for {chrom}"
+                )
+    # Modkit stats omits contigs absent from the indexed bedMethyl. The complete
+    # validated bedMethyl scan above counts every emitted coordinate, including
+    # rows with zero valid calls. Only genuinely empty contigs may be omitted;
+    # keep their reference CpG denominators and zero call counts in our outputs.
+    missing = [
+        name
+        for name in contigs
+        if name not in seen and chromosome_counts[name]["covered_cpg_sites"] > 0
+    ]
     if missing:
         fail(f"{path}: missing chromosome row: {missing[0]}")
+    empty = [name for name in contigs if name not in seen]
+    if empty:
+        print(
+            f"METHYLATION: included {len(empty)} verified empty bedMethyl contigs "
+            "in reference-wide summaries",
+            file=sys.stderr,
+        )
 
 
 def summary_header() -> list[str]:
@@ -346,10 +429,17 @@ def summary_header() -> list[str]:
         "different_base_calls",
         "total_observations",
         "pct_valid_calls_of_observations",
+        "modification_mode",
     ]
 
 
-def summary_row(chrom: str, start: int, end: int, counts: dict[str, int]) -> list[str | int]:
+def summary_row(
+    chrom: str,
+    start: int,
+    end: int,
+    counts: dict[str, int],
+    modification_mode: str = "5mc_5hmc",
+) -> list[str | int]:
     total_modified = counts["mod_m"] + counts["mod_h"]
     observations = observation_total(counts)
     return [
@@ -363,10 +453,12 @@ def summary_row(chrom: str, start: int, end: int, counts: dict[str, int]) -> lis
         counts["valid"],
         counts["canonical"],
         counts["mod_m"],
-        counts["mod_h"],
+        counts["mod_h"] if modification_mode == "5mc_5hmc" else "NA",
         total_modified,
         pct(counts["mod_m"], counts["valid"]),
-        pct(counts["mod_h"], counts["valid"]),
+        pct(counts["mod_h"], counts["valid"])
+        if modification_mode == "5mc_5hmc"
+        else "NA",
         pct(total_modified, counts["valid"]),
         counts["fail"],
         counts["nocall"],
@@ -374,6 +466,7 @@ def summary_row(chrom: str, start: int, end: int, counts: dict[str, int]) -> lis
         counts["diff"],
         observations,
         pct(counts["valid"], observations),
+        modification_mode,
     ]
 
 
@@ -383,12 +476,16 @@ def write_outputs(
     chromosome_counts: dict[str, dict[str, int]],
     window_counts: dict[str, list[dict[str, int]]],
 ) -> None:
+    mode = args.modification_mode
     global_counts = empty_counts()
     for counts in chromosome_counts.values():
         add_counts(global_counts, counts)
     if global_counts["valid"] <= 0:
         fail("global valid CpG call denominator is zero")
-    if global_counts["canonical"] + global_counts["mod_m"] + global_counts["mod_h"] != global_counts["valid"]:
+    if (
+        global_counts["canonical"] + global_counts["mod_m"] + global_counts["mod_h"]
+        != global_counts["valid"]
+    ):
         fail("global canonical + 5mC + 5hmC does not equal valid calls")
 
     total_modified = global_counts["mod_m"] + global_counts["mod_h"]
@@ -404,18 +501,65 @@ def write_outputs(
                 "percent_of_valid_calls",
                 "modified_call_denominator",
                 "percent_of_modified_calls",
+                "modification_mode",
+                "measurement_status",
             ]
         )
-        writer.writerow(["CpG", "5mC", "m", global_counts["mod_m"], global_counts["valid"], pct(global_counts["mod_m"], global_counts["valid"]), total_modified, pct(global_counts["mod_m"], total_modified)])
-        writer.writerow(["CpG", "5hmC", "h", global_counts["mod_h"], global_counts["valid"], pct(global_counts["mod_h"], global_counts["valid"]), total_modified, pct(global_counts["mod_h"], total_modified)])
-        writer.writerow(["CpG", "total_modified", "m+h", total_modified, global_counts["valid"], pct(total_modified, global_counts["valid"]), total_modified, pct(total_modified, total_modified)])
-        writer.writerow(["CpG", "canonical_C", "C", global_counts["canonical"], global_counts["valid"], pct(global_counts["canonical"], global_counts["valid"]), "NA", "NA"])
+        rows = [
+            [
+                "CpG",
+                "5mC",
+                "m",
+                global_counts["mod_m"],
+                global_counts["valid"],
+                pct(global_counts["mod_m"], global_counts["valid"]),
+                total_modified,
+                pct(global_counts["mod_m"], total_modified),
+            ],
+            [
+                "CpG",
+                "5hmC",
+                "h",
+                global_counts["mod_h"],
+                global_counts["valid"],
+                pct(global_counts["mod_h"], global_counts["valid"]),
+                total_modified,
+                pct(global_counts["mod_h"], total_modified),
+            ],
+            [
+                "CpG",
+                "total_modified",
+                "m+h" if mode == "5mc_5hmc" else "m",
+                total_modified,
+                global_counts["valid"],
+                pct(total_modified, global_counts["valid"]),
+                total_modified,
+                pct(total_modified, total_modified),
+            ],
+            [
+                "CpG",
+                "canonical_C",
+                "C",
+                global_counts["canonical"],
+                global_counts["valid"],
+                pct(global_counts["canonical"], global_counts["valid"]),
+                "NA",
+                "NA",
+            ],
+        ]
+        for row in rows:
+            unavailable = mode == "5mc_only" and row[1] == "5hmC"
+            if unavailable:
+                row[3:] = ["NA"] * 5
+            writer.writerow(row + [mode, "not_measured" if unavailable else "measured"])
 
     with args.chromosome_out.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(summary_header())
         for chrom, length in contigs.items():
-            writer.writerow(summary_row(chrom, 0, length, chromosome_counts[chrom]))
+            writer.writerow(
+                summary_row(chrom, 0, length, chromosome_counts[chrom], mode)
+            )
 
     with args.window_out.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -426,7 +570,7 @@ def write_outputs(
             for index, counts in enumerate(window_counts[chrom]):
                 start = index * args.window_size
                 end = min(start + args.window_size, length)
-                writer.writerow(summary_row(chrom, start, end, counts))
+                writer.writerow(summary_row(chrom, start, end, counts, mode))
 
     with args.call_coverage_out.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -450,7 +594,9 @@ def write_outputs(
             ]
         )
 
-        def coverage_row(scope: str, chrom: str, start: int, end: int, counts: dict[str, int]):
+        def coverage_row(
+            scope: str, chrom: str, start: int, end: int, counts: dict[str, int]
+        ):
             observations = observation_total(counts)
             return [
                 scope,
@@ -470,9 +616,13 @@ def write_outputs(
                 pct(counts["valid"], observations),
             ]
 
-        writer.writerow(coverage_row("genome", "ALL", 0, sum(contigs.values()), global_counts))
+        writer.writerow(
+            coverage_row("genome", "ALL", 0, sum(contigs.values()), global_counts)
+        )
         for chrom, length in contigs.items():
-            writer.writerow(coverage_row("chromosome", chrom, 0, length, chromosome_counts[chrom]))
+            writer.writerow(
+                coverage_row("chromosome", chrom, 0, length, chromosome_counts[chrom])
+            )
 
 
 def main() -> int:
@@ -482,15 +632,32 @@ def main() -> int:
     contigs = read_fai(args.fai)
     chromosome_counts = {name: empty_counts() for name in contigs}
     window_counts = {
-        name: [empty_counts() for _ in range((length + args.window_size - 1) // args.window_size)]
+        name: [
+            empty_counts()
+            for _ in range((length + args.window_size - 1) // args.window_size)
+        ]
         for name, length in contigs.items()
     }
-    count_reference_cpgs(args.fasta, contigs, chromosome_counts, window_counts, args.window_size)
-    aggregate_bedmethyl(args.bedmethyl, contigs, chromosome_counts, window_counts, args.window_size)
+    count_reference_cpgs(
+        args.fasta, contigs, chromosome_counts, window_counts, args.window_size
+    )
+    aggregate_bedmethyl(
+        args.bedmethyl,
+        contigs,
+        chromosome_counts,
+        window_counts,
+        args.window_size,
+        args.modification_mode,
+    )
     for chrom in contigs:
-        if chromosome_counts[chrom]["covered_cpg_sites"] > chromosome_counts[chrom]["reference_cpg_sites"]:
+        if (
+            chromosome_counts[chrom]["covered_cpg_sites"]
+            > chromosome_counts[chrom]["reference_cpg_sites"]
+        ):
             fail(f"more covered CpG sites than reference CpGs on {chrom}")
-    validate_modkit_stats(args.modkit_stats, contigs, chromosome_counts)
+    validate_modkit_stats(
+        args.modkit_stats, contigs, chromosome_counts, args.modification_mode
+    )
     write_outputs(args, contigs, chromosome_counts, window_counts)
     return 0
 
@@ -500,4 +667,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
