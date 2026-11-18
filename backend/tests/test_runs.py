@@ -50,6 +50,9 @@ class StubAdapter:
         ]
 
 
+SLEEPING_PROCESS_READY = "sleeping-process-ready"
+
+
 class SleepingAdapter(StubAdapter):
     def construct_command(
         self,
@@ -60,7 +63,10 @@ class SleepingAdapter(StubAdapter):
         return [
             sys.executable,
             "-c",
-            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+            "import pathlib, signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(30)",
+            str(self.repository_root / SLEEPING_PROCESS_READY),
         ]
 
 
@@ -623,15 +629,19 @@ def test_cancellation_retains_admission_until_process_reaped(
     manifest_payload["output_directory"] = str(tmp_path / "project")
     manifest = ProjectManifest.model_validate(manifest_payload)
     (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
-    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 0.1)
+    # The process ignores SIGTERM, so this grace period keeps admission held long
+    # enough for the second start below to run on a slow CI machine.
+    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 3.0)
     monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.1)
     manager = RunManager(SleepingAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
     started = manager.start(manifest)
 
-    for _ in range(100):
-        if manager.get(started.job_identifier).status == RunStatus.RUNNING:
+    ready = tmp_path / SLEEPING_PROCESS_READY
+    for _ in range(1000):
+        if ready.exists():
             break
         time.sleep(0.01)
+    assert ready.exists()
     cancelling = manager.cancel(started.job_identifier)
 
     assert cancelling.status == RunStatus.CANCELLING

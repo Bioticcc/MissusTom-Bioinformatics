@@ -72,7 +72,26 @@ jobs:
           sudo mkdir -p /etc/systemd/system/user@.service.d
           printf '[Service]\nDelegate=cpu memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/missus-tom.conf
           sudo systemctl daemon-reload
-          sudo systemctl restart "user@$(id -u).service"
+          user_manager="user@$(id -u).service"
+          # Enabling linger starts this manager in the background, so a restart can collide with it.
+          for attempt in 1 2 3 4 5; do
+            sudo systemctl reset-failed "${user_manager}" || true
+            if sudo systemctl restart "${user_manager}"; then
+              break
+            fi
+            if (( attempt == 5 )); then
+              sudo systemctl status "${user_manager}" --no-pager || true
+              sudo journalctl -xeu "${user_manager}" --no-pager || true
+              exit 1
+            fi
+            sleep 3
+          done
+          for _ in $(seq 1 30); do
+            [[ -S "/run/user/$(id -u)/bus" ]] && exit 0
+            sleep 1
+          done
+          echo "The systemd user session bus did not become available." >&2
+          exit 1
       - name: Verify real descendant containment without skips
         shell: bash
         run: |
