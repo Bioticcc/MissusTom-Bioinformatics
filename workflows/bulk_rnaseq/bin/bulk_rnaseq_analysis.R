@@ -105,7 +105,20 @@ for (directory in c("differential_expression", "figures", "tables")) {
 provenance_dir <- file.path(output_root, "tables", "provenance")
 dir.create(provenance_dir, recursive = TRUE, showWarnings = FALSE)
 
-samples <- read.delim(sample_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+# Sheet values are labels. Reading them as text keeps IDs such as 001 and 101
+# intact and stops R from later treating a numeric ID as a column position.
+read_label_sheet <- function(path) {
+  read.delim(
+    path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    colClasses = "character",
+    na.strings = character(),
+    quote = ""
+  )
+}
+
+samples <- read_label_sheet(sample_sheet_path)
 required_columns <- c("sample_id", "condition", "biological_replicate", "batch", "intervention", "abundance_tsv")
 if (!all(required_columns %in% colnames(samples))) {
   stop("Sample sheet must contain sample_id, condition, biological_replicate, batch, intervention, and abundance_tsv columns")
@@ -113,7 +126,7 @@ if (!all(required_columns %in% colnames(samples))) {
 if (anyDuplicated(samples$sample_id)) stop("Sample identifiers must be unique")
 if (!all(file.exists(samples$abundance_tsv))) stop("One or more abundance tables are missing")
 
-comparisons <- read.delim(comparison_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+comparisons <- read_label_sheet(comparison_sheet_path)
 custom_figures <- read.delim(custom_figures_path, stringsAsFactors = FALSE, check.names = FALSE)
 custom_figure_columns <- c("figure_id", "figure_type", "title", "x_variable", "y_variable", "top_n", "x_axis_mode", "x_axis_minimum", "x_axis_maximum", "y_axis_mode", "y_axis_minimum", "y_axis_maximum")
 if (!all(custom_figure_columns %in% colnames(custom_figures))) {

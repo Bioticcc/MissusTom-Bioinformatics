@@ -620,6 +620,34 @@ def test_output_contract_matches_generated_and_skipped_files(tmp_path: Path) -> 
             assert row["rationale"]
 
 
+def test_numeric_sample_ids_remain_labels(tmp_path: Path) -> None:
+    sample_rows = ["001\tcontrol\t", "002\tcontrol\t", "101\ttreat\t", "102\ttreat\t"]
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=sample_rows,
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample={
+            "001": HIGH_CONTROL,
+            "002": HIGH_CONTROL,
+            "101": HIGH_TREAT,
+            "102": HIGH_TREAT,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    normalized = (
+        tmp_path
+        / "analysis_output"
+        / "tables"
+        / "all_genes"
+        / "cmp_treat_vs_control"
+        / "library_size_normalized_counts.tsv"
+    )
+    header = normalized.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    assert header[-4:] == ["001", "002", "101", "102"]
+
+
 def test_analysis_script_has_no_fixed_human_enst_ensg_assumptions() -> None:
     body = _analysis_script_path().read_text(encoding="utf-8")
     assert "ENST" not in body
