@@ -17,6 +17,27 @@ import test_feature_modes as fixtures
 ROOT = Path(__file__).parents[1]
 
 
+def report_rscript(test):
+    """Return an R able to build the core report, or skip the calling test."""
+    rscript = os.environ.get("ONT_TEST_RSCRIPT") or shutil.which("Rscript")
+    if not rscript:
+        test.skipTest("Rscript unavailable")
+    probe = subprocess.run(
+        [
+            rscript,
+            "--vanilla",
+            "-e",
+            'quit(status=!all(vapply(c("data.table", "ggplot2"), requireNamespace, '
+            "logical(1), quietly=TRUE)))",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode:
+        test.skipTest("Core report R packages unavailable")
+    return rscript
+
+
 class Links(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -32,9 +53,7 @@ class Links(HTMLParser):
 
 class CoreReportQualityTests(unittest.TestCase):
     def test_measured_modes_keep_primary_scope_metrics_and_all_report_links(self):
-        rscript = os.environ.get("ONT_TEST_RSCRIPT") or shutil.which("Rscript")
-        if not rscript:
-            self.skipTest("Rscript unavailable")
+        rscript = report_rscript(self)
         for mode, species, primary in (
             ("5mc_only", "Homo sapiens", 22),
             ("5mc_5hmc", "Mus musculus", 19),
@@ -162,9 +181,7 @@ class CoreReportQualityTests(unittest.TestCase):
                 self.assertTrue((results / "project_qc" / link).is_file())
 
     def test_stage05_publishes_report_previews_and_reuses_complete_output(self):
-        rscript = os.environ.get("ONT_TEST_RSCRIPT") or shutil.which("Rscript")
-        if not rscript:
-            self.skipTest("Rscript unavailable")
+        rscript = report_rscript(self)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = fixtures.FeatureModeTests().make_inputs(root, "5mc_only")
