@@ -42,8 +42,9 @@
     remains available with compatible annotation supplied by the user.
 14. Confirm cutadapt adapter sequences, minimum length 20, quality threshold 20,
     and whether adapters vary by library kit.
-15. Confirm whether `lfcThreshold=0.3` together with normal shrinkage matches the
-    intended hypothesis/reporting semantics.
+15. Resolved 2026-11-18: follow the laboratory baseline. The Wald test uses the
+    project's fold-change threshold as `lfcThreshold`, followed by normal
+    shrinkage and the same threshold on the shrunken value.
 16. Is rlog required for every project despite cost, or may a validated VST path
     be used for larger cohorts?
 17. Are enrichment outputs an intended future stage? No active enrichment stage

@@ -73,8 +73,9 @@ def test_analysis_script_emits_mapping_and_analysis_progress_messages() -> None:
         "Validating transcript-to-gene mapping",
         "Transcript-to-gene mapping complete:",
         "Importing Kallisto abundance tables",
-        "Running DESeq2 for %s (%s)",
-        "Computing rlog/PCA for %s (%s)",
+        "Running DESeq2 for all expressed genes (%s)",
+        "Computing rlog for all expressed genes (%s)",
+        "Computing PCA for %s (%s)",
         "Writing figures and tables for %s (%s)",
         "Analysis complete",
     ):
