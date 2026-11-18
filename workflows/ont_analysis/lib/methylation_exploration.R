@@ -111,6 +111,8 @@ read_tsv <- function(path) {
                     check.names = FALSE)
   }
   if ("#chrom" %in% names(result)) setnames(result, "#chrom", "chrom")
+  # Contigs named 1, 2, 3 are labels; fread would otherwise read them as integers.
+  if ("chrom" %in% names(result)) result[, chrom := as.character(chrom)]
   result
 }
 
@@ -143,6 +145,7 @@ is_main_chromosome <- function(chrom) chrom %chin% chromosome_order
 
 fai <- fread(opt[["fai"]], sep = "\t", header = FALSE, select = 1:2,
              col.names = c("chrom", "length"))
+fai[, chrom := as.character(chrom)]
 fai <- fai[chrom %chin% chromosome_order]
 fai[, chrom := factor(chrom, levels = chromosome_order)]
 setorder(fai, chrom)
@@ -178,6 +181,7 @@ cpg <- fread(
   )
 )
 if (nrow(cpg) == 0L) stop("No 5mC CpG rows were read")
+cpg[, chrom := as.character(chrom)]
 cpg[, total_observations := valid_calls + deletion_calls + failed_filtered_calls +
       different_base_calls + no_call_calls]
 cpg[, `:=`(
@@ -835,12 +839,14 @@ if (file.exists(feature_table_path) && file.info(feature_table_path)$size > 0 &&
 
   intergenic_table <- fread(opt[["intergenic"]], sep = "\t", header = FALSE,
                             select = 1:3, col.names = c("chrom", "start", "end"))
+  intergenic_table[, chrom := as.character(chrom)]
   intergenic_table <- intergenic_table[chrom %chin% chromosome_order & end > start]
   if (!nrow(intergenic_table)) stop("Intergenic BED has no regions on selected chromosomes")
   intergenic <- GRanges(intergenic_table$chrom, IRanges(intergenic_table$start + 1L, intergenic_table$end))
 
   ccre_table <- fread(opt[["ccre"]], sep = "\t", header = TRUE, check.names = FALSE)
   setnames(ccre_table, c("#chrom", "chromStart", "chromEnd"), c("chrom", "start", "end"))
+  ccre_table[, chrom := as.character(chrom)]
   ccre_table <- ccre_table[chrom %chin% chromosome_order & end > start]
   if (!nrow(ccre_table)) stop("cCRE table has no regions on selected chromosomes")
   ccres <- GRanges(ccre_table$chrom, IRanges(ccre_table$start + 1L, ccre_table$end))
@@ -849,6 +855,7 @@ if (file.exists(feature_table_path) && file.info(feature_table_path)$size > 0 &&
   island_json <- fromJSON(opt[["cpg-islands"]], simplifyDataFrame = TRUE)
   island_tables <- Filter(function(x) is.data.frame(x) && nrow(x) > 0L, island_json$cpgIslandExt)
   island_table <- rbindlist(island_tables, fill = TRUE)
+  island_table[, chrom := as.character(chrom)]
   island_table <- island_table[chrom %chin% chromosome_order & chromEnd > chromStart]
   if (!nrow(island_table)) stop("CpG-island data has no regions on selected chromosomes")
   cpg_islands <- GRanges(island_table$chrom, IRanges(island_table$chromStart + 1L, island_table$chromEnd))

@@ -93,6 +93,32 @@ class CoreReportTests(unittest.TestCase):
                     capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_summary_tables_keep_numeric_contig_names_as_text(self):
+        rscript = os.environ.get("ONT_TEST_RSCRIPT") or shutil.which("Rscript")
+        if not rscript:
+            self.skipTest("Rscript is unavailable")
+        probe = subprocess.run([rscript, "--vanilla", "-e",
+            'quit(status=if(requireNamespace("data.table", quietly=TRUE)) 0 else 1)'],
+            capture_output=True, text=True)
+        if probe.returncode:
+            self.skipTest("data.table is unavailable")
+        source = (ROOT / "lib/methylation_exploration.R").read_text()
+        reader = source[source.index("read_tsv <- function"):source.index("atomic_fwrite <-")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for header in ("chrom", "#chrom"):
+                table = root / "summary.tsv"
+                table.write_text(f"{header}\tvalue\n1\t0.5\n2\t0.25\n")
+                script = root / "check.R"
+                script.write_text(
+                    "library(data.table)\n" + reader + "\nresult <- read_tsv("
+                    + json.dumps(str(table)) + ')\nstopifnot(is.character(result$chrom), '
+                    'identical(result[chrom %chin% "2"]$value, 0.25))\n'
+                )
+                result = subprocess.run([rscript, "--vanilla", str(script)],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_human_and_mouse_reports_keep_species_and_last_autosome(self):
         rscript = os.environ.get("ONT_TEST_RSCRIPT") or shutil.which("Rscript")
         if not rscript:
