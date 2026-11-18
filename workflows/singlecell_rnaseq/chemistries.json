@@ -1,0 +1,44 @@
+[
+  {
+    "id": "unknown",
+    "label": "Not sure yet",
+    "execution_supported": false,
+    "description": "Confirm the kit with the sequencing provider before running; filenames are not reliable evidence."
+  },
+  {
+    "id": "10x_3prime_v2",
+    "label": "10x Chromium 3′ Gene Expression v2",
+    "execution_supported": true,
+    "description": "R1: 16-base cell barcode + 10-base UMI; R2: cDNA. Requires the matching v2 barcode whitelist."
+  },
+  {
+    "id": "10x_3prime_v3",
+    "label": "10x Chromium 3′ Gene Expression v3 / v3.1",
+    "execution_supported": true,
+    "description": "R1: 16-base cell barcode + 12-base UMI; R2: cDNA. Requires the matching v3 barcode whitelist."
+  },
+  {
+    "id": "10x_3prime_v4",
+    "label": "10x Chromium 3′ Gene Expression v4 / GEM-X",
+    "execution_supported": false,
+    "description": "A distinct chemistry and barcode whitelist; not yet implemented or validated here."
+  },
+  {
+    "id": "10x_5prime",
+    "label": "10x Chromium 5′ Gene Expression",
+    "execution_supported": false,
+    "description": "Requires a separate read-geometry configuration; do not select a 3′ preset."
+  },
+  {
+    "id": "10x_flex",
+    "label": "10x Flex / Fixed RNA Profiling",
+    "execution_supported": false,
+    "description": "Probe-based assay requiring a separate workflow, reference and demultiplexing configuration."
+  },
+  {
+    "id": "other",
+    "label": "Another platform or library preparation",
+    "execution_supported": false,
+    "description": "Confirm the protocol and barcode/UMI design before adding a validated preset."
+  }
+]

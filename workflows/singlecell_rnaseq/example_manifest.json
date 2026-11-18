@@ -1,0 +1,33 @@
+{
+  "schema_version": "singlecell-counts-v1",
+  "reference": {
+    "species": "Mus musculus",
+    "genome_build": "REPLACE_WITH_ACTUAL_BUILD_AND_ANNOTATION_RELEASE",
+    "mitochondrial_gene_ids": ["REPLACE_WITH_REFERENCE_MITOCHONDRIAL_GENE_IDS"]
+  },
+  "samples": [
+    {
+      "sample_id": "sample-1",
+      "donor_id": "donor-1",
+      "condition": "user-confirmed-condition",
+      "batch": "user-confirmed-batch",
+      "matrix_dir": "/absolute/path/to/filtered_feature_bc_matrix",
+      "matrix_kind": "filtered",
+      "qc": {
+        "min_counts": 500,
+        "min_features": 250,
+        "max_features": 6000,
+        "max_mito_percent": 20
+      }
+    }
+  ],
+  "analysis": {
+    "normalization": "log_normalize",
+    "integration": "none",
+    "variable_features": 2000,
+    "pcs": 30,
+    "resolution": 0.5,
+    "seed": 42,
+    "cluster_markers": true
+  }
+}
