@@ -20,13 +20,7 @@ trap 'rm -rf "${work_dir}"' EXIT
   --file "${workflow_root}/environment.yaml"
 "${mamba}" run --prefix "${work_dir}/environment" \
   Rscript --vanilla "${workflow_root}/bin/check_dependencies.R"
-star_version="$("${mamba}" run --prefix "${work_dir}/environment" STAR --version)"
-if [[ "${star_version}" != "2.7.11b" ]]; then
-  echo "Expected STAR 2.7.11b; found ${star_version}" >&2
-  exit 1
-fi
 "${mamba}" run --prefix "${work_dir}/environment" nextflow -version
-"${mamba}" run --prefix "${work_dir}/environment" gzip --version
 "${mamba}" env export --explicit --md5 --prefix "${work_dir}/environment" \
   > "${work_dir}/singlecell-linux-64.lock"
 mv "${work_dir}/singlecell-linux-64.lock" "${workflow_root}/singlecell-linux-64.lock"

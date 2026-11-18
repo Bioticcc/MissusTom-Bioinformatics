@@ -1,9 +1,10 @@
-"""Synthetic contracts only: no user matrices, package installs or network access."""
+"""Synthetic contracts only: no user objects, package installs or network access."""
 
 from __future__ import annotations
 
 import copy
 import gzip
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,18 +20,36 @@ spec = importlib.util.spec_from_file_location("singlecell_runner", ROOT / "run_p
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
+# Two samples stored as split v5 layers, with two populations and an earlier analysis.
+SEURAT_FIXTURE = r"""
+suppressPackageStartupMessages(library(Seurat))
+args <- commandArgs(TRUE)
+genes <- c("MT-ND1", sprintf("GENE%03d", 1:99))
+make_counts <- function(sample) {
+    values <- outer(seq_len(100), seq_len(60), function(gene, cell) {
+        1L + ((gene * 13L + cell * 7L + sample) %% 11L) +
+            ifelse((gene <= 50L) == (cell <= 30L), 20L, 0L)
+    })
+    dimnames(values) <- list(genes, sprintf("S%d_CELL%03d", sample, seq_len(60)))
+    Matrix::Matrix(values, sparse = TRUE)
+}
+counts <- cbind(make_counts(1L), make_counts(2L))
+object <- CreateSeuratObject(counts, min.cells = 0, min.features = 0)
+object$library <- rep(c("lib-1", "lib-2"), each = 60)
+object$subject <- rep(c("donor-1", "donor-2"), each = 60)
+object$group <- rep(c("ctrl", "stim"), each = 60)
+object$run <- "run-1"
+object$seurat_clusters <- "earlier-label"
+object[["RNA"]] <- split(object[["RNA"]], f = object$library)
+object <- NormalizeData(object, verbose = FALSE)
+saveRDS(object, args[1])
+cat(sum(counts), "\n", file = args[2])
+"""
 
-def matrix(directory: Path, values=(1, 2, 3)) -> None:
-    directory.mkdir(parents=True)
-    contents = {
-        "features.tsv.gz": "ENSMT1\tmt-gene\tGene Expression\nENSG2\tGene2\tGene Expression\n",
-        "barcodes.tsv.gz": "AA-1\nBB-1\nCC-1\n",
-        "matrix.mtx.gz": "%%MatrixMarket matrix coordinate integer general\n% fixture\n2 3 3\n"
-        + f"1 1 {values[0]}\n2 2 {values[1]}\n2 3 {values[2]}\n",
-    }
-    for name, content in contents.items():
-        with gzip.open(directory / name, "wt") as handle:
-            handle.write(content)
+
+def fake_rds(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(b"X\nsynthetic signature only"))
 
 
 class InputContracts(unittest.TestCase):
@@ -38,30 +57,30 @@ class InputContracts(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="singlecell-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        matrix(self.root / "library1" / "filtered_feature_bc_matrix")
+        fake_rds(self.root / "objects" / "input.rds")
         self.data = {
-            "schema_version": "singlecell-counts-v1",
+            "schema_version": "singlecell-seurat-v1",
+            "input": {
+                "seurat_rds": "objects/input.rds",
+                "assay": "RNA",
+                "metadata_columns": {
+                    "sample_id": "library",
+                    "donor_id": "subject",
+                    "condition": "group",
+                    "batch": "run",
+                },
+            },
             "reference": {
                 "species": "test species",
                 "genome_build": "test build+annotation",
-                "mitochondrial_gene_ids": ["ENSMT1"],
+                "mitochondrial_gene_ids": ["MT-ND1"],
             },
-            "samples": [
-                {
-                    "sample_id": "sample-1",
-                    "donor_id": "donor-1",
-                    "condition": "ctrl",
-                    "batch": "batch-1",
-                    "matrix_dir": "library1/filtered_feature_bc_matrix",
-                    "matrix_kind": "filtered",
-                    "qc": {
-                        "min_counts": 1,
-                        "min_features": 1,
-                        "max_features": 2,
-                        "max_mito_percent": 100,
-                    },
-                }
-            ],
+            "qc": {
+                "min_counts": 1,
+                "min_features": 1,
+                "max_features": 100,
+                "max_mito_percent": 100,
+            },
             "analysis": {
                 "normalization": "log_normalize",
                 "integration": "none",
@@ -78,18 +97,17 @@ class InputContracts(unittest.TestCase):
         self.path.write_text(json.dumps(self.data))
         return runner.load_manifest(self.path)
 
-    def test_valid_relative_paths_and_explicit_biology(self):
+    def test_relative_object_path_resolves_beside_the_manifest(self):
         data = self.load()
-        self.assertEqual(data["samples"][0]["staged_dir"], "matrix0001")
-        self.assertTrue(Path(data["samples"][0]["matrix_dir"]).is_absolute())
-        self.assertEqual(data["samples"][0]["condition"], "ctrl")
+        self.assertEqual(data["input"]["seurat_rds"], str(self.root / "objects/input.rds"))
 
     def test_unknown_fields_and_invalid_nested_types(self):
         for field, value in (
             ("unexpected", 1),
+            ("input", []),
             ("reference", []),
+            ("qc", None),
             ("analysis", None),
-            ("samples", {}),
         ):
             original = copy.deepcopy(self.data)
             self.data[field] = value
@@ -97,65 +115,52 @@ class InputContracts(unittest.TestCase):
                 self.load()
             self.data = original
 
-    def test_raw_droplets_rejected(self):
-        self.data["samples"][0]["matrix_kind"] = "raw"
-        with self.assertRaisesRegex(ValueError, "cell-calling"):
+    def test_earlier_fastq_and_matrix_contracts_are_rejected(self):
+        for version in ("singlecell-fastq-v1", "singlecell-counts-v1"):
+            self.data["schema_version"] = version
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "seurat-v1"):
+                self.load()
+
+    def test_object_must_be_an_existing_rds_file(self):
+        (self.root / "objects/notes.txt").write_text("not an object")
+        (self.root / "objects/plain.rds").write_text("not an object")
+        for name, message in (
+            ("objects/notes.txt", r"\.rds file"),
+            ("objects/missing.rds", "missing Seurat object"),
+            ("objects/plain.rds", "saveRDS"),
+        ):
+            self.data["input"]["seurat_rds"] = name
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+                self.load()
+
+    def test_every_metadata_role_is_explicit(self):
+        del self.data["input"]["metadata_columns"]["donor_id"]
+        with self.assertRaisesRegex(ValueError, "metadata_columns"):
+            self.load()
+        self.data["input"]["metadata_columns"]["donor_id"] = " "
+        with self.assertRaisesRegex(ValueError, "donor_id"):
             self.load()
 
     def test_missing_mito_ids_rejected(self):
-        for ids in ([], ["not-in-matrix"], ["ENSMT1", "ENSMT1"]):
+        for ids in ([], [""], ["MT-ND1", "MT-ND1"]):
             self.data["reference"]["mitochondrial_gene_ids"] = ids
             with self.subTest(ids=ids), self.assertRaises(ValueError):
                 self.load()
 
-    def test_duplicate_sample_or_input_rejected(self):
-        self.data["samples"].append(copy.deepcopy(self.data["samples"][0]))
-        with self.assertRaisesRegex(ValueError, "sample_id"):
-            self.load()
-        self.data["samples"][1]["sample_id"] = "sample-2"
-        with self.assertRaisesRegex(ValueError, "same matrix"):
-            self.load()
-
     def test_bad_numeric_and_bool_values(self):
         for value in (True, -1, 101, float("nan"), "20"):
-            self.data["samples"][0]["qc"]["max_mito_percent"] = value
+            self.data["qc"]["max_mito_percent"] = value
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.load()
 
     def test_reversed_feature_cutoffs(self):
-        self.data["samples"][0]["qc"]["min_features"] = 3
+        self.data["qc"]["min_features"] = 101
         with self.assertRaisesRegex(ValueError, "max_features"):
             self.load()
 
-    def test_no_unsupported_methods_or_implicit_metadata(self):
+    def test_no_unsupported_methods(self):
         self.data["analysis"]["integration"] = "harmony"
         with self.assertRaisesRegex(ValueError, "integration=none"):
-            self.load()
-        self.data["analysis"]["integration"] = "none"
-        del self.data["samples"][0]["donor_id"]
-        with self.assertRaisesRegex(ValueError, "donor_id"):
-            self.load()
-
-    def test_dimension_and_multimodal_rejection(self):
-        directory = self.root / "library1/filtered_feature_bc_matrix"
-        with gzip.open(directory / "barcodes.tsv.gz", "wt") as handle:
-            handle.write("AA-1\nBB-1\n")
-        with self.assertRaisesRegex(ValueError, "dimensions"):
-            self.load()
-        with gzip.open(directory / "features.tsv.gz", "wt") as handle:
-            handle.write("ENSMT1\tmt\tAntibody Capture\n")
-        with self.assertRaisesRegex(ValueError, "Gene Expression"):
-            self.load()
-
-    def test_feature_order_must_match(self):
-        second = copy.deepcopy(self.data["samples"][0])
-        second.update(sample_id="sample-2", matrix_dir="library2/filtered_feature_bc_matrix")
-        directory = self.root / second["matrix_dir"]
-        matrix(directory)
-        with gzip.open(directory / "features.tsv.gz", "wt") as handle:
-            handle.write("ENSG2\tGene2\tGene Expression\nENSMT1\tmt-gene\tGene Expression\n")
-        self.data["samples"].append(second)
-        with self.assertRaisesRegex(ValueError, "identical ordered"):
             self.load()
 
     def test_check_only_has_no_execution_or_created_state(self):
@@ -193,7 +198,8 @@ class InputContracts(unittest.TestCase):
         ):
             self.assertEqual(runner.main(), 0)
         prepared = json.loads((run_dir / "input_manifest/prepared_manifest.json").read_text())
-        self.assertEqual(len(prepared["provenance"]["sha256"]), 10)
+        self.assertEqual(len(prepared["provenance"]["sha256"]), 8)
+        self.assertIn(str(self.root / "objects/input.rds"), prepared["provenance"]["sha256"])
         command = run.call_args.args[0]
         self.assertIsInstance(command, list)
         self.assertIn(str(run_dir / "work"), command)
@@ -210,46 +216,99 @@ class InputContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "objects/singlecell.rds"):
             runner.verify_outputs(run_dir, markers=True)
 
+    @unittest.skipUnless(shutil.which("Rscript"), "Rscript not installed")
+    def test_cell_qc_boundaries(self):
+        probe = subprocess.run(
+            ["Rscript", "--vanilla", "-e", 'quit(status=!requireNamespace("Matrix", quietly=TRUE))'],
+            capture_output=True,
+        )
+        if probe.returncode:
+            self.skipTest("Matrix is unavailable")
+        script = self.root / "test_qc.R"
+        script.write_text("""
+args <- commandArgs(TRUE)
+source(args[1])
+counts <- Matrix::sparseMatrix(i = c(1, 2, 2), j = c(1, 2, 3), x = c(1, 2, 3), dims = c(2, 3),
+                               dimnames = list(c("MT-ND1", "GENE2"), c("AA", "BB", "CC")))
+qc <- cell_qc(counts, "MT-ND1", list(min_counts=1, min_features=1,
+    max_features=2, max_mito_percent=0))
+stopifnot(identical(qc$retained, c(FALSE, TRUE, TRUE)),
+          identical(qc$cell_id, c("AA", "BB", "CC")),
+          identical(qc$mito_percent, c(100, 0, 0)), identical(qc$n_counts, c(1, 2, 3)))
+boundary <- cell_qc(counts, "MT-ND1", list(min_counts=2, min_features=1,
+    max_features=1, max_mito_percent=0))
+stopifnot(identical(boundary$retained, c(FALSE, TRUE, TRUE)))
+counts[, 1] <- 0
+zero <- cell_qc(counts, "MT-ND1", list(min_counts=1, min_features=1,
+    max_features=2, max_mito_percent=100))
+stopifnot(!zero$retained[1], is.nan(zero$mito_percent[1]))
+stopifnot(inherits(try(cell_qc(counts, "absent", list()), silent=TRUE), "try-error"))
+""")
+        result = subprocess.run(
+            ["Rscript", "--vanilla", str(script), str(ROOT / "bin/import_qc.R")],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(
         os.environ.get("SINGLECELL_TEST_SEURAT") == "1", "opt-in isolated Seurat runtime"
     )
-    def test_full_seurat_analysis_preserves_counts_and_metadata(self):
-        # Synthetic two-population libraries, with known integer counts and cell IDs.
-        # Run only after activating the isolated candidate environment.
-        expected_total = 0
-        for index in (1, 2):
-            directory = self.root / f"library{index}/filtered_feature_bc_matrix"
-            if directory.exists():
-                shutil.rmtree(directory)
-            directory.mkdir(parents=True)
-            genes = ["ENSMT1"] + [f"ENSG{gene:04d}" for gene in range(1, 100)]
-            entries = []
-            for cell in range(60):
-                for gene in range(100):
-                    count = 1 + (gene * 13 + cell * 7 + index) % 11
-                    count += 20 if (gene < 50) == (cell < 30) else 0
-                    expected_total += count
-                    entries.append(f"{gene + 1} {cell + 1} {count}\n")
-            contents = {
-                "features.tsv.gz": "".join(f"{gene}\tSymbol\tGene Expression\n" for gene in genes),
-                "barcodes.tsv.gz": "".join(f"CELL{cell:03d}-1\n" for cell in range(60)),
-                "matrix.mtx.gz": "%%MatrixMarket matrix coordinate integer general\n"
-                + f"100 60 {len(entries)}\n"
-                + "".join(entries),
-            }
-            for name, content in contents.items():
-                with gzip.open(directory / name, "wt") as handle:
-                    handle.write(content)
-        second = copy.deepcopy(self.data["samples"][0])
-        second.update(
-            sample_id="sample-2",
-            donor_id="donor-2",
-            condition="stim",
-            matrix_dir="library2/filtered_feature_bc_matrix",
+    def test_import_rejects_objects_that_cannot_be_analyzed(self):
+        fixture = self.root / "fixture.R"
+        fixture.write_text(SEURAT_FIXTURE)
+        rds = self.root / "objects/input.rds"
+        total = self.root / "total.txt"
+        subprocess.run(["Rscript", "--vanilla", str(fixture), str(rds), str(total)], check=True)
+        script = self.root / "reject.R"
+        script.write_text(r"""
+suppressPackageStartupMessages(library(Seurat))
+args <- commandArgs(TRUE)
+source(args[1])
+columns <- list(sample_id = "library", donor_id = "subject", condition = "group", batch = "run")
+rejected <- function(expr, pattern) {
+    message <- tryCatch({ expr; "" }, error = conditionMessage)
+    if (!grepl(pattern, message)) stop("Expected '", pattern, "' but saw: '", message, "'")
+}
+imported <- read_seurat_input(args[2], "RNA", columns)
+stopifnot(ncol(imported$counts) == 120L, identical(imported$metadata$sample_id[[1]], "lib-1"),
+          "input_seurat_clusters" %in% names(imported$metadata))
+rejected(read_seurat_input(args[2], "ADT", columns), "Assay 'ADT'")
+missing <- modifyList(columns, list(condition = "absent"))
+rejected(read_seurat_input(args[2], "RNA", missing), "Metadata column 'absent'")
+
+object <- readRDS(args[2])
+blank <- object
+blank$group[1] <- NA
+path <- tempfile(fileext = ".rds"); saveRDS(blank, path)
+rejected(read_seurat_input(path, "RNA", columns), "cells without a value")
+counts <- as.matrix(LayerData(JoinLayers(object), layer = "counts")) / 3
+normalized <- CreateSeuratObject(Matrix::Matrix(counts, sparse = TRUE), min.cells = 0,
+                                 min.features = 0, meta.data = object[[]])
+path <- tempfile(fileext = ".rds"); saveRDS(normalized, path)
+rejected(read_seurat_input(path, "RNA", columns), "raw nonnegative integer counts")
+path <- tempfile(fileext = ".rds"); saveRDS(list(not = "seurat"), path)
+rejected(read_seurat_input(path, "RNA", columns), "one Seurat object")
+""")
+        result = subprocess.run(
+            ["Rscript", "--vanilla", str(script), str(ROOT / "bin/import_qc.R"), str(rds)],
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
-        self.data["samples"].append(second)
-        for sample in self.data["samples"]:
-            sample["qc"]["max_features"] = 100
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(
+        os.environ.get("SINGLECELL_TEST_SEURAT") == "1", "opt-in isolated Seurat runtime"
+    )
+    def test_full_seurat_analysis_preserves_input_counts_and_metadata(self):
+        # Run only after activating the isolated candidate environment.
+        fixture = self.root / "fixture.R"
+        fixture.write_text(SEURAT_FIXTURE)
+        rds = self.root / "objects/input.rds"
+        total = self.root / "total.txt"
+        subprocess.run(["Rscript", "--vanilla", str(fixture), str(rds), str(total)], check=True)
+        before = hashlib.sha256(rds.read_bytes()).hexdigest()
         self.load()
         run_dir = self.root / "full-scientific-run"
         result = subprocess.run(
@@ -265,22 +324,26 @@ class InputContracts(unittest.TestCase):
                 "--memory-gb",
                 "2",
             ],
-            timeout=180,
+            timeout=420,
             capture_output=True,
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(hashlib.sha256(rds.read_bytes()).hexdigest(), before)
         assertion = self.root / "assert_object.R"
         assertion.write_text("""
 args <- commandArgs(TRUE)
 suppressPackageStartupMessages(library(Seurat))
 object <- readRDS(args[1])
 counts <- LayerData(object, assay="RNA", layer="counts")
-stopifnot(inherits(counts, "sparseMatrix"), sum(counts) == as.numeric(args[2]),
+stopifnot(inherits(counts, "sparseMatrix"), sum(counts) == as.numeric(readLines(args[2])[1]),
           ncol(counts) == 120L, nrow(counts) == 100L,
-          identical(rownames(counts)[1], "ENSMT1"),
+          identical(rownames(counts)[1], "MT-ND1"),
           all(table(object$sample_id) == 60L),
           setequal(object$donor_id, c("donor-1", "donor-2")),
+          setequal(object$condition, c("ctrl", "stim")),
+          all(object$input_seurat_clusters == "earlier-label"),
+          !identical(as.character(object$seurat_clusters), as.character(object$input_seurat_clusters)),
           ncol(Embeddings(object, "pca")) == 2L,
           ncol(Embeddings(object, "umap")) == 2L,
           length(unique(colnames(object))) == 120L)
@@ -291,125 +354,62 @@ stopifnot(inherits(counts, "sparseMatrix"), sum(counts) == as.numeric(args[2]),
                 "--vanilla",
                 str(assertion),
                 str(run_dir / "results/objects/singlecell.rds"),
-                str(expected_total),
+                str(total),
             ],
             capture_output=True,
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    @unittest.skipUnless(shutil.which("Rscript"), "Rscript not installed")
-    def test_real_sparse_import_qc_and_count_rejection(self):
-        self.load()
-        script = self.root / "test_import.R"
-        script.write_text("""
-args <- commandArgs(TRUE)
-source(args[1])
-data <- read_count_matrix(args[2])
-stopifnot(inherits(data$counts, "sparseMatrix"))
-qc <- cell_qc(data$counts, "ENSMT1", list(min_counts=1, min_features=1,
-    max_features=2, max_mito_percent=0))
-stopifnot(identical(qc$retained, c(FALSE, TRUE, TRUE)),
-          identical(qc$mito_percent, c(100, 0, 0)), identical(qc$n_counts, c(1, 2, 3)))
-boundary <- cell_qc(data$counts, "ENSMT1", list(min_counts=2, min_features=1,
-    max_features=1, max_mito_percent=0))
-stopifnot(identical(boundary$retained, c(FALSE, TRUE, TRUE)))
-data$counts[, 1] <- 0
-zero <- cell_qc(data$counts, "ENSMT1", list(min_counts=1, min_features=1,
-    max_features=2, max_mito_percent=100))
-stopifnot(!zero$retained[1], is.nan(zero$mito_percent[1]))
-""")
-        directory = self.root / "library1/filtered_feature_bc_matrix"
-        result = subprocess.run(
-            ["Rscript", "--vanilla", str(script), str(ROOT / "bin/import_qc.R"), str(directory)],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        rejection = self.root / "reject.R"
-        rejection.write_text("""
-args <- commandArgs(TRUE)
-source(args[1])
-stopifnot(inherits(try(read_count_matrix(args[2]), silent=TRUE), "try-error"))
-""")
-        for value in (-1, 0.5, "NaN"):
-            shutil.rmtree(directory)
-            matrix(directory, values=(value, 2, 3))
-            result = subprocess.run(
-                [
-                    "Rscript",
-                    "--vanilla",
-                    str(rejection),
-                    str(ROOT / "bin/import_qc.R"),
-                    str(directory),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-
     @unittest.skipUnless(
         os.environ.get("SINGLECELL_TEST_NEXTFLOW") == "1", "opt-in Nextflow staging"
     )
-    def test_real_nextflow_stages_one_and_multiple_directories(self):
+    def test_real_nextflow_stages_the_object(self):
         # Substitute only R execution; exercise the actual graph, staging and publication.
         # This is an orchestration test, NOT a successful Seurat scientific analysis.
         fake_bin = self.root / "fake-bin"
         fake_bin.mkdir()
         fake_r = fake_bin / "Rscript"
         fake_r.write_text("""#!/usr/bin/env python3
-import json
 from pathlib import Path
-data = json.loads(Path("prepared_manifest.json").read_text())
-for sample in data["samples"]:
-    directory = Path(sample["staged_dir"])
-    assert directory.is_dir(), str(directory)
-    assert (directory / "matrix.mtx.gz").is_file()
+assert Path("input_object.rds").is_file()
 assert Path("import_qc.R").is_file()
 for name in ("qc", "tables", "figures", "objects"):
     Path(name).mkdir()
     Path(name, "staging-only.txt").write_text("not scientific results")
 """)
         fake_r.chmod(0o755)
-        for size in (1, 2):
-            if size == 2:
-                matrix(self.root / "library2/filtered_feature_bc_matrix")
-                second = copy.deepcopy(self.data["samples"][0])
-                second.update(
-                    sample_id="sample-2", matrix_dir="library2/filtered_feature_bc_matrix"
-                )
-                self.data["samples"].append(second)
-            data = self.load()
-            prepared = self.root / f"prepared{size}.json"
-            prepared.write_text(json.dumps(data))
-            run_dir = self.root / f"staging{size}"
-            run_dir.mkdir()
-            command = [
-                "nextflow",
-                "run",
-                str(ROOT / "main.nf"),
-                "-offline",
-                "-profile",
-                "local",
-                "--prepared_manifest",
-                str(prepared),
-                "--outdir",
-                str(run_dir / "results"),
-                "--max_cpus",
-                "1",
-                "--max_memory_gb",
-                "1",
-            ]
-            result = subprocess.run(
-                command,
-                cwd=run_dir,
-                timeout=90,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "PATH": str(fake_bin) + ":" + os.environ["PATH"]},
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue((run_dir / "results/qc/staging-only.txt").is_file())
+        data = self.load()
+        prepared = self.root / "prepared.json"
+        prepared.write_text(json.dumps(data))
+        run_dir = self.root / "staging"
+        run_dir.mkdir()
+        command = [
+            "nextflow",
+            "run",
+            str(ROOT / "main.nf"),
+            "-offline",
+            "-profile",
+            "local",
+            "--prepared_manifest",
+            str(prepared),
+            "--outdir",
+            str(run_dir / "results"),
+            "--max_cpus",
+            "1",
+            "--max_memory_gb",
+            "1",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=run_dir,
+            timeout=90,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": str(fake_bin) + ":" + os.environ["PATH"]},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((run_dir / "results/qc/staging-only.txt").is_file())
 
 
 if __name__ == "__main__":

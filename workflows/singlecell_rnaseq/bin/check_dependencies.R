@@ -16,8 +16,8 @@ for (package in names(required)) {
         if (package %in% c("Seurat", "SeuratObject") && version >= "6.0.0") {
             problems <- c(problems, paste(package, "v6 is not validated"))
         }
-        if (package == "Seurat" && !"JoinLayers" %in% getNamespaceExports(package)) {
-            problems <- c(problems, "Seurat must export JoinLayers for the v5 RNA workflow")
+        if (package == "SeuratObject" && !"JoinLayers" %in% getNamespaceExports(package)) {
+            problems <- c(problems, "SeuratObject must export JoinLayers to read split v5 layers")
         }
     }
 }

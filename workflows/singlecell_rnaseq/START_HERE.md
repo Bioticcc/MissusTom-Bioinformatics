@@ -1,44 +1,41 @@
 # Start here: SingleCell RNA-seq
 
 Development foundation. In the desktop app, open **New project → Pipeline →
-SingleCell RNA-seq** to configure FASTQ libraries, chemistry and references, then
-export a standalone configuration. Managed Setup installation, saving as an app
-project and running from the app are not available yet. The full Seurat analysis
-still needs an isolated environment and scientific validation.
+SingleCell RNA-seq** to choose a Seurat object and export a standalone
+configuration. Managed Setup installation, saving as an app project and running
+from the app are not available yet. The analysis still needs an isolated
+environment and scientific validation on real data.
 
 ## What this increment does
 
-Starts with **FASTQs or filtered gene-expression count matrices**. The FASTQ entry
-point builds a STAR index, runs STARsolo with explicit chemistry/whitelist and
-cell calling, then feeds the called-cell matrices into this analysis. See
-[FASTQ inputs and chemistry selection](FASTQ_INPUTS.md).
+Starts with **one existing Seurat object saved as `.rds`**. The workflow reads the
+object's raw counts and your confirmed metadata columns, applies explicit cell QC,
+then runs Seurat v5 LogNormalize, variable-feature selection, scaling, PCA, Louvain
+clustering and UMAP. Optional Wilcoxon cluster markers are exploratory. All analysis
+runs locally; it does not download references or install packages during execution.
 
-The count-matrix analysis applies explicit
-per-library QC, then runs Seurat v5 LogNormalize, variable-feature selection,
-scaling, PCA, Louvain clustering and UMAP. Optional Wilcoxon cluster markers are
-exploratory. All analysis runs locally; it does not download references or install
-packages during execution. Raw counts remain in the saved Seurat object.
+Objects that were already analyzed are supported. Earlier normalization, scaling,
+reductions and clusters are **not reused**: every result is recomputed from raw
+counts. Earlier cell metadata is kept in columns prefixed `input_`, so a previous
+`seurat_clusters` becomes `input_seurat_clusters`. The input file is never modified.
 
-Doublet removal, ambient-RNA correction, integration, cell-type annotation and donor-aware condition testing
-are future stages. Counts should come from appropriately called cells; this
-workflow does not certify the upstream chemistry/reference/cell-calling choices.
-It can analyze one or multiple samples. No species, tissue or condition is fixed.
+Doublet removal, ambient-RNA correction, integration, cell-type annotation and
+donor-aware condition testing are future stages. It can analyze one or multiple
+samples. No species, tissue or condition is fixed.
 
 ## How the files connect
 
-1. `run_pipeline.py` validates the standalone manifest and matrix structure,
-   hashes inputs/sources, creates a new run directory and starts Nextflow.
-2. `main.nf` is the pipeline orchestrator. It stages every sample directory with
-   a distinct numbered name and invokes the R analysis.
+1. `run_pipeline.py` validates the standalone manifest and `.rds` signature, hashes
+   the object and sources, creates a new run directory and starts Nextflow.
+2. `main.nf` is the pipeline orchestrator. It stages the object and invokes the R
+   analysis.
 3. `nextflow.config` owns reports and the local profile;
    `conf/resources.config` owns task resource requests.
-4. `bin/import_qc.R` imports sparse counts and computes explicit QC metrics.
+4. `bin/import_qc.R` reads the object and computes explicit QC metrics.
 5. `bin/singlecell_analysis.R` performs the analysis and publishes artifacts.
 6. `bin/check_dependencies.R` checks the isolated R installation without changing it.
-7. `run_fastq.py`, `fastq.nf` and `bin/fastq_stage.py` own FASTQ validation, reference
-   indexing, STARsolo quantification and the handoff to the count-matrix runner.
 
-This standalone `singlecell-counts-v1` contract is separate from the desktop's
+This standalone `singlecell-seurat-v1` contract is separate from the desktop's
 `ProjectManifest`. Registering it requires coordinated backend/schema/UI work.
 Only the supplied Python runner is the supported development entry point.
 
@@ -46,35 +43,29 @@ Only the supplied Python runner is the supported development entry point.
 
 Copy `example_manifest.json` outside the source tree and replace its placeholders.
 Its QC values are examples, **not recommended biological defaults**.
-Each sample directory must contain `matrix.mtx.gz`, `features.tsv.gz` and
-`barcodes.tsv.gz`. Three-column features must all be `Gene Expression`.
-Multimodal matrices and HDF5 are deliberately rejected in this increment.
 
-- Explicitly declare species, genome build **and annotation release**, donor,
-  condition, technical batch, and unique sample IDs. A sample is one input library;
-  repeated donors are allowed and remain visible in metadata.
-- Paths are relative to the input manifest, or absolute. Reusing a directory under
-  two sample names is rejected. Cells get `sample_id_barcode` identifiers.
-- All samples must have identical ordered feature IDs from one reference. Stable
-  IDs are the analysis keys; gene symbols are exported as annotations. IDs with
-  underscores, pipes or whitespace are rejected to avoid Seurat silently renaming
-  them. Supporting those IDs needs a reversible mapping in a later increment.
-- Supply mitochondrial gene **IDs** from that reference. Human/mouse symbol
-  prefixes are not assumed. Missing IDs are errors, rather than a false 0% QC pass.
-  References lacking identifiable mitochondrial genes need a future explicit QC
-  policy; they are not supported by this initial contract.
-- Set per-sample `min_counts`, `min_features`, `max_features`, and
-  `max_mito_percent` explicitly. All cutoffs are inclusive; mitochondrial values
-  are percentages from 0 to 100. Counts must be finite nonnegative integers.
-  Empty cells always fail QC. A sample with fewer than three retained cells fails.
+- `seurat_rds` is one Seurat object written by `saveRDS()`. Opening an `.rds` file can
+  run code stored inside it, so only use objects from sources you trust.
+- `assay` names the assay holding raw counts, usually `RNA`. Its `counts` layer must
+  contain finite nonnegative integers. Split v5 layers are joined automatically.
+  SCT-only, normalized-only and on-disk (BPCells) count matrices are rejected.
+- `metadata_columns` names the object's columns for `sample_id`, `donor_id`,
+  `condition` and `batch`. Every cell needs a value in each. Columns are never guessed.
+- Explicitly declare species and genome build **and annotation release**. These
+  labels record your declaration, not independently verified provenance.
+- Supply mitochondrial feature **IDs** exactly as named in the object. Human/mouse
+  symbol prefixes are not assumed. Missing IDs are errors, rather than a false 0% pass.
+- Set `min_counts`, `min_features`, `max_features` and `max_mito_percent` explicitly.
+  They apply to all cells. All cutoffs are inclusive; mitochondrial values are
+  percentages from 0 to 100. Empty cells always fail QC. A sample with fewer than three
+  retained cells fails the run.
 - PCs, variable-feature count, resolution, random seed and marker option are
   explicit. Too few cells or variable genes for the selected PCs is an error;
   the pipeline does not silently change the analysis.
 - Integration is `none`. Review sample/batch UMAPs for technical structure before
   interpreting clusters. No automatic regression of condition, cell cycle or QC.
 
-Matrix header checks happen in Python; complete count validation happens in R.
-Reference labels record user declarations, not independently verified provenance.
+Python checks the manifest and file signature; complete object validation happens in R.
 
 ## Setup and execution
 
@@ -88,7 +79,7 @@ python workflows/singlecell_rnaseq/run_pipeline.py --manifest /path/manifest.jso
   --run-dir /path/new-singlecell-run --cpus 2 --memory-gb 8
 ```
 
-Check-only neither runs R nor validates every count. Execution requires a new run
+Check-only neither runs R nor opens the object. Execution requires a new run
 directory and a locally cached Nextflow engine (`-offline`); it never overwrites
 an earlier run. There is no supported resume command yet. Retained `work/` files
 are for diagnosis. Native Nextflow resource settings are scheduler requests;
@@ -103,10 +94,10 @@ SINGLECELL_TEST_NEXTFLOW=1 python3 -m unittest discover -s workflows/singlecell_
 SINGLECELL_TEST_SEURAT=1 python3 -m unittest discover -s workflows/singlecell_rnaseq/tests -v
 ```
 
-The normal checks run validation and actual sparse import/QC using Matrix when R
-is installed. The Nextflow option tests staging/publication with a replacement R
-command. The Seurat option runs the supported runner on synthetic counts and
-checks the saved object's raw counts, sample/donor metadata and reductions.
+The normal checks run validation and QC boundaries using Matrix when R is installed.
+The Nextflow option tests staging/publication with a replacement R command. The
+Seurat option runs the supported runner on a synthetic split-layer object, confirms
+the input file is unchanged, and checks raw counts, metadata and reductions.
 
 ## Results
 

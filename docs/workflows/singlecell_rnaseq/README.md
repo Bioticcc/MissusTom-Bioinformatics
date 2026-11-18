@@ -1,15 +1,10 @@
 # SingleCell foundation: setup and teaching-method review
 
-**Pending change (2026-10-30):** the intended input is a Seurat object saved as
-`.rds`, replacing FASTQ inputs. Implementation is explicitly deferred. The FASTQ
-workflow and package list below describe the current implementation, not the
-revised target. See the [active plan](../../exec-plans/active/singlecell-rnaseq.md).
-
 Executable files and the input/output contract are in
 [`workflows/singlecell_rnaseq/START_HERE.md`](../../../workflows/singlecell_rnaseq/START_HERE.md).
-This is a development workflow, not a supported desktop pipeline yet.
-FASTQ processing is now included in first-version scope; see
-[FASTQ inputs and selectable chemistry](../../../workflows/singlecell_rnaseq/FASTQ_INPUTS.md).
+This is a development workflow, not a supported desktop pipeline yet. Its input is
+an existing Seurat object saved as `.rds`. See the
+[active plan](../../exec-plans/active/singlecell-rnaseq.md).
 
 ## Setup ownership
 
@@ -23,10 +18,9 @@ an explicit lock and have not yet been resolved/installed here.
 | --- | --- |
 | Python 3.11 | Standard-library validation and controlled Nextflow launch |
 | Nextflow 24.04.4 + OpenJDK 17 | Same engine baseline as Bulk; local orchestration |
-| STAR 2.7.11b + gzip | FASTA/GTF indexing, FASTQ mapping, barcode/UMI counting, cell calling |
 | R 4.4–4.5 | Isolated scientific runtime candidate |
 | Seurat >=5.3,<6; SeuratObject >=5,<6 | v5 RNA layers, normalization, clustering, markers |
-| Matrix >=1.6 | Sparse Matrix Market import and QC; no dense count conversion |
+| Matrix >=1.6 | Sparse count validation and QC |
 | ggplot2 >=3.5 | PDF figures |
 | jsonlite >=1.8 | Typed manifest consumption |
 | future >=1.34 | Explicit sequential execution; also a Seurat dependency |
@@ -55,16 +49,10 @@ Before shipping: resolve the lock, run a synthetic complete Seurat fixture,
 inspect resulting objects/figures, then add the verified lock to app Setup.
 Native desktop execution remains **[Awaiting manual testing]**.
 
-Initial count-stage validation: 16 synthetic tests passed, including actual sparse
-import/QC and Nextflow one/two-sample staging with a replacement R command. The
-opt-in full Seurat test has not run: system R is 4.2.2 and lacks Seurat. Python
-lint/format, R parse, Bash/JSON syntax and local Nextflow configuration passed.
-These Nextflow checks used the cached 26.04.6 engine, not the candidate lock's
-24.04.4. Neither the candidate environment nor the complete analysis is validated.
-FASTQ validation additionally exercises selectable/unknown chemistry, exact read
-geometry/order, paired lanes, late read-ID mismatches, deterministic matrix
-packaging, and a two-library/two-lane Nextflow graph using substitute STAR/R tools.
-The real STAR executable is not installed on the host; no real mapping was run.
+Validation on 2026-11-18 used a temporary environment with Seurat 5.5.1,
+SeuratObject 5.4.0 and Nextflow 24.04.4. All 17 synthetic tests passed, including a
+complete run on a split-layer object and rejection of unusable objects. No explicit
+lock has been generated, and no real scientific data has been analyzed.
 
 ## What to retain and what to update
 
@@ -74,29 +62,21 @@ teaching workflow, not a claim that all of its techniques are obsolete.
 
 | Teaching pattern / location | Missus Tom decision |
 | --- | --- |
-| Lesson 03 loops over example directories and assigns example metadata | Require confirmed sample/donor/condition/batch fields; never infer biology from names. |
-| Lesson 03 uses raw droplet matrices | Matrix entry point accepts filtered counts; the FASTQ entry point adds explicit STARsolo cell calling. QC thresholds alone do not perform cell calling. |
-| Lesson 05 example thresholds (500 counts, 250 genes, mitochondrial ratio 0.20), log10GenesPerUMI >0.80 | Require per-library cutoffs and retain before/after metrics. Do not generalize the example complexity ratio as a universal cutoff. Use clear 0–100 mitochondrial percentages. |
+| Lesson 03 loops over example directories and assigns example metadata | Read one Seurat object and require confirmed sample/donor/condition/batch columns; never infer biology from names. |
+| Lesson 03 uses raw droplet matrices | The input object is expected to contain called cells. QC thresholds alone do not perform cell calling. |
+| Lesson 05 example thresholds (500 counts, 250 genes, mitochondrial ratio 0.20), log10GenesPerUMI >0.80 | Require explicit cutoffs and retain before/after metrics. Do not generalize the example complexity ratio as a universal cutoff. Use clear 0–100 mitochondrial percentages. |
 | Example mitochondrial symbol prefixes | Use explicit reference gene IDs; support mouse/human/other species without assuming symbol capitalization. |
 | Lesson 07 SCTransform | Still current, not deprecated. Begin with an explicit LogNormalize baseline; add SCT v2 as a separately validated option with glmGamPoi. |
 | Lesson 09 integration across example conditions | Keep integration off initially. A later opt-in batch correction needs confirmed technical covariates and confounding checks; never automatically remove the effect under study. |
 | Older direct slot access and mixed v4/v5 examples | Use v5 assay layers and JoinLayers. Do marker tests on uncorrected RNA expression. |
 | Cell-level marker tests in lesson 13 | Keep only exploratory cluster markers. Condition DE needs biological replicates, donor/pairing metadata and a pseudobulk model; cells are not independent donors. |
 | Broad interactive install list, “update all”, unpinned GitHub Presto | Replace with a narrow isolated runtime plus generated exact lock. No interactive installs during an analysis. Presto is an optional performance addition requiring a pinned revision and parity check. |
-| Lesson 03 Read10X workaround for an upstream/data.table issue | Import sparse Matrix Market directly and test dimensions, IDs and integer values. Do not carry a global data.table setting into all workflows. |
 
 Current primary documentation: [Seurat v5 layers](https://satijalab.org/seurat/articles/seurat5_essential_commands.html),
 [integration](https://satijalab.org/seurat/articles/seurat5_integration.html),
 [SCT v2](https://github.com/satijalab/seurat/blob/main/vignettes/sctransform_vignette.Rmd),
 [marker testing and pseudobulk](https://satijalab.org/seurat/articles/de_vignette.html),
 [FindMarkers API](https://satijalab.org/seurat/reference/findmarkers).
-
-For FASTQs, the added STARsolo stage supplies the previously missing upstream
-cell-calling step. It explicitly selects `EmptyDrops_CR` instead of STAR's older
-knee-only default, preserves barcode/UMI reads, and selects exonic versus
-exonic+intronic counting. STARsolo is an independently versioned quantifier; it
-does not imply equivalence to current Cell Ranger. See the pinned
-[STARsolo method documentation](https://github.com/alexdobin/STAR/blob/2.7.11b/docs/STARsolo.md).
 
 ## Optional future packages: do not install indiscriminately
 
@@ -119,7 +99,7 @@ also records version-specific behavior, reinforcing the need for exact locks.
 
 Before exposing a third pipeline: extend shared Pydantic/JSON Schema/TypeScript
 manifests together; add adapter/registry and preflight; managed Setup installation
-and version probes; count-matrix wizard/review; artifact discovery and output gates;
+and version probes; Seurat object review in the wizard; artifact discovery and output gates;
 Learn & Modify immutable source revisions; cancellation/containment and restart
 policy; Linux packaging; scientific fixtures and native manual acceptance.
 Keep Bulk and ONT defaults and environments unchanged throughout integration.

@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Count-matrix analysis adapted conceptually from HBC Intro-to-scRNAseq lessons
+# Seurat-object analysis adapted conceptually from HBC Intro-to-scRNAseq lessons
 # 03, 05, 07, 10, 11 and 13. Attribution and deliberate changes: START_HERE.md.
 # Nextflow orchestrates this script; this script performs the scientific work.
 suppressPackageStartupMessages(library(Seurat))
@@ -18,46 +18,33 @@ write_table <- function(value, path) {
     write.table(value, path, sep = "\t", quote = TRUE, row.names = FALSE, na = "NA")
 }
 
-# 1. Import each confirmed library separately. Never infer biology from filenames.
-objects <- list()
-qc_rows <- list()
-summary_rows <- list()
-gene_ids <- NULL
-for (sample in manifest$samples) {
-    message("[singlecell:import] ", sample$sample_id)
-    imported <- read_count_matrix(sample$staged_dir)
-    counts <- imported$counts
-    if (!is.null(gene_ids) && !identical(gene_ids, rownames(counts))) {
-        stop("Samples must share the same ordered feature IDs")
-    }
-    gene_ids <- rownames(counts)
-    metrics <- cell_qc(counts, unlist(manifest$reference$mitochondrial_gene_ids), sample$qc)
-    metrics$sample_id <- sample$sample_id
-    metrics$cell_id <- paste(sample$sample_id, metrics$barcode, sep = "_")
-    qc_rows[[sample$sample_id]] <- metrics
-    summary_rows[[sample$sample_id]] <- data.frame(
-        sample_id = sample$sample_id, input_cells = ncol(counts), retained_cells = sum(metrics$retained))
-    # Refuse to quietly lose a sample. Thresholds must be reviewed deliberately.
-    if (sum(metrics$retained) < 3L) stop("Fewer than three retained cells in ", sample$sample_id)
-    counts <- counts[, metrics$retained, drop = FALSE]
-    colnames(counts) <- metrics$cell_id[metrics$retained]
-    object <- CreateSeuratObject(counts, project = sample$sample_id, min.cells = 0, min.features = 0)
-    object$sample_id <- sample$sample_id
-    object$donor_id <- sample$donor_id
-    object$condition <- sample$condition
-    object$batch <- sample$batch
-    object$mito_percent <- metrics$mito_percent[metrics$retained]
-    objects[[sample$sample_id]] <- object
-}
-write_table(do.call(rbind, qc_rows), "qc/cell_qc.tsv")
-write_table(do.call(rbind, summary_rows), "qc/sample_qc.tsv")
+# 1. Read raw counts and user-confirmed metadata columns. Never infer biology from names.
+message("[singlecell:import] ", basename(manifest$input$seurat_rds))
+imported <- read_seurat_input("input_object.rds", manifest$input$assay,
+                              manifest$input$metadata_columns)
+metrics <- cell_qc(imported$counts, unlist(manifest$reference$mitochondrial_gene_ids), manifest$qc)
+metrics$sample_id <- imported$metadata$sample_id
+sample_ids <- sort(unique(metrics$sample_id))
+sample_summary <- data.frame(
+    sample_id = sample_ids,
+    input_cells = vapply(sample_ids, function(id) sum(metrics$sample_id == id), integer(1)),
+    retained_cells = vapply(sample_ids, function(id) sum(metrics$retained[metrics$sample_id == id]),
+                            integer(1)))
+write_table(metrics, "qc/cell_qc.tsv")
+write_table(sample_summary, "qc/sample_qc.tsv")
 write_table(imported$features, "tables/features.tsv")
+# Refuse to quietly lose a sample. Thresholds must be reviewed deliberately.
+too_few <- sample_summary$sample_id[sample_summary$retained_cells < 3L]
+if (length(too_few)) stop("Fewer than three retained cells in: ", paste(too_few, collapse = ", "))
 
-# 2. Join raw RNA layers for a deliberately unintegrated baseline. Keep raw counts.
+# 2. Rebuild from raw counts. Earlier normalization, reductions and clusters are not reused.
 message("[singlecell:normalize] LogNormalize; integration=none")
-object <- if (length(objects) == 1L) objects[[1]] else merge(objects[[1]], y = objects[-1])
-rm(objects, counts, imported)
-object <- JoinLayers(object, assay = "RNA")
+object <- CreateSeuratObject(imported$counts[, metrics$retained, drop = FALSE],
+                             project = "MissusTomSingleCell", assay = "RNA",
+                             meta.data = imported$metadata[metrics$retained, , drop = FALSE],
+                             min.cells = 0, min.features = 0)
+object$mito_percent <- metrics$mito_percent[metrics$retained]
+rm(imported)
 DefaultAssay(object) <- "RNA"
 if (ncol(object) <= analysis$pcs + 2L) stop("Too few retained cells for the requested PCs")
 object <- NormalizeData(object, normalization.method = "LogNormalize", scale.factor = 10000)
@@ -126,7 +113,10 @@ file.copy(args[[1]], "tables/provenance/prepared_manifest.json", overwrite = FAL
 capture.output(sessionInfo(), file = "tables/provenance/sessionInfo.txt")
 capture.output(print(installed.packages()[, c("Package", "Version")], quote = FALSE),
                file = "tables/provenance/installed_packages.txt")
-writeLines(c("normalization=LogNormalize; scale.factor=10000; variable.features=vst",
+writeLines(c("input=existing Seurat object; raw counts reused; input file not modified",
+             "recomputed=normalization, variable features, PCA, clusters, UMAP",
+             "earlier object metadata is preserved in columns prefixed input_",
+             "normalization=LogNormalize; scale.factor=10000; variable.features=vst",
              "integration=none; clustering=Louvain; doublet_detection=not_performed",
              "ambient_rna_correction=not_performed; cell_type_annotation=not_performed",
              "markers=exploratory; condition_differential_expression=not_performed",

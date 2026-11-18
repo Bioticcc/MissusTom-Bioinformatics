@@ -124,7 +124,7 @@ test("ONT species and assembly changes clear reference paths and preserve sample
   } finally { if (view) act(() => view.unmount()); restoreBrowser(); }
 });
 
-test("SingleCell is selectable, exports the runner contract, and preserves both drafts", async () => {
+test("SingleCell is selectable, exports the Seurat contract, and preserves both drafts", async () => {
   const restoreBrowser = browser(); let view; let exported; let exportName; let ready = false;
   const requests = [];
   globalThis.__screenMocks = {
@@ -136,13 +136,13 @@ test("SingleCell is selectable, exports the runner contract, and preserves both 
       assert.equal(kind, "settings"); exportName = name; exported = JSON.parse(contents);
       return "/exports/singlecell.json";
     },
-    selectFiles: async () => ["/reads/lane 1_R1.fastq.gz"],
+    selectFiles: async () => ["/objects/islet atlas.rds"],
   };
   const pipeline = (root) => root.findAllByType("input").find((node) =>
     node.props.name === "pipeline" && text(node.parent).includes("SingleCell"));
   const field = (root, label) => root.findAllByType("label").find((node) => text(node).startsWith(label));
-  const select = (root, option) => root.findAllByType("select").find((node) =>
-    node.findAllByType("option").some((entry) => entry.props.value === option));
+  const type = (root, label, value) => act(async () =>
+    field(root, label).findByType("input").props.onChange({ target: { value } }));
   try {
     const { NewProjectWizard } = await screen("screens/NewProjectWizard");
     await act(async () => { view = Renderer.create(React.createElement(NewProjectWizard, {
@@ -153,32 +153,26 @@ test("SingleCell is selectable, exports the runner contract, and preserves both 
     await act(async () => pipeline(view.root).props.onChange());
     assert.ok(view.root.findAllByType("h1").some((node) => text(node) === "SingleCell RNA-seq"));
     assert.match(text(view.root.findAllByProps({ role: "status" })[0]), /configuration and export only/);
-    assert.equal(select(view.root, "10x_3prime_v3").props.value, "unknown");
-    await act(async () => select(view.root, "10x_3prime_v3").props.onChange({ target: { value: "10x_3prime_v3" } }));
-    await act(async () => select(view.root, "nuclei").props.onChange({ target: { value: "nuclei" } }));
-    assert.equal(select(view.root, "GeneFull").props.value, "unknown");
-    await act(async () => select(view.root, "GeneFull").props.onChange({ target: { value: "GeneFull" } }));
-    await click(field(view.root, "R1 FASTQ").parent.findByType("button"));
-    await click(button(view.root, "Add sequencing lane"));
-    await click(button(view.root, "Add library"));
+    assert.equal(field(view.root, "Assay with raw counts").findByType("input").props.value, "RNA");
+    assert.equal(field(view.root, "Sample column").findByType("input").props.value, "");
+    assert.equal(view.root.findAllByType("label").some((node) => /FASTQ|chemistry/i.test(text(node))), false);
+    await click(field(view.root, "Seurat object (.rds)").parent.findByType("button"));
+    await type(view.root, "Sample column", "orig.ident");
+    await type(view.root, "Condition column", "group");
     await click(button(view.root, "Export SingleCell configuration"));
-    assert.equal(exportName, "singlecell-fastq-manifest.json");
-    assert.equal(exported.schema_version, "singlecell-fastq-v1");
-    assert.equal(exported.samples.length, 2);
-    assert.equal(exported.samples[0].chemistry, "10x_3prime_v3");
-    assert.equal(exported.samples[0].material, "nuclei");
-    assert.equal(exported.samples[0].counting_mode, "GeneFull");
-    assert.equal(exported.samples[0].lanes.length, 2);
-    assert.equal(exported.samples[0].lanes[0].r1, "/reads/lane 1_R1.fastq.gz");
-    assert.equal(exported.samples[1].chemistry, "unknown");
-    assert.equal(exported.samples[1].donor_id, "");
+    assert.equal(exportName, "singlecell-seurat-manifest.json");
+    assert.equal(exported.schema_version, "singlecell-seurat-v1");
+    assert.equal(exported.input.seurat_rds, "/objects/islet atlas.rds");
+    assert.equal(exported.input.assay, "RNA");
+    assert.equal(exported.input.metadata_columns.sample_id, "orig.ident");
+    assert.equal(exported.input.metadata_columns.condition, "group");
+    assert.equal(exported.input.metadata_columns.donor_id, "");
     assert.equal(ready, false);
     assert.ok(requests.every(([, method]) => !method || method === "GET"));
     await click(button(view.root, "Back to pipeline selection"));
     assert.equal(field(view.root, "Project name").findByType("input").props.value, "Keep Bulk draft");
     await act(async () => pipeline(view.root).props.onChange());
-    assert.equal(select(view.root, "10x_3prime_v3").props.value, "10x_3prime_v3");
-    assert.equal(view.root.findAllByType("legend").filter((node) => /^Library \d/.test(text(node))).length, 2);
+    assert.equal(field(view.root, "Seurat object (.rds)").findByType("input").props.value, "/objects/islet atlas.rds");
   } finally { if (view) act(() => view.unmount()); restoreBrowser(); }
 });
 

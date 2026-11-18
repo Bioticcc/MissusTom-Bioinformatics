@@ -7,8 +7,6 @@ dependencies:
   - python=3.11
   - nextflow=24.04.4
   - openjdk=17
-  - star=2.7.11b
-  - gzip
   - r-base>=4.4,<4.6
   - r-seurat>=5.3,<6
   - r-seuratobject>=5,<6

@@ -2,25 +2,25 @@
 """Validate a standalone SingleCell manifest and launch its local Nextflow graph.
 
 This development runner is deliberately separate from the desktop project model.
-Check-only reads the small feature/barcode tables and matrix header, never runs R.
-The R import performs the full sparse-count validation before analysis.
+Check-only inspects the manifest and the .rds file signature and never runs R.
+The R import opens the Seurat object and performs the full count validation.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-FILES = ("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")
+METADATA_ROLES = {"sample_id", "donor_id", "condition", "batch"}
+# gzip, bzip2, xz, and uncompressed XDR/ASCII serializations written by saveRDS().
+RDS_SIGNATURES = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"X\n", b"A\n")
 
 
 def exact_keys(value: dict, expected: set[str], label: str) -> None:
@@ -48,41 +48,15 @@ def number(value: object, label: str, low: float, high: float, *, integer=False)
     return value
 
 
-def inspect_matrix(directory: Path) -> tuple[list[str], int]:
-    for name in FILES:
-        if not (directory / name).is_file():
-            raise ValueError(f"missing 10x v3 input: {directory / name}")
-    with gzip.open(directory / FILES[1], "rt") as handle:
-        features = [line.rstrip("\n").split("\t") for line in handle]
-    if not features or any(len(row) != 3 or row[2] != "Gene Expression" for row in features):
-        raise ValueError("features.tsv.gz must contain only three-column Gene Expression rows")
-    ids = [row[0] for row in features]
-    if len(set(ids)) != len(ids) or any(not gene or re.search(r"[_|\s]", gene) for gene in ids):
-        raise ValueError(
-            "feature IDs must be unique, nonempty, and free of whitespace, '_' and '|'"
-        )
-    with gzip.open(directory / FILES[2], "rt") as handle:
-        barcodes = [line.rstrip("\n") for line in handle]
-    if (
-        not barcodes
-        or len(set(barcodes)) != len(barcodes)
-        or any(not re.fullmatch(r"[A-Za-z0-9.-]+", barcode) for barcode in barcodes)
-    ):
-        raise ValueError("barcodes must be unique and contain only letters, digits, '.' and '-'")
-    with gzip.open(directory / FILES[0], "rt") as handle:
-        header = handle.readline().strip()
-        if header not in {
-            "%%MatrixMarket matrix coordinate integer general",
-            "%%MatrixMarket matrix coordinate real general",
-        }:
-            raise ValueError("matrix must be a general coordinate Matrix Market count matrix")
-        line = handle.readline()
-        while line.startswith("%"):
-            line = handle.readline()
-        dimensions = [int(v) for v in line.split()]
-    if len(dimensions) != 3 or dimensions[:2] != [len(ids), len(barcodes)] or dimensions[2] < 1:
-        raise ValueError("matrix dimensions must match features/barcodes and include counts")
-    return ids, len(barcodes)
+def inspect_rds(path: Path) -> None:
+    if path.suffix.casefold() != ".rds":
+        raise ValueError(f"seurat_rds must be a .rds file: {path}")
+    if not path.is_file():
+        raise ValueError(f"missing Seurat object: {path}")
+    with path.open("rb") as handle:
+        signature = handle.read(6)
+    if not signature.startswith(RDS_SIGNATURES):
+        raise ValueError(f"seurat_rds is not a file written by saveRDS(): {path}")
 
 
 def validate_analysis(analysis: dict) -> None:
@@ -123,57 +97,34 @@ def validate_qc(qc: dict) -> None:
 
 def load_manifest(path: Path) -> dict:
     data = json.loads(path.read_text())
-    exact_keys(data, {"schema_version", "reference", "samples", "analysis"}, "manifest")
-    if data["schema_version"] != "singlecell-counts-v1":
-        raise ValueError("unsupported schema_version; expected singlecell-counts-v1")
+    exact_keys(data, {"schema_version", "input", "reference", "qc", "analysis"}, "manifest")
+    if data["schema_version"] != "singlecell-seurat-v1":
+        raise ValueError("unsupported schema_version; expected singlecell-seurat-v1")
+    source = data["input"]
+    exact_keys(source, {"seurat_rds", "assay", "metadata_columns"}, "input")
+    text(source["assay"], "assay")
+    columns = source["metadata_columns"]
+    exact_keys(columns, METADATA_ROLES, "metadata_columns")
+    for role, column in columns.items():
+        text(column, f"metadata_columns.{role}")
     reference = data["reference"]
     exact_keys(reference, {"species", "genome_build", "mitochondrial_gene_ids"}, "reference")
     text(reference["species"], "species")
     text(reference["genome_build"], "genome_build")
     mito = reference["mitochondrial_gene_ids"]
-    if not isinstance(mito, list) or not mito or any(not isinstance(g, str) for g in mito):
+    if (
+        not isinstance(mito, list)
+        or not mito
+        or any(not isinstance(gene, str) or not gene.strip() for gene in mito)
+    ):
         raise ValueError("mitochondrial_gene_ids requires an explicit nonempty gene-ID list")
     if len(set(mito)) != len(mito):
         raise ValueError("mitochondrial_gene_ids must be unique")
+    validate_qc(data["qc"])
     validate_analysis(data["analysis"])
-    samples = data["samples"]
-    if not isinstance(samples, list) or not 1 <= len(samples) <= 9999:
-        raise ValueError("samples must contain 1..9999 entries")
-    seen_ids, seen_paths, expected_genes = set(), set(), None
-    for index, sample in enumerate(samples, 1):
-        exact_keys(
-            sample,
-            {"sample_id", "donor_id", "condition", "batch", "matrix_dir", "matrix_kind", "qc"},
-            "sample",
-        )
-        identifier = text(sample["sample_id"], "sample_id")
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,63}", identifier) or identifier in seen_ids:
-            raise ValueError(
-                "sample_id must be unique: letter followed by up to 63 letters/digits/hyphens"
-            )
-        seen_ids.add(identifier)
-        for key in ("donor_id", "condition", "batch"):
-            text(sample[key], key)
-        if sample["matrix_kind"] != "filtered":
-            raise ValueError(
-                "v1 requires filtered matrices; raw droplets need a cell-calling stage"
-            )
-        validate_qc(sample["qc"])
-        directory = Path(text(sample["matrix_dir"], "matrix_dir"))
-        directory = (path.parent / directory).resolve()
-        if directory in seen_paths:
-            raise ValueError("the same matrix directory cannot represent two samples")
-        seen_paths.add(directory)
-        genes, _ = inspect_matrix(directory)
-        if expected_genes is not None and genes != expected_genes:
-            raise ValueError(
-                "all samples must have identical ordered feature IDs from one reference"
-            )
-        expected_genes = genes
-        if not set(mito).issubset(genes):
-            raise ValueError("every declared mitochondrial gene ID must occur in the feature table")
-        sample["matrix_dir"] = str(directory)
-        sample["staged_dir"] = f"matrix{index:04d}"
+    rds = (path.parent / text(source["seurat_rds"], "seurat_rds")).resolve()
+    inspect_rds(rds)
+    source["seurat_rds"] = str(rds)
     return data
 
 
@@ -224,10 +175,7 @@ def main() -> int:
     try:
         manifest = load_manifest(args.manifest.resolve())
         if args.check_only:
-            print(
-                f"Input structure valid: {len(manifest['samples'])} sample(s). "
-                "Counts and R not checked."
-            )
+            print("Manifest and .rds signature valid. Object contents and R not checked.")
             return 0
         if args.run_dir is None:
             raise ValueError(
@@ -255,10 +203,8 @@ def main() -> int:
                 "bin/check_dependencies.R",
             )
         }
-        for sample in manifest["samples"]:
-            for name in FILES:
-                source = Path(sample["matrix_dir"]) / name
-                hashes[str(source)] = digest(source)
+        source = Path(manifest["input"]["seurat_rds"])
+        hashes[str(source)] = digest(source)
         manifest["provenance"] = {"sha256": hashes, "cpus": args.cpus, "memory_gb": args.memory_gb}
         prepared = inputs / "prepared_manifest.json"
         prepared.write_text(json.dumps(manifest, indent=2) + "\n")

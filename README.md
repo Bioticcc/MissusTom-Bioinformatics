@@ -40,9 +40,10 @@ been verified.
     reference resources required by the selected project.
 
 - [SINGLE CELL RNA SEQUENCING] - In development. Open **New project → Pipeline →
-  SingleCell RNA-seq** to configure FASTQ libraries, chemistry, references and
-  analysis settings, then export the standalone configuration. Managed setup,
-  saving as an app project and running from the app are not available yet.
+  SingleCell RNA-seq** to choose an existing Seurat object (`.rds`), confirm its
+  metadata columns, QC and analysis settings, then export the standalone
+  configuration. Managed setup, saving as an app project and running from the
+  app are not available yet.
   See the [SingleCell guide](workflows/singlecell_rnaseq/START_HERE.md).
 
 The pipelines are deliberately separate. Bulk RNA-seq does not currently
