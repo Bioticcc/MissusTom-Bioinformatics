@@ -14,6 +14,7 @@ def test_ont_execution_checks_r_libraries_in_pipeline_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environment = {"PATH": "/managed/ont/bin"}
+    monkeypatch.setattr(ont_analysis, "ont_runtime_lock_mismatches", lambda: [])
     monkeypatch.setattr(ont_analysis, "runtime_tool", lambda *_: "/managed/ont/bin/tool")
     monkeypatch.setattr(ont_analysis, "runtime_environment", lambda _: environment)
     run = Mock(return_value=SimpleNamespace(returncode=1))

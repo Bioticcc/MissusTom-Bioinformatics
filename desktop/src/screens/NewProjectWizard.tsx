@@ -2,10 +2,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, bulkProductionBackendError, streamProjectValidation } from "../api";
 import { inferAutomaticSettings, type AutomaticSettingsResult } from "../automaticSettings";
 import { APP_VERSION } from "../appVersion";
+import { applyMetadataImport } from "../metadataImport";
 import { CheckList } from "../components/CheckList";
 import { loadProjectEditor, preserveExistingProject, type EditorOptions } from "../projectEditor";
 import { FolderPreview } from "../components/FolderPreview";
 import { PipelineDependencies } from "../components/PipelineDependencies";
+import { SingleCellSetup } from "./SingleCellSetup";
+import { newSingleCellDraft } from "../singleCellSetup";
 import { readTextFile, saveTextFile, selectDirectory, selectFiles } from "../native";
 import { loadProjectDefaults } from "../preferences";
 import { DEFAULT_FIGURES, FIGURE_TYPES, GENE_METRICS, newCustomFigure } from "../figureCatalog";
@@ -21,6 +24,7 @@ import {
   normalizeMaxParallelTasks,
   ONT_MANIFEST_SCHEMA_VERSION,
   ONT_PIPELINE_VERSION,
+  ONT_REFERENCE_BUILDS,
   projectActionsBlockedByBackend,
   resolveImportedWizardStep,
   resolveBulkReferenceMode,
@@ -37,6 +41,7 @@ import type {
   FastqDiscoveryResult,
   HealthStatus,
   MetadataCsvResult,
+  OntDiscoveryResult,
   PipelineSourceStatus,
   ProjectManifest,
   ProjectValidation,
@@ -79,7 +84,7 @@ const bulkSteps = [
 
 const ontSteps = [
   "Project & directories",
-  "BAM selection",
+  "BAM discovery",
   "Sample review",
   "ONT pipeline options",
   "Stage 05 annotation resources",
@@ -98,6 +103,7 @@ interface DetailsState {
 }
 
 interface MetadataImportStatus {
+  sourceRows?: Record<string, string>;
   path: string;
   matched: number;
   unmatchedSamples: string[];
@@ -156,6 +162,8 @@ export function NewProjectWizard({
   onProjectReady: (manifest: ProjectManifest, plan: RunPlan) => void;
   initialManifest?: ProjectManifest | null;
 }) {
+  const [singleCellSelected, setSingleCellSelected] = useState(false);
+  const [singleCellDraft, setSingleCellDraft] = useState(newSingleCellDraft);
   const [projectDefaults] = useState(loadProjectDefaults);
   const defaultOptions: EditorOptions = {
     organism: "Homo sapiens",
@@ -192,6 +200,7 @@ export function NewProjectWizard({
     coverageWindowSize: 100000,
     modkitFilterPercentile: 0.1,
     modkitMaxDepth: 60000,
+    modificationMode: "5mc_5hmc",
     explorationMinValidCoverage: 10,
     explorationMinFeatureCpgs: 5,
   };
@@ -206,6 +215,12 @@ export function NewProjectWizard({
   });
   const [options, setOptions] = useState<EditorOptions>(initialEditor?.options ?? defaultOptions);
   const [discovery, setDiscovery] = useState<InputDiscoveryResult | null>(null);
+  const [ontDiscovery, setOntDiscovery] = useState<OntDiscoveryResult | null>(null);
+  const ontScanGeneration = useRef(0);
+  useEffect(() => {
+    ontScanGeneration.current += 1;
+    setOntDiscovery(null);
+  }, [details.inputDirectory, pipelineIdentifier]);
   const [samples, setSamples] = useState<ProposedSample[]>(initialEditor?.samples ?? []);
   const [comparisons, setComparisons] = useState<Comparison[]>(initialEditor?.comparisons ?? []);
   const [figureConfiguration, setFigureConfiguration] = useState(initialEditor?.figureConfiguration ?? { version: 1 as const, custom_figures: [] });
@@ -333,11 +348,11 @@ export function NewProjectWizard({
     setSavedPath("");
   };
 
-  const updateStartStage = (value: RunStartStage) => {
-    setStartStage(value);
+  const resetInputState = () => {
     setDetails((current) => ({ ...current, inputDirectory: "" }));
     setInputPreview(null);
     setDiscovery(null);
+    setOntDiscovery(null);
     setSamples([]);
     setMetadataImport(null);
     setComparisons([]);
@@ -345,18 +360,17 @@ export function NewProjectWizard({
     invalidateValidation();
   };
 
+  const updateStartStage = (value: RunStartStage) => {
+    setStartStage(value);
+    resetInputState();
+  };
+
   const updatePipeline = (value: PipelineIdentifier) => {
     if (value === pipelineIdentifier) return;
     setPipelineIdentifier(value);
     setStep(0);
     setStartStage("quantification");
-    setDetails((current) => ({ ...current, inputDirectory: "" }));
-    setInputPreview(null);
-    setDiscovery(null);
-    setSamples([]);
-    setComparisons([]);
-    setFigureConfiguration({ version: 1, custom_figures: [] });
-    setMetadataImport(null);
+    resetInputState();
     setOptions((current) => value === "ont-analysis"
       ? {
           ...current,
@@ -376,7 +390,6 @@ export function NewProjectWizard({
           referenceMode: "build",
           executionProfile: "local",
         });
-    invalidateValidation();
   };
 
   const updateDetails = (key: keyof DetailsState, value: string) => {
@@ -388,7 +401,10 @@ export function NewProjectWizard({
       }
       return { ...current, [key]: value };
     });
-    if (key === "inputDirectory") setInputPreview(null);
+    if (key === "inputDirectory") {
+      setInputPreview(null);
+      setOntDiscovery(null);
+    }
     if (key === "outputDirectory") setOutputPreview(null);
     invalidateValidation();
   };
@@ -434,6 +450,26 @@ export function NewProjectWizard({
 
   const updateOptions = <K extends keyof EditorOptions>(key: K, value: EditorOptions[K]) => {
     setOptions((current) => ({ ...current, [key]: value }));
+    invalidateValidation();
+  };
+
+  const updateOntOrganism = (organism: string) => {
+    setOptions((current) => ({
+      ...current,
+      organism,
+      referenceGenome: ONT_REFERENCE_BUILDS[organism][0],
+      referenceFasta: "", referenceFai: "", minimap2Index: "",
+      gencodeGff3: "", cpgIslands: "", ccreTable: "", intergenicBed: "",
+    }));
+    invalidateValidation();
+  };
+
+  const updateOntReference = (referenceGenome: string) => {
+    setOptions((current) => ({
+      ...current, referenceGenome,
+      referenceFasta: "", referenceFai: "", minimap2Index: "",
+      gencodeGff3: "", cpgIslands: "", ccreTable: "", intergenicBed: "",
+    }));
     invalidateValidation();
   };
 
@@ -498,6 +534,41 @@ export function NewProjectWizard({
     }
   };
 
+  const scanOntBams = async () => {
+    const generation = ++ontScanGeneration.current;
+    setBusy("ont-scan");
+    setError("");
+    setOntDiscovery(null);
+    try {
+      const result = await apiRequest<OntDiscoveryResult>("/api/v1/ont/discover", {
+        method: "POST",
+        body: JSON.stringify({ directory: details.inputDirectory, recursive: true }),
+      });
+      if (generation === ontScanGeneration.current) {
+        setOntDiscovery({ ...result, samples: result.samples.map(normalizeDiscoveredSample) });
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "ONT discovery failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyOntDiscovery = () => {
+    if (!ontDiscovery) return;
+    const grouped = new Map<string, ProposedSample>();
+    for (const sample of ontDiscovery.samples.filter((item) => item.included)) {
+      const existing = grouped.get(sample.sample_id);
+      if (existing) existing.ont_bam_files.push(...sample.ont_bam_files);
+      else grouped.set(sample.sample_id, { ...sample, ont_bam_files: [...sample.ont_bam_files] });
+    }
+    setSamples([...grouped.values()]);
+    setMetadataImport(null);
+    setOntDiscovery(null);
+    invalidateValidation();
+    setStep(2);
+  };
+
   const addOntBamSamples = async () => {
     setBusy("ont-bam-select");
     setError("");
@@ -505,10 +576,8 @@ export function NewProjectWizard({
       const selected = await selectFiles("Select ONT BAM file(s)", true);
       if (!selected?.length) return;
       setSamples((current) => {
-        const existing = current[0];
-        if (existing) return [{ ...existing, ont_bam_files: [...new Set([...existing.ont_bam_files, ...selected])] }];
         return [{
-          sample_id: "ont_sample",
+          sample_id: `ont_sample_${current.length + 1}`,
           r1_files: [],
           r2_files: [],
           ont_bam_files: selected,
@@ -521,7 +590,7 @@ export function NewProjectWizard({
           batch: null,
           covariates: {},
           included: true,
-        }];
+        }, ...current];
       });
       invalidateValidation();
     } catch (reason) {
@@ -537,31 +606,25 @@ export function NewProjectWizard({
     try {
       const selected = await selectFiles("Select experimental metadata CSV");
       if (!selected?.[0]) return;
-      const result = await apiRequest<MetadataCsvResult>("/api/v1/metadata/csv", {
+      let result = await apiRequest<MetadataCsvResult>("/api/v1/metadata/csv", {
         method: "POST",
         body: JSON.stringify({ path: selected[0], sample_ids: samples.map((sample) => sample.sample_id) }),
       });
+      if (result.unmatched_samples.length && window.confirm("Some sample IDs do not match exactly. Try the legacy human-study naming rules (P50Large_, leading n, hyphens, and _S suffixes)? Review the selected original IDs before running.")) {
+        result = await apiRequest<MetadataCsvResult>("/api/v1/metadata/csv", {
+          method: "POST",
+          body: JSON.stringify({ path: selected[0], sample_ids: samples.map((sample) => sample.sample_id), legacy_identifiers: true }),
+        });
+      }
       const rowsBySample = new Map(result.rows
         .filter((row) => row.matched_sample_id)
         .map((row) => [row.matched_sample_id as string, row]));
       const matched = rowsBySample.size;
-      const updatedSamples = samples.map((sample) => {
-        const row = rowsBySample.get(sample.sample_id);
-        if (!row) return sample;
-        return {
-          ...sample,
-          condition: row.condition,
-          batch: row.batch,
-          biological_replicate: row.biological_replicate ?? sample.biological_replicate,
-          covariates: {
-            ...sample.covariates,
-            ...(row.intervention ? { intervention: row.intervention } : {}),
-          },
-        };
-      });
+      const updatedSamples = applyMetadataImport(samples, result);
       setSamples(updatedSamples);
       setMetadataImport({
         path: result.path,
+        sourceRows: Object.fromEntries(result.rows.filter((row) => row.matched_sample_id).map((row) => [row.matched_sample_id, row.source_sample_id ?? row.sample_id])),
         matched,
         unmatchedSamples: result.unmatched_samples,
         unusedRows: result.unused_rows,
@@ -703,6 +766,8 @@ export function NewProjectWizard({
         batch: sample.batch,
         covariates: sample.covariates,
         included: sample.included,
+        metadata_source_sample_id: sample.metadata_source_sample_id ?? null,
+        metadata_source_path: sample.metadata_source_path ?? null,
       })),
       comparisons: isOntPipeline ? [] : comparisons,
       ...(!isOntPipeline ? { figure_configuration: figureConfiguration } : {}),
@@ -713,6 +778,7 @@ export function NewProjectWizard({
           methylation_window_size: options.coverageWindowSize,
           modkit_filter_percentile: options.modkitFilterPercentile,
           modkit_max_depth: options.modkitMaxDepth,
+          modification_mode: options.modificationMode,
           exploration_min_valid_coverage: options.explorationMinValidCoverage,
           exploration_min_feature_cpgs: options.explorationMinFeatureCpgs,
           expected_pass_bam_count: samples
@@ -1158,7 +1224,8 @@ export function NewProjectWizard({
             <fieldset className="run-mode-panel setup-mode-panel" disabled={Boolean(initialManifest)}>
               <legend>Pipeline</legend>
               <label className={`run-mode-option${pipelineIdentifier === "bulk-rnaseq" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "bulk-rnaseq"} onChange={() => updatePipeline("bulk-rnaseq")} /><span><strong>Bulk RNA-seq (paired-end) {pipelineSources.find((source) => source.pipeline_identifier === "bulk-rnaseq")?.source_type === "custom" && <span className="modified-pipeline-badge"><span aria-hidden="true">!</span> Modified by user</span>}</strong><small>Paired-end FASTQ quantification or existing Kallisto results with differential-expression analysis.</small></span></label>
-              <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (mouse) {pipelineSources.find((source) => source.pipeline_identifier === "ont-analysis")?.source_type === "custom" && <span className="modified-pipeline-badge"><span aria-hidden="true">!</span> Modified by user</span>}</strong><small>Configure mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
+              <label className={`run-mode-option${pipelineIdentifier === "ont-analysis" ? " selected" : ""}`}><input type="radio" name="pipeline" checked={pipelineIdentifier === "ont-analysis"} onChange={() => updatePipeline("ont-analysis")} /><span><strong>ONT (Oxford Nanopore) Analysis (human or mouse) {pipelineSources.find((source) => source.pipeline_identifier === "ont-analysis")?.source_type === "custom" && <span className="modified-pipeline-badge"><span aria-hidden="true">!</span> Modified by user</span>}</strong><small>Configure human or mouse long-read BAM inputs, alignment references, and Stage 05 annotation resources.</small></span></label>
+              <label className="run-mode-option"><input type="radio" name="pipeline" checked={false} onChange={() => setSingleCellSelected(true)} /><span><strong>SingleCell RNA-seq <span className="field-help">In development</span></strong><small>Configure FASTQ libraries, chemistry, cell calling and Seurat analysis. Configuration export is available; running from the app is not available yet.</small></span></label>
               {selectedPipelineSource?.source_type === "custom" && <p className="run-mode-note modified-pipeline-warning"><strong>Modified pipeline selected.</strong> The next run for this project will use user-modified code from revision {selectedPipelineSource.active_revision_id}. This applies to new and existing projects that use this pipeline.</p>}
             </fieldset>
             <PipelineDependencies pipelineIdentifier={pipelineIdentifier} />
@@ -1185,8 +1252,22 @@ export function NewProjectWizard({
       case 1:
         if (isOntPipeline) return (
           <section className="wizard-card">
-            <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>Select ONT BAM files</h2></div><button className="button primary" type="button" onClick={() => void addOntBamSamples()} disabled={busy === "ont-bam-select"}>{busy === "ont-bam-select" ? "Selecting…" : "Select BAM files…"}</button></div>
-            <p className="helper-copy">Select the BAM chunks for the single mouse sample. Additional selections add files to the editable <code>ont_bam_files</code> list.</p>
+            <div className="section-heading"><div><p className="eyebrow">Step 2</p><h2>Select ONT BAM files</h2></div><button className="button primary" type="button" onClick={() => void addOntBamSamples()} disabled={busy === "ont-bam-select"}>{busy === "ont-bam-select" ? "Selecting…" : samples.length ? "Add ONT sample…" : "Select BAM files…"}</button></div>
+            <p className="helper-copy">Each selection creates one ONT sample. Select all BAM chunks belonging to that biological sample, then add another sample as needed. You can rename samples and edit their BAM lists in the next step.</p>
+            <div className="section-heading"><div><h3>Discover BAM files</h3><p>Scan the input directory and its subfolders. Each BAM initially becomes one proposed sample. Indexes (.bai) are ignored.</p></div><button className="button secondary" type="button" onClick={() => void scanOntBams()} disabled={Boolean(busy) || !details.inputDirectory}>{busy === "ont-scan" ? "Scanning…" : "Scan directory"}</button></div>
+            {ontDiscovery && <div className="file-preview">
+              <h3>Review scan assignments</h3>
+              <p>{ontDiscovery.total_files} BAM file(s) · {formatBytes(ontDiscovery.total_bytes)}. Edit the sample identifiers below. Give files the same identifier only to combine parts of the same biological sample.</p>
+              {ontDiscovery.warnings.map((warning, index) => <p className="field-help" key={index}>{warning}</p>)}
+              <div className="table-scroll"><table className="sample-table"><thead><tr><th>Use</th><th>BAM file</th><th>Assign to sample</th></tr></thead><tbody>{ontDiscovery.samples.map((sample, index) => <tr key={sample.ont_bam_files[0]}>
+                <td><input type="checkbox" aria-label={`Use scanned BAM ${index + 1}`} checked={sample.included} onChange={(event) => setOntDiscovery({ ...ontDiscovery, samples: ontDiscovery.samples.map((item, row) => row === index ? { ...item, included: event.target.checked } : item) })} /></td>
+                <td><code>{sample.ont_bam_files[0]}</code></td>
+                <td><input aria-label={`Scanned sample identifier ${index + 1}`} value={sample.sample_id} onChange={(event) => setOntDiscovery({ ...ontDiscovery, samples: ontDiscovery.samples.map((item, row) => row === index ? { ...item, sample_id: event.target.value } : item) })} /></td>
+              </tr>)}</tbody></table></div>
+              <p>Applying these assignments replaces the current sample list. Names must start with a letter or number and contain only letters, numbers, dots, underscores or hyphens.</p>
+              <button className="button primary" type="button" onClick={applyOntDiscovery} disabled={Boolean(busy) || !ontDiscovery.samples.some((sample) => sample.included) || ontDiscovery.samples.some((sample) => sample.included && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sample.sample_id))}>Apply reviewed assignments</button>
+              <button className="button secondary" type="button" onClick={() => setOntDiscovery(null)}>Dismiss scan</button>
+            </div>}
             {samples.length === 0 ? <div className="empty-state compact"><div className="empty-orbit" aria-hidden="true">⌁</div><h3>No ONT BAM samples</h3><p>Select the BAM files for a sample to continue.</p></div> : <div className="file-preview"><h3>Selected BAM samples</h3><div className="file-preview-list">{samples.map((sample) => <div key={sample.sample_id}><span className="read-chip">BAM</span><code>{sample.sample_id}</code><small>{sample.ont_bam_files.length} file(s)</small></div>)}</div></div>}
           </section>
         );
@@ -1225,10 +1306,11 @@ export function NewProjectWizard({
         if (isOntPipeline) return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 4</p><h2>ONT pipeline options</h2></div></div>
-            <p className="helper-copy">ONT analysis uses mouse long-read BAM inputs. Library layout and strandedness are recorded as single-end and unknown; no Kallisto or differential-expression settings apply.</p>
-            <div className="field-pair"><label>Organism<input value={options.organism} onChange={(event) => updateOptions("organism", event.target.value)} /></label><label>Reference genome<input value={options.referenceGenome} onChange={(event) => updateOptions("referenceGenome", event.target.value)} /></label></div>
+            <p className="helper-copy">ONT analysis processes each human or mouse long-read BAM sample independently. Library layout and strandedness are recorded as single-end and unknown. Cross-sample statistical comparisons are not available yet.</p>
+            <div className="field-pair"><label>Organism<select value={options.organism} onChange={(event) => updateOntOrganism(event.target.value)}>{Object.keys(ONT_REFERENCE_BUILDS).map((organism) => <option key={organism} value={organism}>{organism}</option>)}</select></label><label>Reference genome<select value={options.referenceGenome} onChange={(event) => updateOntReference(event.target.value)}>{(ONT_REFERENCE_BUILDS[options.organism] ?? []).map((build) => <option key={build} value={build}>{build}</option>)}</select></label></div><p className="helper-copy">Changing species or assembly clears reference and annotation paths. Supply matching files for the selected assembly; chromosome names must agree across FASTA, indexes and annotations.</p>
             <div className="field-pair"><label>Annotation source<input value={options.annotationSource} onChange={(event) => updateOptions("annotationSource", event.target.value)} /></label><label>Library type<input value={options.libraryType} onChange={(event) => updateOptions("libraryType", event.target.value)} /></label></div>
-            <fieldset><legend>Alignment reference paths</legend><p className="helper-copy">Reference FASTA, its separately supplied FASTA index, and a matching minimap2 index are required for the ONT workflow.</p>{referenceFileField("Reference FASTA", "referenceFasta", "/references/GRCm38p6.fa", true)}{referenceFileField("Reference FASTA index (.fai)", "referenceFai", "/references/GRCm38p6.fa.fai", true)}{referenceFileField("minimap2 index", "minimap2Index", "/references/GRCm38p6.mmi", true)}</fieldset>
+            <fieldset><legend>Alignment reference paths</legend><p className="helper-copy">Reference FASTA and its FASTA index are required. Leave the minimap2 index empty to build and reuse one automatically during Stage 01, or supply an existing index built from the same FASTA with the lr:hq preset.</p>{referenceFileField("Reference FASTA", "referenceFasta", `/references/${options.referenceGenome}.fa`, true)}{referenceFileField("Reference FASTA index (.fai)", "referenceFai", `/references/${options.referenceGenome}.fa.fai`, true)}{referenceFileField("minimap2 index (optional)", "minimap2Index", "Leave empty to generate automatically")}</fieldset>
+            <label>Modified-base measurements<select value={options.modificationMode} onChange={(event) => updateOptions("modificationMode", event.target.value as EditorOptions["modificationMode"])}><option value="5mc_5hmc">5mC and 5hmC</option><option value="5mc_only">5mC only — 5hmC not measured</option></select></label><p className="helper-copy">Choose the measurements produced by the modification-calling model. Legacy Mm/Ml tags are accepted and normalized in generated alignments. A missing MN tag is allowed on primary reads; existing MN tags must match the sequence length. In 5mC-only mode, 5hmC values are unavailable and 5hmC-specific plots are omitted.</p>
             <fieldset><legend>Coverage and methylation parameters</legend><p className="helper-copy">These settings are saved in the manifest. Changing them invalidates the affected stage outputs; scientific interpretation remains single-sample and descriptive.</p><div className="field-triple"><label>Window size (bases)<input type="number" min="1" step="1" value={options.coverageWindowSize} onChange={(event) => updateOptions("coverageWindowSize", Number(event.target.value))} /></label><label>Modkit filter percentile (less than 1)<input type="number" min="0" max="0.99" step="0.01" value={options.modkitFilterPercentile} onChange={(event) => updateOptions("modkitFilterPercentile", Number(event.target.value))} /></label><label>Maximum pileup depth<input type="number" min="1" max="60000" step="1" value={options.modkitMaxDepth} onChange={(event) => updateOptions("modkitMaxDepth", Number(event.target.value))} /></label></div><div className="field-pair"><label>Minimum valid CpG coverage<input type="number" min="1" step="1" value={options.explorationMinValidCoverage} onChange={(event) => updateOptions("explorationMinValidCoverage", Number(event.target.value))} /></label><label>Minimum measured CpGs per feature<input type="number" min="1" step="1" value={options.explorationMinFeatureCpgs} onChange={(event) => updateOptions("explorationMinFeatureCpgs", Number(event.target.value))} /></label></div></fieldset>
             <div className="field-triple"><label>Profile<select value={options.executionProfile} onChange={(event) => updateOptions("executionProfile", event.target.value as EditorOptions["executionProfile"])}><option value="local">Local tools</option></select></label><label>Total workflow CPU budget<input type="number" min="1" value={options.cpus} onChange={(event) => updateOptions("cpus", Number(event.target.value))} /></label><label>Total workflow RAM budget (GiB)<input type="number" min="1" value={options.memoryGb} onChange={(event) => updateOptions("memoryGb", Number(event.target.value))} /></label></div>
           </section>
@@ -1256,9 +1338,10 @@ export function NewProjectWizard({
               <p className="helper-copy">Example: search for <code>OD1</code> and enter condition <code>OD1</code>. For replicates, search for a replicate-specific name fragment and enter its replicate ID. New values overwrite those fields for matching samples, so review the assignments below. Use the sample-ID shortcut only when every sample represents a separate biological specimen.</p>
             </div>
             <div className="metadata-import-panel">
-              <div><strong>Import experimental metadata</strong><p><strong>CSV requirement:</strong> the file MUST include <code>SampleID</code>, <code>Condition</code>, and <code>Batch</code> columns.</p><small><code>Patient</code> maps to biological replicate, and <code>Intervention</code> is imported for filtered comparisons. Column matching ignores letter case; legacy sample-ID separators and suffixes are normalized and reported.</small></div>
+              <div><strong>Import experimental metadata</strong><p><strong>CSV requirement:</strong> the file MUST include <code>SampleID</code>, <code>Condition</code>, and <code>Batch</code> columns.</p><small><code>Patient</code> maps to biological replicate, and <code>Intervention</code> is imported for filtered comparisons. Column matching ignores letter case. Sample IDs match exactly by default; legacy naming rules require your confirmation.</small></div>
               <button className="button secondary" type="button" onClick={() => void importMetadataCsv()} disabled={busy === "metadata-csv" || samples.length === 0}>{busy === "metadata-csv" ? "Importing…" : "Select metadata CSV…"}</button>
             </div>
+            {metadataImport?.sourceRows && <details><summary>Selected original CSV sample IDs</summary><ul>{Object.entries(metadataImport.sourceRows).map(([sampleId, originalId]) => <li key={sampleId}><code>{sampleId}</code> ← <code>{originalId}</code></li>)}</ul></details>}
             {metadataImport && <div className={metadataImport.unmatchedSamples.length || metadataImport.unusedRows.length || metadataImport.warnings.length ? "warning-list metadata-import-result" : "success-message metadata-import-result"}><strong>Imported metadata for {metadataImport.matched} sample(s)</strong><p><code>{metadataImport.path}</code></p>{metadataImport.unmatchedSamples.length > 0 && <div><p>No matching CSV row for:</p><ul>{metadataImport.unmatchedSamples.map((sampleId) => <li key={sampleId}><code>{sampleId}</code></li>)}</ul></div>}{metadataImport.unusedRows.length > 0 && <div><p>Unused CSV rows, including superseded legacy duplicates:</p><ul>{metadataImport.unusedRows.map((row) => <li key={row}><code>{row}</code></li>)}</ul></div>}{metadataImport.warnings.map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}</div>}
             <div className="design-list">{(designSamplesExpanded ? includedSamples : includedSamples.slice(0, 8)).map((sample, index) => {
               const realIndex = samples.indexOf(sample);
@@ -1272,7 +1355,7 @@ export function NewProjectWizard({
         if (isOntPipeline) return (
           <section className="wizard-card form-stack">
             <div className="section-heading"><div><p className="eyebrow">Step 5</p><h2>Optional annotation exploration</h2></div></div>
-            <p className="helper-copy">No existing figures or reports are required. The pipeline generates its own applicable plots and tables from your BAMs. Leave these fields empty for alignment, QC, coverage, and methylation analysis. To add annotation-based exploration, supply all four matching mouse annotation resources below; these describe genomic features, not prior analysis results.</p>
+            <p className="helper-copy">No existing figures or reports are required. The pipeline generates its own applicable plots and tables from your BAMs. Leave these fields empty for alignment, QC, coverage, and methylation analysis. To add annotation-based exploration, supply all four annotation resources below matching the selected species and assembly; these describe genomic features, not prior analysis results.</p>
             <fieldset><legend>Optional annotation set (all four or none)</legend>{referenceFileField("GENCODE GFF3", "gencodeGff3", "/references/gencode.vM25.annotation.gff3.gz")}{referenceFileField("CpG islands JSON", "cpgIslands", "/references/cpg_islands.json")}{referenceFileField("cCRE CSV table", "ccreTable", "/references/ccre.csv")}{referenceFileField("Intergenic BED", "intergenicBed", "/references/intergenic.bed")}</fieldset>
             <fieldset><legend>Optional sequencing provenance</legend><p className="helper-copy">An existing instrument report may be retained as provenance, but is not needed to run analysis.</p>{referenceFileField("ONT instrument report (optional)", "ontInstrumentReport", "/data/ont/report_run.html")}</fieldset>
           </section>
@@ -1305,7 +1388,7 @@ export function NewProjectWizard({
         if (isOntPipeline) return (
           <section className="wizard-card">
             <div className="section-heading"><div><p className="eyebrow">Step 7</p><h2>Review and save</h2></div></div>
-            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
+            <div className="review-grid"><dl><dt>Project</dt><dd>{details.projectName || "—"}</dd><dt>Pipeline</dt><dd>ONT (Oxford Nanopore) Analysis (human or mouse)</dd><dt>Input</dt><dd>{details.inputDirectory || "—"}</dd><dt>Output</dt><dd>{details.outputDirectory || "—"}</dd><dt>Organism</dt><dd>{options.organism}</dd><dt>Reference</dt><dd>{options.referenceGenome} · {options.annotationSource}</dd></dl><dl><dt>Included samples</dt><dd>{samples.filter((sample) => sample.included).length}</dd><dt>BAM files</dt><dd>{samples.filter((sample) => sample.included).reduce((total, sample) => total + sample.ont_bam_files.length, 0)}</dd><dt>Measurements</dt><dd>{options.modificationMode === "5mc_only" ? "5mC only; 5hmC not measured" : "5mC and 5hmC"}</dd><dt>Library</dt><dd>single-end · unknown</dd><dt>Workflow budget</dt><dd>{options.cpus} CPUs · {options.memoryGb} GiB RAM</dd><dt>Execution</dt><dd>{options.executionProfile}</dd></dl></div>
             {!validation?.valid && <div className="warning-list"><strong>Validation required</strong><p>Return to preflight and resolve blocking failures before saving.</p></div>}
             {savedPath && <div className="success-message" role="status">Saved manifest: <code>{savedPath}</code></div>}
             <div className="save-panel"><div><strong>Save manifest</strong><p>BAM files are not copied. A command preview is generated.</p></div><button className="button primary large" type="button" disabled={!validatedManifest || busy === "save" || busy === "plan" || backendBlocksProjectActions} onClick={saveAndPlan}>{busy === "save" ? "Saving…" : busy === "plan" ? "Building run plan…" : "Save manifest & build run plan"}</button></div>
@@ -1377,6 +1460,10 @@ export function NewProjectWizard({
         );
     }
   };
+
+  if (singleCellSelected && !initialManifest) {
+    return <SingleCellSetup draft={singleCellDraft} onChange={setSingleCellDraft} onBack={() => setSingleCellSelected(false)} />;
+  }
 
   return (
     <div className="page-stack wizard-page">

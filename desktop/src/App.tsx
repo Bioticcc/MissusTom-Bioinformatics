@@ -216,9 +216,7 @@ export default function App() {
       <div className="app-shell">
         <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark" aria-hidden="true">
-            MT
-          </div>
+          <img className="brand-mark" src="/missus-tom-logo.svg" alt="" aria-hidden="true" />
           <div>
             <strong>Missus Tom</strong>
             <span>Local bioinformatics workbench</span>

@@ -5,6 +5,11 @@ export const BULK_PIPELINE_VERSION = "0.5.0" as const;
 export const ONT_MANIFEST_SCHEMA_VERSION = "1.0.0" as const;
 export const ONT_PIPELINE_VERSION = "0.1.0" as const;
 
+export const ONT_REFERENCE_BUILDS: Record<string, readonly string[]> = {
+  "Homo sapiens": ["GRCh38", "hg38", "GRCh37", "hg19"],
+  "Mus musculus": ["GRCm38p6", "GRCm38", "mm10", "GRCm39", "mm39"],
+};
+
 export type BulkReferenceMode = "build" | "existing-index";
 export type BulkStrandedness = "unstranded" | "forward" | "reverse";
 

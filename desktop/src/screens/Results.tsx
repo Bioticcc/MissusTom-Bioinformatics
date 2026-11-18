@@ -4,12 +4,8 @@ import { openDirectory } from "../native";
 import { DirectoryOpenError, type DirectoryOpenFailure } from "../components/DirectoryOpenError";
 import { RequestCoordinator } from "../requestCoordinator";
 import type { ResultArtifact, RunRecord } from "../types";
+import { outputDirectoryForRun, resultCategories } from "../runOutputs";
 
-const categories: Array<[string, string]> = [
-  ["qc", "QC reports"], ["trimmed_reads", "Trimmed reads"], ["counts", "Kallisto quantification"],
-  ["differential_expression", "Differential expression"], ["figures", "Figures"], ["tables", "Tables"],
-  ["workflow_reports", "Workflow reports"], ["logs", "Logs"], ["run_manifest", "Run manifest"],
-];
 const pollableStatuses = new Set(["queued", "preparing", "running", "cancelling"]);
 const POLL_MS = 10_000;
 
@@ -89,6 +85,8 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
   const selectRun = (run: RunRecord) => {
     selectedId.current = run.job_identifier;
     setSelectedRun(run);
+    setCategory("all");
+    setExpandedCategories(new Set());
     setArtifacts([]);
     setError("");
     setDirectoryOpenFailure(null);
@@ -97,7 +95,7 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
 
   const openOutput = async () => {
     if (!selectedRun) return;
-    const path = selectedRun.results_directory;
+    const path = outputDirectoryForRun(selectedRun, artifacts);
     try {
       await openDirectory(path);
       setDirectoryOpenFailure(null);
@@ -105,13 +103,14 @@ export function Results({ activeRun }: { activeRun: RunRecord | null }) {
       setDirectoryOpenFailure({ path, message: reason instanceof Error ? reason.message : String(reason) });
     }
   };
+  const categories = resultCategories(selectedRun?.pipeline_identifier);
   const visibleCategories = category === "all" ? categories : categories.filter(([key]) => key === category);
 
   return (
     <div className="page-stack">
-      <header className="page-header"><div><p className="eyebrow">Project outputs</p><h1>Results</h1><p className="lede">Files currently in this project’s output folder. Reruns update this folder.</p></div><div className="header-actions">{selectedRun && <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>}<button className="button primary" type="button" disabled={!selectedRun || refreshing} onClick={() => { if (selectedRun) void scan(selectedRun.job_identifier); }}>{refreshing ? "Refreshing…" : "Refresh files"}</button></div></header>
+      <header className="page-header"><div><p className="eyebrow">Project outputs</p><h1>Results</h1><p className="lede">{selectedRun?.pipeline_identifier === "ont-analysis" ? "Results are grouped by sample. Each sample contains QC, methylation calls and summaries, figures, and an HTML report." : "Files currently in this project’s output folder. Reruns update this folder."}</p></div><div className="header-actions">{selectedRun && <button className="button secondary" type="button" onClick={() => void openOutput()}>Open output folder</button>}<button className="button primary" type="button" disabled={!selectedRun || refreshing} onClick={() => { if (selectedRun) void scan(selectedRun.job_identifier); }}>{refreshing ? "Refreshing…" : "Refresh files"}</button></div></header>
       {error && <div className="inline-error" role="alert">{error}</div>}
-      {directoryOpenFailure && selectedRun?.results_directory === directoryOpenFailure.path && <DirectoryOpenError key={directoryOpenFailure.path} {...directoryOpenFailure} />}
+      {directoryOpenFailure && selectedRun && outputDirectoryForRun(selectedRun, artifacts) === directoryOpenFailure.path && <DirectoryOpenError key={directoryOpenFailure.path} {...directoryOpenFailure} />}
       <section className="panel results-toolbar">
         <label>Run<select value={selectedRun?.job_identifier ?? ""} onChange={(event) => { const run = runs.find((item) => item.job_identifier === event.target.value); if (run) selectRun(run); }} disabled={runs.length === 0}>{runs.length === 0 ? <option value="">No runs available</option> : runs.map((run) => <option key={run.job_identifier} value={run.job_identifier}>{run.project_name} · {run.status} · {new Date(run.created_at).toLocaleString()}</option>)}</select></label>
         <label>File group<select value={category} onChange={(event) => setCategory(event.target.value)}><option value="all">All file groups</option>{categories.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>

@@ -47,6 +47,7 @@ from missus_tom.services.experimental_design import (
     paired_design_errors,
 )
 from missus_tom.services.native_readiness import inspect_native_readiness
+from missus_tom.services.ont_references import ont_main_chromosomes, supported_ont_reference
 from missus_tom.services.quantifications import has_kallisto_header
 from missus_tom.services.resources import (
     GIB,
@@ -1153,21 +1154,29 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     )
 
     included = [sample for sample in manifest.samples if sample.included]
-    sample_scope_ok = len(included) == 1
+    sample_scope_ok = len(included) >= 1
     checks.append(
         PreflightCheck(
             check_id="sample_identifiers",
             label="Sample identifiers",
             status=CheckStatus.PASSED if sample_scope_ok else CheckStatus.BLOCKING,
-            message="One included ONT sample"
+            message=f"{len(included)} included ONT sample(s)"
             if sample_scope_ok
-            else "ONT analysis currently requires exactly one included sample",
+            else "ONT analysis requires at least one included sample",
         )
     )
     bam_errors: list[str] = []
     assigned: list[str] = []
+    basename_collisions: list[str] = []
     input_root = input_path.resolve(strict=False)
     for sample in included:
+        basename_collisions.extend(
+            f"{sample.sample_id}: {basename}"
+            for basename, count in Counter(
+                Path(value).name for value in sample.ont_bam_files
+            ).items()
+            if count > 1
+        )
         if not sample.ont_bam_files:
             bam_errors.append(f"{sample.sample_id}: no BAM files")
             continue
@@ -1189,11 +1198,7 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     duplicates = sorted(value for value, count in Counter(assigned).items() if count > 1)
     if duplicates:
         bam_errors.append("duplicate BAM assignment")
-    basename_collisions = sorted(
-        basename
-        for basename, count in Counter(Path(value).name for value in assigned).items()
-        if count > 1
-    )
+    basename_collisions.sort()
     if basename_collisions:
         bam_errors.append("BAM basename collision: " + ", ".join(basename_collisions))
     expected_count = manifest.parameters.get("expected_pass_bam_count")
@@ -1221,6 +1226,20 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         )
     )
     parameter_errors: list[str] = []
+    modification_mode = manifest.parameters.get("modification_mode", "5mc_5hmc")
+    checks.append(
+        PreflightCheck(
+            check_id="ont_modification_mode",
+            label="Modified-base measurements",
+            status=CheckStatus.PASSED,
+            message=(
+                "5mC only; 5hmC is not measured and its plots will be omitted"
+                if modification_mode == "5mc_only"
+                else "Separate 5mC and 5hmC measurements"
+            ),
+            details={"modification_mode": modification_mode},
+        )
+    )
     for key in (
         "coverage_window_size",
         "methylation_window_size",
@@ -1281,21 +1300,20 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
             },
         )
     )
-    genome_ok = manifest.organism == "Mus musculus" and manifest.reference_genome == "GRCm38p6"
+    genome_ok = supported_ont_reference(manifest.organism, manifest.reference_genome)
     checks.append(
         PreflightCheck(
             check_id="ont_reference_build",
             label="ONT reference build",
             status=CheckStatus.PASSED if genome_ok else CheckStatus.BLOCKING,
-            message="Mus musculus GRCm38p6 is selected"
+            message=f"{manifest.organism} {manifest.reference_genome} is selected"
             if genome_ok
-            else "ONT analysis requires Mus musculus with GRCm38p6",
+            else "ONT analysis requires a supported human or mouse species/reference pair",
         )
     )
     required = {
         "reference_fasta",
         "reference_fai",
-        "minimap2_index",
     }
     annotation_resources = {
         "gencode_gff3",
@@ -1310,7 +1328,8 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
     invalid: list[str] = []
     configured_resources = manifest.reference_resources.keys()
     for key in sorted(
-        (required | supplied_annotations | {"ont_instrument_report"}) & configured_resources
+        (required | supplied_annotations | {"ont_instrument_report", "minimap2_index"})
+        & configured_resources
     ):
         path = Path(manifest.reference_resources[key])
         try:
@@ -1318,7 +1337,12 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         except OSError:
             invalid.append(key)
             continue
-        if path.is_symlink() or not resolved.is_file() or not os.access(resolved, os.R_OK):
+        if (
+            path.is_symlink()
+            or not resolved.is_file()
+            or not os.access(resolved, os.R_OK)
+            or (key == "minimap2_index" and resolved.stat().st_size == 0)
+        ):
             invalid.append(key)
     checks.append(
         PreflightCheck(
@@ -1336,8 +1360,56 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
                     "annotation exploration is not configured"
                 )
             ),
+            details={
+                "minimap2_index_mode": (
+                    "supplied" if "minimap2_index" in configured_resources else "generated"
+                ),
+            },
         )
     )
+    checks.append(
+        PreflightCheck(
+            check_id="ont_minimap2_index",
+            label="ONT alignment reference index",
+            status=CheckStatus.BLOCKING if "minimap2_index" in invalid else CheckStatus.PASSED,
+            message=(
+                "Supplied minimap2 index is not a readable nonempty file"
+                if "minimap2_index" in invalid
+                else "The supplied minimap2 index will be used for alignment"
+                if "minimap2_index" in configured_resources
+                else "A minimap2 index will be generated from the reference FASTA during Stage 01 "
+                "and reused across samples and restarts"
+            ),
+        )
+    )
+    if (
+        genome_ok
+        and "reference_fai" in manifest.reference_resources
+        and "reference_fai" not in invalid
+    ):
+        try:
+            chromosomes = ont_main_chromosomes(
+                Path(manifest.reference_resources["reference_fai"]),
+                manifest.organism,
+                manifest.reference_genome,
+            )
+            fai_error = ""
+        except (OSError, UnicodeError, ValueError) as exc:
+            chromosomes = []
+            fai_error = str(exc)
+        checks.append(
+            PreflightCheck(
+                check_id="ont_reference_chromosomes",
+                label="ONT reference chromosomes",
+                status=CheckStatus.BLOCKING if fai_error else CheckStatus.PASSED,
+                message=fai_error or f"Reference FAI includes {len(chromosomes)} main chromosomes",
+                details={
+                    "organism": manifest.organism,
+                    "reference": manifest.reference_genome,
+                    "main_chromosomes": chromosomes,
+                },
+            )
+        )
     checks.append(
         PreflightCheck(
             check_id="comparisons",
@@ -1370,7 +1442,16 @@ def ont_analysis_preflight(manifest: ProjectManifest) -> list[PreflightCheck]:
         checks.append(native_containment_check(blocks_project_setup=False))
     missing_tools = [
         tool
-        for tool in ("dorado", "samtools", "mosdepth", "modkit", "bgzip", "tabix", "Rscript")
+        for tool in (
+            "dorado",
+            "minimap2",
+            "samtools",
+            "mosdepth",
+            "modkit",
+            "bgzip",
+            "tabix",
+            "Rscript",
+        )
         if runtime_tool(tool, "ont-analysis") is None
     ]
     checks.append(

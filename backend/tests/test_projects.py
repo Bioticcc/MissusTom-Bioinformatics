@@ -113,6 +113,30 @@ def test_recent_validation_rejects_changed_manifest_inputs(
     assert recent_validation(manifest) is None
 
 
+def test_validation_cache_rejects_same_size_same_mtime_edit(manifest_payload):
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    path = Path(manifest.reference_resources["annotation_gtf"])
+    remember_validation(validate_project(manifest))
+    original = path.stat()
+    content = path.read_bytes()
+    path.write_bytes(content.replace(b"Gene one", b"Gene two"))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert path.stat().st_size == original.st_size
+    assert recent_validation(manifest) is None
+
+
+def test_selected_metadata_identity_survives_project_persistence(manifest_payload, tmp_path):
+    manifest = ProjectManifest.model_validate(manifest_payload)
+    manifest.samples[0].metadata_source_sample_id = "original_CSV_ID"
+    manifest.samples[0].metadata_source_path = "/metadata.csv"
+    saved = save_project(manifest, history_store=ProjectHistoryStore(tmp_path / "history.sqlite"))
+    from missus_tom.services.projects import read_project_manifest
+
+    restored = read_project_manifest(Path(saved.manifest_path))
+    assert restored.samples[0].metadata_source_sample_id == "original_CSV_ID"
+    assert restored.samples[0].metadata_source_path == "/metadata.csv"
+
+
 def test_save_rejects_symlinked_project_directories(
     tmp_path: Path, manifest_payload: dict[str, Any]
 ) -> None:

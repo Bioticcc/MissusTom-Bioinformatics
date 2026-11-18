@@ -7,6 +7,21 @@ import pytest
 from missus_tom.services.pipeline_sources import PipelineSourceService
 
 
+def test_dangling_activation_blocks_execution_but_status_and_restore_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    service = PipelineSourceService()
+    active = service._active_path("bulk-rnaseq")
+    active.parent.mkdir(parents=True)
+    active.symlink_to(tmp_path / "missing.json")
+    with pytest.raises(ValueError, match="activation is invalid"):
+        service.resolve_active_root("bulk-rnaseq")
+    assert service.status("bulk-rnaseq").source_type == "custom-unavailable"
+    assert service.restore("bulk-rnaseq").source_type == "official"
+    active.write_text("{", encoding="utf-8")
+    assert service.status("bulk-rnaseq").source_type == "custom-unavailable"
+    assert service.restore("bulk-rnaseq").source_type == "official"
+
+
 @pytest.mark.parametrize("pipeline_identifier", ["bulk-rnaseq", "ont-analysis"])
 def test_start_here_guide_is_first(
     pipeline_identifier: str, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -43,6 +58,19 @@ def test_custom_revision_never_changes_official_source(
         == official.content
     )
     assert service.restore("bulk-rnaseq").source_type == "official"
+
+
+def test_custom_ont_revision_keeps_reference_contract_resources(tmp_path, monkeypatch):
+    import runpy
+
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    service = PipelineSourceService()
+    content = service.read("ont-analysis", "run_pipeline.py").content
+    revision = service.save("ont-analysis", "run_pipeline.py", content, None)
+    service.activate("ont-analysis", revision.revision_id)
+    root, _, _ = service.resolve_active_root("ont-analysis")
+    contract = runpy.run_path(str(root / "reference_contract.py"))
+    assert contract["reference_profile"]("Homo sapiens", "GRCh38")["autosomes"] == 22
 
 
 def test_saving_executable_script_preserves_execution_permission(

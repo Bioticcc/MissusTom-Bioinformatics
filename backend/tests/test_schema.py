@@ -51,3 +51,17 @@ def test_json_schema_enforces_bulk_reference_modes() -> None:
     analysis_only["parameters"]["start_stage"] = "analysis"
     analysis_only["reference_resources"].pop("transcriptome_fasta")
     validator.validate(analysis_only)
+
+
+def test_schema_accepts_only_explicit_supported_ont_measurement_modes() -> None:
+    schema = json.loads((REPOSITORY_ROOT / "schemas/project-manifest.schema.json").read_text())
+    example = json.loads(
+        (REPOSITORY_ROOT / "workflows/ont_analysis/example_manifest.json").read_text()
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    for mode in ("5mc_only", "5mc_5hmc"):
+        example["parameters"]["modification_mode"] = mode
+        validator.validate(example)
+        assert ProjectManifest.model_validate(example).parameters["modification_mode"] == mode
+    example["parameters"]["modification_mode"] = "automatic_guess"
+    assert list(validator.iter_errors(example))

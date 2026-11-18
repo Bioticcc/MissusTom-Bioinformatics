@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { saveTextFile } from "../native";
+import { saveLogFile } from "../native";
+import { appendLogTail, CLIPBOARD_LOG_BYTES, LOG_PREVIEW_CHARACTERS, readClipboardLog } from "../commandLog";
 import { elapsedMs, formatDuration, isTerminalStatus, lastOutputLabel } from "../runPresentation";
 import type { CommandLogChunk } from "../types";
 
 const DEFAULT_POLL_MS = 2_000;
-const LOG_PREVIEW_CHARACTERS = 131_072;
 
 function processLabel(status: string | undefined, quietMs: number | null): string {
   const normalized = (status ?? "idle").toLowerCase();
@@ -51,12 +51,15 @@ export function LiveCommandLog({
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState("");
   const [copyState, setCopyState] = useState("");
+  const [copying, setCopying] = useState(false);
+  const copyController = useRef<AbortController>();
   const [now, setNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(defaultExpanded);
   const follow = useRef(true);
   const preRef = useRef<HTMLPreElement | null>(null);
   const offsetRef = useRef(0);
-  const fullTextRef = useRef("");
+  const logPathRef = useRef<string | null>(null);
+  const [bytesAvailable, setBytesAvailable] = useState(0);
   const fetchChunkRef = useRef(fetchChunk);
   const mounted = useRef(true);
   fetchChunkRef.current = fetchChunk;
@@ -65,12 +68,16 @@ export function LiveCommandLog({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      copyController.current?.abort();
     };
   }, []);
 
   useEffect(() => {
     offsetRef.current = 0;
-    fullTextRef.current = "";
+    copyController.current?.abort();
+    setCopying(false);
+    logPathRef.current = null;
+    setBytesAvailable(0);
     setOffset(0);
     setPreviewText("");
     setError("");
@@ -88,6 +95,7 @@ export function LiveCommandLog({
     let timer: number | undefined;
     const controller = new AbortController();
     let polling = false;
+    let hasMore = false;
 
     const poll = async () => {
       if (polling || controller.signal.aborted) return;
@@ -95,12 +103,16 @@ export function LiveCommandLog({
       try {
         const chunk = await fetchChunkRef.current(offsetRef.current, controller.signal);
         if (!mounted.current || controller.signal.aborted) return;
-        if (chunk.text) {
-          fullTextRef.current += chunk.text;
-          setPreviewText(fullTextRef.current.slice(-LOG_PREVIEW_CHARACTERS));
+        const restarted = chunk.next_offset < offsetRef.current;
+        if (chunk.text || restarted) {
+          setPreviewText((previous) => appendLogTail(restarted ? "" : previous, chunk.text));
         }
-        offsetRef.current = chunk.next_offset;
-        setOffset((previous) => previous === chunk.next_offset ? previous : chunk.next_offset);
+        logPathRef.current = chunk.log_path ?? logPathRef.current;
+        setBytesAvailable(chunk.bytes_available);
+        hasMore = chunk.next_offset > offsetRef.current && chunk.next_offset < chunk.bytes_available;
+        // Skip a large historical backlog; complete export reads the on-disk log.
+        offsetRef.current = Math.max(chunk.next_offset, chunk.bytes_available - LOG_PREVIEW_CHARACTERS);
+        setOffset(offsetRef.current);
         setError((previous) => previous ? "" : previous);
       } catch (reason) {
         if (mounted.current && !controller.signal.aborted) {
@@ -108,8 +120,8 @@ export function LiveCommandLog({
         }
       } finally {
         polling = false;
-        if (mounted.current && !controller.signal.aborted && active) {
-          timer = window.setTimeout(() => void poll(), pollMs);
+        if (mounted.current && !controller.signal.aborted && (active || hasMore)) {
+          timer = window.setTimeout(() => void poll(), hasMore ? 0 : pollMs);
         }
       }
     };
@@ -132,17 +144,27 @@ export function LiveCommandLog({
   const quietMs = !terminal && Number.isFinite(lastOutputMs) ? Math.max(0, now - lastOutputMs) : null;
 
   const copy = async () => {
+    if (copying) return;
+    const controller = new AbortController();
+    copyController.current = controller;
+    setCopying(true);
     try {
-      await navigator.clipboard.writeText(fullTextRef.current);
-      setCopyState("Copied to clipboard.");
-    } catch {
-      setCopyState("Clipboard copy failed.");
+      const text = bytesAvailable > CLIPBOARD_LOG_BYTES ? previewText
+        : await readClipboardLog(fetchChunkRef.current, controller.signal);
+      if (controller.signal.aborted) return;
+      await navigator.clipboard.writeText(text);
+      setCopyState(bytesAvailable > CLIPBOARD_LOG_BYTES ? "Recent output copied. Save includes the complete log." : "Complete log copied to clipboard.");
+    } catch (reason) {
+      if (!controller.signal.aborted) setCopyState(reason instanceof Error ? reason.message : "Clipboard copy failed.");
+    } finally {
+      if (!controller.signal.aborted) setCopying(false);
     }
   };
 
   const save = async () => {
     try {
-      const path = await saveTextFile("Save command log", "missus-tom-command.log", fullTextRef.current || "No log output yet.\n", "log");
+      if (!logPathRef.current) throw new Error("No log file is available yet.");
+      const path = await saveLogFile(logPathRef.current);
       setCopyState(path ? `Saved to ${path}` : "Save cancelled.");
     } catch (reason) {
       setCopyState(reason instanceof Error ? reason.message : "Log could not be saved.");
@@ -159,13 +181,13 @@ export function LiveCommandLog({
           {runElapsedMs !== null ? <span><strong>Elapsed:</strong> {formatDuration(runElapsedMs)}</span> : null}
           {terminal && runElapsedMs === null ? <span><strong>Elapsed:</strong> Unconfirmed</span> : null}
           <span><strong>Last output:</strong> {lastOutputLabel(lastOutputAt, status, now)}</span>
-          <span><strong>Bytes read:</strong> {offset.toLocaleString()}</span>
+          <span><strong>Log position:</strong> {offset.toLocaleString()}</span>
         </div>
         <div className="live-command-log-actions">
-          <button type="button" className="text-button" onClick={() => void copy()} disabled={!fullTextRef.current}>Copy</button>
+          <button type="button" className="text-button" onClick={() => void copy()} disabled={!previewText || copying}>{bytesAvailable > CLIPBOARD_LOG_BYTES ? "Copy recent output" : "Copy"}</button>
           <button type="button" className="text-button" onClick={() => void save()}>Save…</button>
         </div>
-        {fullTextRef.current.length > LOG_PREVIEW_CHARACTERS && <p className="field-help">Showing recent output. Copy or Save includes all loaded output.</p>}
+        {bytesAvailable > LOG_PREVIEW_CHARACTERS && <p className="field-help">Showing recent output. Save includes the complete log.</p>}
         {copyState && <p className="field-help" role="status">{copyState}</p>}
         {error && <div className="inline-error" role="alert">{error}</div>}
         <pre

@@ -25,3 +25,13 @@ No restricted human demo inputs, ONT inputs, reference genomes or annotations,
 managed dependency environments, Docker image layers, generated results,
 workflow work directories, logs, provenance maps, credentials, or runtime
 state are included in release artifacts.
+
+The ONT runtime also uses a repaired Modkit 0.6.4 build. Sidecar builds include
+this native tool and its upstream `LICENCE.txt`, Cargo dependency lock, and
+build manifest. Source revision and archive checksums are recorded in
+`backend/src/missus_tom/resources/modkit-repair/recipe.json`; the complete
+corresponding upstream source is available at
+https://github.com/SuhasSrinivasan/modkit/tree/bb20328778b2a5e3f0f815b36af2ae09c1df7ae7.
+The ambiguity repair originates from nanoporetech/modkit PR #714. Modkit remains
+subject to the Oxford Nanopore Technologies PLC Public License Version 1.0;
+its Rust dependencies retain their own upstream licenses.

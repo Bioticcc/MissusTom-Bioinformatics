@@ -182,6 +182,8 @@ class SampleRecord(BaseModel):
     batch: str | None = None
     covariates: dict[str, Scalar] = Field(default_factory=dict)
     included: bool = True
+    metadata_source_sample_id: str | None = None
+    metadata_source_path: str | None = None
 
     @field_validator("sample_id")
     @classmethod
@@ -352,6 +354,10 @@ class ProjectManifest(BaseModel):
 
     @model_validator(mode="after")
     def validate_manifest_invariants(self) -> ProjectManifest:
+        if self.pipeline_identifier == "ont-analysis" and self.parameters.get(
+            "modification_mode", "5mc_5hmc"
+        ) not in ("5mc_5hmc", "5mc_only"):
+            raise ValueError("ONT modification_mode must be 5mc_5hmc or 5mc_only")
         sample_ids = [sample.sample_id for sample in self.samples]
         if len(sample_ids) != len(set(sample_ids)):
             raise ValueError("sample identifiers must be unique")

@@ -212,6 +212,10 @@ fn replace_export_entry(temporary: &Path, destination: &Path) -> std::io::Result
 }
 
 fn write_export_atomically(destination: &Path, contents: &str) -> Result<(), String> {
+    write_export_reader(destination, &mut std::io::Cursor::new(contents.as_bytes()))
+}
+
+fn write_export_reader(destination: &Path, contents: &mut impl Read) -> Result<(), String> {
     let parent = destination
         .parent()
         .ok_or_else(|| "The export destination has no parent directory.".to_string())?;
@@ -235,7 +239,7 @@ fn write_export_atomically(destination: &Path, contents: &str) -> Result<(), Str
             .open(&candidate)
         {
             Ok(mut file) => {
-                if let Err(error) = file.write_all(contents.as_bytes()) {
+                if let Err(error) = std::io::copy(contents, &mut file) {
                     let _ = std::fs::remove_file(&candidate);
                     return Err(format!("Could not write the settings export: {error}"));
                 }
@@ -494,21 +498,23 @@ fn terminate_process(pid: u32) {
 #[cfg(not(unix))]
 fn terminate_process(_pid: u32) {}
 
-fn request_backend_shutdown() -> bool {
+fn shutdown_request(token: &str) -> String {
+    format!("POST /api/v1/backend/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Missus-Tom-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+}
+
+fn request_backend_shutdown(token: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect((PACKAGED_API_HOST, PACKAGED_API_PORT)) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    if stream.write_all(
-        b"POST /api/v1/backend/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    ).is_err() {
+    if stream.write_all(shutdown_request(token).as_bytes()).is_err() {
         return false;
     }
     let mut response = String::new();
     stream.read_to_string(&mut response).is_ok()
         && response.starts_with("HTTP/1.")
-        && response.split_whitespace().any(|part| part == "200")
+        && response.lines().next().and_then(|line| line.split_whitespace().nth(1)) == Some("200")
 }
 
 fn stale_backend_is_safe_to_stop(health: Option<BackendHealth>) -> Result<(), String> {
@@ -666,7 +672,7 @@ fn stop_owned_backend(state: &BackendState) {
     state.ready.store(false, Ordering::Release);
 }
 
-fn stop_backend_and_exit(app: AppHandle) {
+fn stop_backend_and_exit(app: AppHandle) -> Result<(), String> {
     let state = app.state::<BackendState>();
     if state
         .child
@@ -674,13 +680,17 @@ fn stop_backend_and_exit(app: AppHandle) {
         .map(|child| child.is_some())
         .unwrap_or(false)
     {
-        let _ = request_backend_shutdown();
+        if !request_backend_shutdown(&state.auth_token) {
+            state.closing.store(false, Ordering::Release);
+            return Err("Workflow cleanup could not be confirmed. Missus Tom was left open; inspect Jobs and retry closing after cleanup finishes.".to_string());
+        }
     }
     stop_owned_backend(&state);
     if let Some(overlay) = app.get_webview_window(RUN_OVERLAY_LABEL) {
         let _ = overlay.close();
     }
     app.exit(0);
+    Ok(())
 }
 
 fn should_show_overlay(active: bool, main_is_minimized: bool) -> bool {
@@ -1169,7 +1179,7 @@ async fn close_main_window(
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || stop_backend_and_exit(app))
         .await
-        .map_err(|error| format!("Could not stop the packaged backend: {error}"))?;
+        .map_err(|error| format!("Could not stop the packaged backend: {error}"))??;
     Ok(())
 }
 
@@ -1191,6 +1201,28 @@ fn restore_main_window(window: WebviewWindow) -> Result<(), String> {
         let _ = overlay.hide();
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn save_log_file(window: WebviewWindow, source_path: String) -> Result<Option<String>, String> {
+    require_caller(&window, MAIN_WINDOW_LABEL)?;
+    let source = PathBuf::from(source_path);
+    if source.is_symlink() || source.extension().and_then(|value| value.to_str()) != Some("log") {
+        return Err("The log source must be a regular .log file.".to_string());
+    }
+    let source = source.canonicalize().map_err(|error| format!("Could not locate the log: {error}"))?;
+    let file = File::open(&source).map_err(|error| format!("Could not open the log: {error}"))?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() { return Err("The log source is not a regular file.".to_string()); }
+    let Some(selected) = window.dialog().file().set_parent(&window)
+        .set_title("Save complete command log").set_file_name("missus-tom-command.log")
+        .add_filter("Command log", &["log"]).blocking_save_file() else { return Ok(None); };
+    let requested = selected.into_path().map_err(|_| "Unsupported export path.".to_string())?;
+    let destination = validate_export_destination(enforce_export_extension(requested, &TextExportKind::Log)?)?;
+    if destination == source { return Err("Choose a different file from the original log.".to_string()); }
+    // Snapshot the length: an actively growing log must not make export run forever.
+    write_export_reader(&destination, &mut file.take(metadata.len()))?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -1469,12 +1501,17 @@ pub fn run() {
                         .load(Ordering::Acquire);
                     let backend = app.state::<BackendState>();
                     if !install_active && !backend.closing.swap(true, Ordering::AcqRel) {
-                        std::thread::spawn(move || stop_backend_and_exit(app));
+                        std::thread::spawn(move || {
+                            if let Err(error) = stop_backend_and_exit(app.clone()) {
+                                app.dialog().message(error).title("Could not close Missus Tom").show(|_| {});
+                            }
+                        });
                     }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            save_log_file,
             save_text_file,
             read_text_file,
             open_directory,
@@ -1496,6 +1533,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn native_shutdown_authenticates_without_putting_the_secret_in_the_url() {
+        let request = super::shutdown_request("test-secret");
+        assert!(request.starts_with("POST /api/v1/backend/shutdown HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nX-Missus-Tom-Token: test-secret\r\n"));
+    }
+
+    #[test]
+    fn log_export_streams_every_byte_from_the_reader() {
+        let root = std::env::temp_dir().join(format!("missustom-log-export-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("complete.log");
+        let length = 2 * 1024 * 1024;
+        let mut source = std::io::Read::take(std::io::repeat(b'x'), length);
+        super::write_export_reader(&destination, &mut source).unwrap();
+        assert_eq!(std::fs::metadata(&destination).unwrap().len(), length);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     use super::backend_path_matches;

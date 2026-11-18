@@ -68,12 +68,17 @@ function timeoutFor(options: ApiRequestOptions): number {
   return STANDARD_REQUEST_TIMEOUT_MS;
 }
 
-async function resolveWithin(signal: AbortSignal): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
+async function withinSignal<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new DOMException("Request aborted", "AbortError");
+  return await new Promise<T>((resolve, reject) => {
     const abort = () => reject(new DOMException("Request aborted", "AbortError"));
     signal.addEventListener("abort", abort, { once: true });
-    void resolveApiBaseUrl().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    void operation().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
   });
+}
+
+async function resolveWithin(signal: AbortSignal): Promise<string> {
+  return withinSignal(resolveApiBaseUrl, signal);
 }
 
 export async function getBackendStatus(): Promise<BackendStatus | undefined> {
@@ -165,11 +170,12 @@ export async function apiRequest<T>(
     let response: Response;
     try {
       const apiBase = await resolveWithin(controller.signal);
-      const headers = await requestHeaders(init);
+      const headers = await withinSignal(() => requestHeaders(init), controller.signal);
       response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal });
     } catch (reason) {
       if (init?.signal?.aborted) throw reason;
       if (controller.signal.aborted) throw new ApiError(timeoutMessage);
+      if (isDesktopShell() && reason instanceof Error) throw new ApiError(reason.message);
       throw new ApiError("The local backend is unavailable. Start it on 127.0.0.1:8000 and try again.");
     }
 
@@ -220,7 +226,7 @@ export async function streamProjectValidation(
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const apiBase = await resolveWithin(controller.signal);
-    const headers = await requestHeaders({ headers: { "Content-Type": "application/json" } });
+    const headers = await withinSignal(() => requestHeaders({ headers: { "Content-Type": "application/json" } }), controller.signal);
     const response = await fetch(`${apiBase}/api/v1/projects/validate/stream`, {
       method: "POST", headers,
       body: JSON.stringify(manifest), signal: controller.signal,

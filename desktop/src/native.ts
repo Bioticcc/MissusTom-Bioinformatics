@@ -46,6 +46,11 @@ export async function readTextFile(path: string): Promise<string> {
   return invoke<string>("read_text_file", { path });
 }
 
+export async function saveLogFile(sourcePath: string): Promise<string | null> {
+  if (!isDesktopShell()) throw new Error("Exporting files is available in the desktop application.");
+  return invoke<string | null>("save_log_file", { sourcePath });
+}
+
 export async function openDirectory(path: string): Promise<void> {
   if (!isDesktopShell()) {
     throw new Error("Opening folders is available in the desktop application.");

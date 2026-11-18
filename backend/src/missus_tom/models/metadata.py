@@ -8,6 +8,7 @@ from missus_tom.models.manifest import normalize_user_path
 class MetadataCsvRequest(BaseModel):
     path: str
     sample_ids: list[str] = Field(default_factory=list)
+    legacy_identifiers: bool = False
 
     @field_validator("path")
     @classmethod

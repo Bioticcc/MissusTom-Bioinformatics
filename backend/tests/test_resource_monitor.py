@@ -67,7 +67,7 @@ def test_recovery_resets_unhealthy_sample_count(tmp_path) -> None:
     assert monitor.check() is not None
 
 
-def test_unknown_or_failed_metrics_do_not_trigger_or_preserve_a_breach(tmp_path) -> None:
+def test_unknown_metrics_preserve_previous_pressure(tmp_path) -> None:
     samples = iter(
         [
             _host(available_gib=0.4),
@@ -82,7 +82,8 @@ def test_unknown_or_failed_metrics_do_not_trigger_or_preserve_a_breach(tmp_path)
         disk_usage_inspector=lambda _: (_ for _ in ()).throw(OSError("unavailable")),
     )
 
-    assert [monitor.check() for _ in range(4)] == [None, None, None, None]
+    assert [monitor.check() for _ in range(3)] == [None, None, None]
+    assert "available RAM" in monitor.check()
 
 
 def test_probe_errors_are_safe(tmp_path) -> None:
@@ -98,4 +99,15 @@ def test_probe_errors_are_safe(tmp_path) -> None:
         disk_usage_inspector=failed_disk_probe,
     )
 
-    assert [monitor.check() for _ in range(4)] == [None, None, None, None]
+    assert [monitor.check() for _ in range(5)] == [None] * 5
+    assert "monitoring unavailable" in monitor.check()
+
+
+def test_unavailable_disk_does_not_preserve_a_recovered_memory_breach(tmp_path):
+    samples = iter([_host(available_gib=value) for value in (0.4, 0.4, 8, 0.4)])
+    monitor = ResourceMonitor(
+        tmp_path,
+        host_inspector=lambda: next(samples),
+        disk_usage_inspector=lambda _: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+    assert [monitor.check() for _ in range(4)] == [None] * 4

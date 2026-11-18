@@ -5,14 +5,14 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/api.ts", import.meta.url), "utf8");
 
-async function loadApi() {
+async function loadApi(invokeSource = 'export const invoke = async () => ({ base_url: "http://127.0.0.1:8765", ready: true });') {
   const testSource = source.replaceAll("import.meta.env.VITE_API_BASE_URL", "undefined");
   const compiled = ts.transpileModule(testSource, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
   }).outputText
     .replace('from "./types";', 'from "data:text/javascript,export{}";')
     .replace('from "./appVersion";', 'from "data:text/javascript,export const BUILD_REVISION = \\"development\\"; export const DEVELOPMENT_BUILD_REVISION = \\"development\\";";')
-    .replace('from "@tauri-apps/api/core";', 'from "data:text/javascript,export const invoke = async () => ({ base_url: \\"http://127.0.0.1:8765\\", ready: true });";');
+    .replace('from "@tauri-apps/api/core";', `from "data:text/javascript;base64,${Buffer.from(invokeSource).toString("base64")}";`);
   return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}#${Math.random()}`);
 }
 
@@ -50,6 +50,37 @@ function installBrowserTimers() {
 function response({ ok = true, status = 200, statusText = "OK", json }) {
   return { ok, status, statusText, json };
 }
+
+test("packaged startup errors retain the backend log", async () => {
+  const timers = installBrowserTimers();
+  window.__TAURI_INTERNALS__ = {};
+  try {
+    const { apiRequest } = await loadApi('export const invoke = async () => ({ packaged: true, ready: false, startup_error: "Sidecar failed", startup_log: "missing shared library" });');
+    await assert.rejects(apiRequest("/health"), /Sidecar failed[\s\S]*missing shared library/);
+  } finally { timers.restore(); }
+});
+
+test("already-aborted calls reject without waiting for or invoking the host", async () => {
+  const timers = installBrowserTimers();
+  window.__TAURI_INTERNALS__ = {};
+  try {
+    const { apiRequest } = await loadApi('export const invoke = () => { throw new Error("host must not be invoked"); };');
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(apiRequest("/health", { signal: controller.signal }), (error) => error.name === "AbortError");
+  } finally { timers.restore(); }
+});
+
+test("request timeout also bounds token retrieval", async () => {
+  const timers = installBrowserTimers();
+  window.__TAURI_INTERNALS__ = {};
+  try {
+    const { apiRequest } = await loadApi('export const invoke = async (command) => command === "backend_status" ? ({ base_url: "http://127.0.0.1:8765", ready: true }) : new Promise(() => {});');
+    const request = apiRequest("/health");
+    await new Promise((resolve) => setImmediate(resolve));
+    timers.fireTimer();
+    await assert.rejects(request, /timed out/);
+  } finally { timers.restore(); }
+});
 
 test("apiRequest times out while a response body is still pending", async () => {
   const timers = installBrowserTimers();

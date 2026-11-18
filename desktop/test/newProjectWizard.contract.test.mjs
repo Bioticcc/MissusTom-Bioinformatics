@@ -17,6 +17,13 @@ const compiled = ts.transpileModule(contractSource, {
 }).outputText;
 const contract = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 
+test("ONT UI uses exactly the shared supported species and reference profiles", async () => {
+  const profiles = JSON.parse(await readFile(new URL("../../workflows/ont_analysis/reference_profiles.json", import.meta.url), "utf8"));
+  assert.deepEqual(contract.ONT_REFERENCE_BUILDS, Object.fromEntries(
+    Object.entries(profiles).map(([organism, profile]) => [organism, profile.references]),
+  ));
+});
+
 test("bulk manifest contract versions and reference resources", () => {
   assert.equal(contract.BULK_MANIFEST_SCHEMA_VERSION, "1.1.0");
   assert.equal(contract.BULK_PIPELINE_VERSION, "0.5.0");
@@ -169,7 +176,7 @@ test("wizard UI encodes production bulk controls", () => {
   assert.match(wizardSource, /busy === "plan"/);
   assert.match(wizardSource, /const bulkSteps = \[\s*"Project & directories",\s*"FASTQ discovery",\s*"Sample review",\s*"Experimental design",\s*"Figures \(Experimental\)",\s*"Comparisons",\s*"Pipeline options",\s*"Preflight validation",\s*"Review & save"/);
   assert.match(wizardSource, /<h2>Figures \(Experimental\)<\/h2>/);
-  assert.match(wizardSource, /const ontSteps = \[\s*"Project & directories",\s*"BAM selection",\s*"Sample review"/);
+  assert.match(wizardSource, /const ontSteps = \[\s*"Project & directories",\s*"BAM discovery",\s*"Sample review"/);
   assert.doesNotMatch(wizardSource, /Manage sample inputs/);
   assert.doesNotMatch(wizardSource, /sample-id-inline/);
   assert.match(wizardSource, /samples\.slice\(0, 8\)/);

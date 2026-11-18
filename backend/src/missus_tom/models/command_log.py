@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 
 class CommandLogChunk(BaseModel):
+    log_path: str | None = None
     text: str
     next_offset: int
     bytes_available: int

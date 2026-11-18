@@ -69,6 +69,32 @@ async def test_backend_shutdown_stops_owned_work(
     assert stopped is True
 
 
+async def test_shutdown_cannot_confirm_success_while_admission_is_held(monkeypatch, client):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(routes.run_manager, "shutdown", lambda: None)
+    monkeypatch.setattr(
+        routes.run_manager, "list_runs", lambda: [SimpleNamespace(holds_admission=True)]
+    )
+    response = await client.post("/api/v1/backend/shutdown")
+    assert response.status_code == 409
+
+
+async def test_invalid_pipeline_activation_can_be_inspected_and_restored(
+    tmp_path, monkeypatch, client
+):
+    monkeypatch.setenv("MISSUS_TOM_STATE_DIR", str(tmp_path))
+    active = tmp_path / "custom-pipelines/bulk-rnaseq/active.json"
+    active.parent.mkdir(parents=True)
+    active.write_text("{")
+    response = await client.get("/api/v1/pipeline-sources")
+    assert response.status_code == 200
+    assert response.json()["data"][0]["source_type"] == "custom-unavailable"
+    response = await client.post("/api/v1/pipeline-sources/bulk-rnaseq/restore")
+    assert response.status_code == 200
+    assert response.json()["data"]["source_type"] == "official"
+
+
 @pytest.mark.parametrize(
     "path",
     (
@@ -357,9 +383,46 @@ async def test_pipeline_listing_contains_bulk_adapter(client: AsyncClient) -> No
     assert response.json()["data"][0]["pipeline_identifier"] == "bulk-rnaseq"
 
 
+@pytest.mark.parametrize(
+    "organism,reference,count",
+    [
+        ("Mus musculus", "GRCm38p6", 19),
+        ("Homo sapiens", "GRCh38", 22),
+    ],
+)
+@pytest.mark.parametrize("supplied_index", [True, False])
+@pytest.mark.parametrize("modification_mode", ["5mc_only", "5mc_5hmc"])
 async def test_ont_pipeline_validation_and_plan_dispatch(
-    tmp_path: Path, manifest_payload: dict[str, Any], client: AsyncClient
+    tmp_path: Path,
+    manifest_payload: dict[str, Any],
+    client: AsyncClient,
+    organism: str,
+    reference: str,
+    count: int,
+    supplied_index: bool,
+    modification_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from missus_tom.services import preflight, resources
+
+    # Input-contract tests must not create systemd scopes; containment has dedicated tests.
+    monkeypatch.setattr(
+        resources,
+        "probe_native_containment",
+        lambda: Mock(
+            available=False, message="Not configured for this input-contract test", enablement=""
+        ),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "native_containment_check",
+        lambda **_: routes.PreflightCheck(
+            check_id="native_containment",
+            label="Native containment",
+            status=routes.CheckStatus.NOT_CONFIGURED,
+            message="Not configured for this test",
+        ),
+    )
     payload = deepcopy(manifest_payload)
     inputs = Path(payload["input_directory"])
     bam = inputs / "mouse_pass.bam"
@@ -378,17 +441,23 @@ async def test_ont_pipeline_validation_and_plan_dispatch(
     ):
         path = references / key
         path.touch()
+        if key == "reference_fai":
+            path.write_text("".join(f"chr{i}\t100\t0\t100\t101\n" for i in range(1, count + 1)))
         ont_resources[key] = str(path)
+        if key == "minimap2_index":
+            path.write_bytes(b"synthetic index")
+    if not supplied_index:
+        del ont_resources["minimap2_index"]
     payload.update(
         pipeline_identifier="ont-analysis",
         pipeline_version="0.1.0",
-        organism="Mus musculus",
-        reference_genome="GRCm38p6",
+        organism=organism,
+        reference_genome=reference,
         reference_resources=ont_resources,
         read_layout="single-end",
         strandedness="unknown",
         comparisons=[],
-        parameters={"expected_pass_bam_count": 1},
+        parameters={"expected_pass_bam_count": 1, "modification_mode": modification_mode},
     )
     payload["samples"] = [
         {

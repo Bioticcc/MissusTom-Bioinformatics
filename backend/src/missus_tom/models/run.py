@@ -126,6 +126,7 @@ class RunRecord(BaseModel):
 
 
 class RunLog(BaseModel):
+    log_path: str | None = None
     job_identifier: str
     text: str
     truncated: bool = False
