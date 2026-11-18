@@ -94,3 +94,14 @@ test("release package includes the backend build revision beside its runtime res
     "resources/locks",
   );
 });
+
+test("release package installs the verified Modkit repair where the backend reads it", () => {
+  assert.equal(
+    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/resources/modkit-repair"],
+    "resources/modkit-repair",
+  );
+  assert.equal(
+    releaseConfig.bundle.resources["../../backend/build/sidecar-resources/resources/analysis-tools"],
+    "resources/analysis-tools",
+  );
+});
