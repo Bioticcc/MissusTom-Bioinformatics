@@ -33,7 +33,7 @@ parse_options <- function(arguments) {
 
 opt <- parse_options(commandArgs(trailingOnly = TRUE))
 required_options <- c(
-  "sample-id", "reference-name", "fai", "global-levels",
+  "sample-id", "organism", "main-chromosomes", "reference-name", "fai", "global-levels",
   "chromosome-methylation", "call-coverage", "window-methylation",
   "chromosome-coverage", "window-coverage", "alignment-stats",
   "alignment-flagstat", "coverage-summary", "stage02-summary",
@@ -46,6 +46,11 @@ if (length(missing_options) > 0L) {
   stop("Missing Stage 05 R option(s): ", paste(missing_options, collapse = ", "))
 }
 
+modification_mode <- opt[["modification-mode"]] %||% "5mc_5hmc"
+if (!modification_mode %in% c("5mc_only", "5mc_5hmc")) stop("Invalid modification mode")
+joint_calls <- modification_mode == "5mc_5hmc"
+measurement_note <- if (joint_calls) "5mC and 5hmC measured separately" else
+  "5mC only; 5hmC not measured. Total modified refers to measured 5mC only."
 sample_id <- opt[["sample-id"]]
 reference_name <- opt[["reference-name"]]
 output_dir <- normalizePath(opt[["output-dir"]], mustWork = FALSE)
@@ -106,6 +111,8 @@ read_tsv <- function(path) {
                     check.names = FALSE)
   }
   if ("#chrom" %in% names(result)) setnames(result, "#chrom", "chrom")
+  # Contigs named 1, 2, 3 are labels; fread would otherwise read them as integers.
+  if ("chrom" %in% names(result)) result[, chrom := as.character(chrom)]
   result
 }
 
@@ -119,6 +126,7 @@ atomic_fwrite <- function(table, path, compress = FALSE) {
 }
 
 save_plot <- function(plot, stem, width = 9, height = 6) {
+  if (!joint_calls && grepl("^(10_|11_|15_|16_)", stem)) return(invisible(NULL))
   pdf_path <- file.path(figures_dir, paste0(stem, ".pdf"))
   ggsave(pdf_path, plot = plot, width = width, height = height, units = "in",
          device = cairo_pdf, bg = "white")
@@ -129,16 +137,20 @@ save_plot <- function(plot, stem, width = 9, height = 6) {
   message("Saved figure: ", stem)
 }
 
-chromosome_order <- c(paste0("chr", 1:19), "chrX", "chrY", "chrM")
+chromosome_order <- strsplit(opt[["main-chromosomes"]], ",", fixed = TRUE)[[1L]]
+if (!length(chromosome_order) || anyDuplicated(chromosome_order)) {
+  stop("Main chromosome list must be nonempty and unique")
+}
 is_main_chromosome <- function(chrom) chrom %chin% chromosome_order
 
 fai <- fread(opt[["fai"]], sep = "\t", header = FALSE, select = 1:2,
              col.names = c("chrom", "length"))
+fai[, chrom := as.character(chrom)]
 fai <- fai[chrom %chin% chromosome_order]
 fai[, chrom := factor(chrom, levels = chromosome_order)]
 setorder(fai, chrom)
 fai[, chrom := as.character(chrom)]
-if (nrow(fai) < 22L) stop("Reference FAI lacks one or more main mouse chromosomes")
+if (!setequal(fai$chrom, chromosome_order)) stop("Reference FAI lacks selected main chromosomes")
 
 global_levels <- read_tsv(opt[["global-levels"]])
 chrom_methylation <- read_tsv(opt[["chromosome-methylation"]])
@@ -169,6 +181,7 @@ cpg <- fread(
   )
 )
 if (nrow(cpg) == 0L) stop("No 5mC CpG rows were read")
+cpg[, chrom := as.character(chrom)]
 cpg[, total_observations := valid_calls + deletion_calls + failed_filtered_calls +
       different_base_calls + no_call_calls]
 cpg[, `:=`(
@@ -180,6 +193,7 @@ if (any(cpg$valid_calls == 65535L)) stop("Stage 05 found the forbidden 65,535 sa
 if (any(cpg$valid_calls != cpg$modified_5mc_calls + cpg$modified_5hmc_calls + cpg$canonical_calls)) {
   stop("Stage 05 found an invalid CpG valid-coverage identity")
 }
+if (!joint_calls) cpg[, `:=`(modified_5hmc_calls = NA_real_, pct_5hmc = NA_real_)]
 message("CpG sites loaded: ", format(nrow(cpg), big.mark = ","))
 
 # ------------------------------
@@ -195,6 +209,8 @@ composition <- data.table(
     global_levels[category == "5hmC", call_count]
   )
 )
+composition <- composition[!is.na(call_count)]
+composition[, category := droplevels(category)]
 composition[, percent := 100 * call_count / sum(call_count)]
 atomic_fwrite(composition, file.path(tables_dir, "global_plot_data.tsv"))
 
@@ -216,6 +232,7 @@ global_bars <- rbindlist(list(
   global_levels[category == "5hmC", .(category = "5hmC", percent = percent_of_valid_calls)],
   global_levels[category == "total_modified", .(category = "Total modified", percent = percent_of_valid_calls)]
 ))
+global_bars <- global_bars[is.finite(percent)]
 global_bars[, category := factor(category, levels = c("5mC", "5hmC", "Total modified"))]
 p_global <- ggplot(global_bars, aes(category, percent, fill = category)) +
   geom_col(width = 0.65) +
@@ -283,6 +300,7 @@ site_plot_long <- melt(
 )
 site_plot_long[, modification := factor(modification,
   levels = c("pct_5mc", "pct_5hmc"), labels = c("5mC", "5hmC"))]
+site_plot_long <- site_plot_long[is.finite(percent)]
 p_site_distribution <- ggplot(site_plot_long, aes(percent, fill = modification)) +
   geom_histogram(bins = 50, boundary = 0, color = "white", linewidth = 0.15) +
   facet_wrap(~modification, scales = "free_y", ncol = 1) +
@@ -322,6 +340,7 @@ chrom_methylation_long <- melt(
 chrom_methylation_long[, modification := factor(modification,
   levels = c("pct_5mc_of_valid_calls", "pct_5hmc_of_valid_calls"),
   labels = c("5mC", "5hmC"))]
+chrom_methylation_long <- chrom_methylation_long[is.finite(percent)]
 p_chrom_methylation <- ggplot(chrom_methylation_long, aes(chrom, percent, fill = modification)) +
   geom_col(position = "dodge", width = 0.78) +
   facet_wrap(~modification, scales = "free_y", ncol = 1) +
@@ -493,7 +512,7 @@ p_5mc_heatmap <- make_heatmap_panel(
   "5mC",
   TRUE
 )
-p_window_heatmap <- (p_5hmc_heatmap / p_5mc_heatmap) +
+p_window_heatmap <- (if (joint_calls) p_5hmc_heatmap / p_5mc_heatmap else p_5mc_heatmap) +
   plot_annotation(
     title = "Genome-wide methylation heatmaps",
     subtitle = paste0(
@@ -521,6 +540,7 @@ ranked_windows <- rbindlist(list(
     .(category = "Highest 5mC", chrom, start, end, pct_5mc_of_valid_calls,
       pct_5hmc_of_valid_calls, valid_calls, mean_depth)]
 ))
+if (!joint_calls) ranked_windows <- ranked_windows[category != "Highest 5hmC"]
 atomic_fwrite(ranked_windows, file.path(tables_dir, "extreme_methylation_windows.tsv"))
 ranked_windows[, window_rank := seq_len(.N), by = category]
 
@@ -543,6 +563,7 @@ if (nrow(profile_rows) > 0L) {
     variable.name = "modification", value.name = "percent")
   profile_long[, modification := factor(modification,
     levels = c("pct_5mc", "pct_5hmc"), labels = c("5mC", "5hmC"))]
+profile_long <- profile_long[is.finite(percent)]
   profile_long[, position_bin_kb := 2 * floor(position_kb / 2)]
   atomic_fwrite(profile_long, file.path(tables_dir, "extreme_window_profile_data.tsv.gz"), compress = TRUE)
   profile_trace <- profile_long[, .(
@@ -613,6 +634,7 @@ make_rank_band_profiles <- function(rank_start, rank_end, figure_stem) {
     levels = c("pct_5mc", "pct_5hmc"),
     labels = c("5mC", "5hmC")
   )]
+rank_profile_long <- rank_profile_long[is.finite(percent)]
   rank_profile_long[, position_bin_kb := 2 * floor(position_kb / 2)]
   atomic_fwrite(
     rank_profile_long,
@@ -644,7 +666,7 @@ make_rank_band_profiles <- function(rank_start, rank_end, figure_stem) {
     labs(
       title = paste0("Regional methylation profiles: ranks ", rank_start, "-", rank_end),
       subtitle = paste0(
-        "Ranked within highest 5hmC, lowest 5mC, and highest 5mC; ",
+        if (joint_calls) "Ranked within highest 5hmC, lowest 5mC, and highest 5mC; " else "Ranked within lowest and highest 5mC; ",
         "CpGs require at least ", min_valid_coverage,
         " valid calls; coverage-weighted 2 kb traces; not DMRs"
       ),
@@ -719,7 +741,7 @@ aggregate_feature_ranges <- function(ranges, feature_type, cpg_ranges, cpg_table
   summary[, `:=`(
     weighted_5mc_percent = 100 * modified_5mc_calls / valid_calls,
     weighted_5hmc_percent = 100 * modified_5hmc_calls / valid_calls,
-    weighted_total_modified_percent = 100 * (modified_5mc_calls + modified_5hmc_calls) / valid_calls
+    weighted_total_modified_percent = 100 * (if (joint_calls) modified_5mc_calls + modified_5hmc_calls else modified_5mc_calls) / valid_calls
   )]
 
   region_meta <- data.table(
@@ -748,9 +770,10 @@ if (file.exists(feature_table_path) && file.info(feature_table_path)$size > 0 &&
   feature_methylation <- read_tsv(feature_table_path)
   feature_annotation_counts <- read_tsv(feature_region_counts_path)
 } else {
-  message("Loading GENCODE vM25 annotations used by SixBase")
+  message("Loading supplied annotations for ", opt[["organism"]], " ", reference_name)
   gff <- import(opt[["gff3"]])
   keep_seqlevels <- intersect(seqlevels(gff), chromosome_order)
+  if (!length(keep_seqlevels)) stop("GFF3 chromosome names do not match the selected reference")
   gff <- keepSeqlevels(gff, keep_seqlevels, pruning.mode = "coarse")
   known_lengths <- setNames(fai$length, fai$chrom)
   annotation_lengths <- known_lengths[as.character(seqnames(gff))]
@@ -816,19 +839,25 @@ if (file.exists(feature_table_path) && file.info(feature_table_path)$size > 0 &&
 
   intergenic_table <- fread(opt[["intergenic"]], sep = "\t", header = FALSE,
                             select = 1:3, col.names = c("chrom", "start", "end"))
+  intergenic_table[, chrom := as.character(chrom)]
   intergenic_table <- intergenic_table[chrom %chin% chromosome_order & end > start]
+  if (!nrow(intergenic_table)) stop("Intergenic BED has no regions on selected chromosomes")
   intergenic <- GRanges(intergenic_table$chrom, IRanges(intergenic_table$start + 1L, intergenic_table$end))
 
   ccre_table <- fread(opt[["ccre"]], sep = "\t", header = TRUE, check.names = FALSE)
   setnames(ccre_table, c("#chrom", "chromStart", "chromEnd"), c("chrom", "start", "end"))
+  ccre_table[, chrom := as.character(chrom)]
   ccre_table <- ccre_table[chrom %chin% chromosome_order & end > start]
+  if (!nrow(ccre_table)) stop("cCRE table has no regions on selected chromosomes")
   ccres <- GRanges(ccre_table$chrom, IRanges(ccre_table$start + 1L, ccre_table$end))
   mcols(ccres)$ccre <- ccre_table$ccre
 
   island_json <- fromJSON(opt[["cpg-islands"]], simplifyDataFrame = TRUE)
   island_tables <- Filter(function(x) is.data.frame(x) && nrow(x) > 0L, island_json$cpgIslandExt)
   island_table <- rbindlist(island_tables, fill = TRUE)
+  island_table[, chrom := as.character(chrom)]
   island_table <- island_table[chrom %chin% chromosome_order & chromEnd > chromStart]
+  if (!nrow(island_table)) stop("CpG-island data has no regions on selected chromosomes")
   cpg_islands <- GRanges(island_table$chrom, IRanges(island_table$chromStart + 1L, island_table$chromEnd))
 
   make_flanks <- function(ranges, near_start, near_end) {
@@ -998,6 +1027,7 @@ feature_summary_plot[, `:=`(
   modification = factor(modification,
     levels = c("weighted_5mc_percent", "weighted_5hmc_percent"), labels = c("5mC", "5hmC"))
 )]
+feature_summary_plot <- feature_summary_plot[is.finite(percent)]
 p_feature_summary <- ggplot(feature_summary_plot, aes(feature_type, percent, fill = modification)) +
   geom_col(position = "dodge") +
   scale_fill_manual(values = modification_colors) +
@@ -1016,6 +1046,7 @@ top_feature_regions <- rbindlist(lapply(feature_plot_types, function(type) {
   if (nrow(eligible) == 0L) return(data.table())
   highest_hmc <- head(eligible[order(-weighted_5hmc_percent)], 20L)
   highest_hmc[, ranking := "Highest 5hmC"]
+  if (!joint_calls) highest_hmc <- highest_hmc[0]
   lowest_mc <- head(eligible[order(weighted_5mc_percent)], 20L)
   lowest_mc[, ranking := "Lowest 5mC"]
   rbindlist(list(highest_hmc, lowest_mc), use.names = TRUE, fill = TRUE)
@@ -1066,6 +1097,9 @@ report_lines <- c(
   "ONT methylation exploration and visualization report",
   paste0("Sample: ", sample_id),
   paste0("Reference: ", reference_name),
+  paste0("Organism: ", opt[["organism"]]),
+  paste0("Measurements: ", measurement_note),
+  paste0("Main chromosomes: ", paste(chromosome_order, collapse = ", ")),
   paste0("Generated: ", format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")),
   "",
   "Headline CpG results",
@@ -1136,10 +1170,10 @@ stats_fields <- strsplit(stats_lines, "\t", fixed = TRUE)
 stats_names <- vapply(stats_fields, function(x) sub(":$", "", x[[2L]]), character(1))
 stats_values <- vapply(stats_fields, function(x) x[[3L]], character(1))
 alignment_metrics <- setNames(stats_values, stats_names)
-alignment_value <- function(name) unname(alignment_metrics[[name]] %||% NA_character_)
+alignment_value <- function(name) unname(alignment_metrics[name] %||% NA_character_)
 
 coverage_metrics <- setNames(as.character(coverage_summary$value), coverage_summary$metric)
-coverage_value <- function(name) unname(coverage_metrics[[name]] %||% NA_character_)
+coverage_value <- function(name) unname(coverage_metrics[name] %||% NA_character_)
 
 primary_reads <- as.numeric(alignment_value("raw total sequences"))
 primary_mapped <- as.numeric(alignment_value("reads mapped"))
@@ -1177,7 +1211,7 @@ cards <- c(
        paste0(format_integer(genome_coverage$valid_calls), " calls")),
   card("Global 5mC", format_percent(global_levels[category == "5mC", percent_of_valid_calls], 2L),
        paste0(format_integer(global_levels[category == "5mC", call_count]), " calls")),
-  card("Global 5hmC", format_percent(global_levels[category == "5hmC", percent_of_valid_calls], 2L),
+  if (!joint_calls) card("Global 5hmC", "Not measured", "5mC-only input model") else card("Global 5hmC", format_percent(global_levels[category == "5hmC", percent_of_valid_calls], 2L),
        paste0(format_integer(global_levels[category == "5hmC", call_count]), " calls")),
   card("Total modified", format_percent(global_levels[category == "total_modified", percent_of_valid_calls], 2L),
        "Coverage-weighted")
@@ -1253,7 +1287,7 @@ html_lines <- c(
   "@media(max-width:650px){.figures{grid-template-columns:1fr}.figure object{height:470px}header h1{font-size:1.55rem}}",
   "</style></head><body>",
   "<header><h1>ONT sequencing and methylation QC report</h1>",
-  paste0("<p><strong>Sample:</strong> ", html_escape(sample_id), " &nbsp; <strong>Reference:</strong> ", html_escape(reference_name), "</p>"),
+  paste0("<p><strong>Sample:</strong> ", html_escape(sample_id), " &nbsp; <strong>Reference:</strong> ", html_escape(reference_name), " &nbsp; <strong>Organism:</strong> ", html_escape(opt[["organism"]]), "</p><p>", html_escape(measurement_note), "</p>"),
   paste0("<p>Generated ", html_escape(format(Sys.time(), "%Y-%m-%d %H:%M:%S %z")), "</p></header>"),
   '<nav><a href="#summary">Summary</a><a href="#alignment">Alignment</a><a href="#coverage">Coverage</a><a href="#modification">Modification QC</a><a href="#figures">Figures</a><a href="#data">Data</a><a href="#scope">Scope</a></nav><main>',
   '<section id="summary"><h2>QC summary</h2><div class="metrics">', cards, "</div></section>",
@@ -1269,7 +1303,7 @@ html_lines <- c(
   "</tbody></table></div><div><h3>Original instrument report</h3>",
   "<p>The MinKNOW report covers acquisition, channel activity, yield over time, pass/fail reads, read-length distributions, and basecall-quality distributions.</p>",
   paste0('<p><a href="', html_escape(instrument_report_uri), '"><strong>Open the original ONT run report</strong></a></p>'),
-  '<p class="notice">The analysis pipeline intentionally starts from the 74 pass modBAMs because they retain MM/ML/MN modification tags. Instrument-wide pass/fail metrics therefore remain in the immutable MinKNOW report.</p></div></div>',
+  '<p class="notice">The analysis pipeline intentionally starts from the configured modBAMs because they retain MM/ML/MN modification tags. Instrument-wide pass/fail metrics therefore remain in the immutable MinKNOW report.</p></div></div>',
   "<details><summary>Complete Samtools flagstat</summary><pre>", html_escape(flagstat_text), "</pre></details>",
   "<details><summary>Stage 02 alignment provenance</summary><pre>", html_escape(stage02_text), "</pre></details></section>",
   '<section id="coverage"><h2>Genome coverage QC</h2><div class="grid"><div><table><thead><tr><th>Depth threshold</th><th>Bases</th><th>Reference</th></tr></thead><tbody>',

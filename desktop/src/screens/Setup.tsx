@@ -448,6 +448,7 @@ export function Setup({ activeRun, isRunActive, onContinue }: {
       })}
     </div>
     <div className="setup-footer">
+      <p className="field-help"><strong>SingleCell RNA-seq (In development):</strong> configuration is available under New project → SingleCell RNA-seq. Managed installation and running from the app are not available yet.</p>
       <button className="button primary" type="button" disabled={working || !setupPipelines.some((pipeline) => selectedActions(state, pipeline).length > 0)} onClick={() => void prepare()}>
         {working ? "Running selected setup…" : "Prepare selected setup"}
       </button>

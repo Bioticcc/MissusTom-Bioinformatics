@@ -40,6 +40,7 @@ from missus_tom.services.bulk_references import (
 from missus_tom.services.dependencies import (
     bulk_lock_provenance,
     ont_lock_provenance,
+    resolve_bulk_analysis_image_id,
     runtime_environment,
 )
 from missus_tom.services.nextflow_task_output import NextflowTaskOutput
@@ -412,6 +413,7 @@ class RunManager:
                     handle.seek(-limit, os.SEEK_END)
                 data = handle.read(limit)
             return RunLog(
+                log_path=str(path),
                 job_identifier=job_identifier,
                 text=data.decode("utf-8", errors="replace"),
                 truncated=size > limit,
@@ -425,6 +427,7 @@ class RunManager:
             data = handle.read(limit)
         truncated = truncated or clamped + len(data) < size
         return RunLog(
+            log_path=str(path),
             job_identifier=job_identifier,
             text=data.decode("utf-8", errors="replace"),
             truncated=truncated,
@@ -462,10 +465,20 @@ class RunManager:
                 resolved = path.resolve(strict=True)
                 if not resolved.is_relative_to(project_root):
                     continue
+                file_category = category
+                if category == "samples":
+                    classifier = getattr(
+                        self._adapter_for_record(record), "sample_artifact_category", None
+                    )
+                    file_category = (
+                        classifier(path.relative_to(root)) if callable(classifier) else None
+                    )
+                    if file_category is None:
+                        continue
                 stat = resolved.stat()
                 artifacts.append(
                     ResultArtifact(
-                        category=category,
+                        category=file_category,
                         relative_path=str(resolved.relative_to(project_root)),
                         size_bytes=stat.st_size,
                         modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
@@ -653,6 +666,14 @@ class RunManager:
         with self._lock:
             record = self._records[job_identifier]
             command = list(record.command)
+            if record.container_cleanup_required:
+                image_id = resolve_bulk_analysis_image_id()
+                if "--analysis_container" in command:
+                    command[command.index("--analysis_container") + 1] = image_id
+                else:
+                    command.extend(["--analysis_container", image_id])
+                record.command = command
+                record.dependency_lock["analysis_image_id"] = image_id
             record.execution_phase = RunExecutionPhase.WORKFLOW_LAUNCH
             record.current_stage = "Starting workflow runner"
             self._persist(record)
@@ -750,7 +771,11 @@ class RunManager:
                 record.current_stage = "Completed"
             else:
                 record.status = RunStatus.FAILED
-                record.current_stage = "Nextflow failed"
+                record.current_stage = (
+                    "Nextflow failed"
+                    if record.pipeline_identifier == "bulk-rnaseq"
+                    else "Workflow failed"
+                )
                 record.error_message = f"Workflow runner exited with status {exit_code}"
             self._persist_safely(record)
             self._append_terminal_log_marker(record)
@@ -1881,7 +1906,11 @@ class RunManager:
                         RunStatus.COMPLETED if record.exit_code == 0 else RunStatus.FAILED
                     )
                     record.current_stage = (
-                        "Completed" if record.exit_code == 0 else "Nextflow failed"
+                        "Completed"
+                        if record.exit_code == 0
+                        else "Nextflow failed"
+                        if record.pipeline_identifier == "bulk-rnaseq"
+                        else "Workflow failed"
                     )
                     if not record.error_message or record.error_message.startswith(
                         "Backend restarted before"

@@ -620,6 +620,118 @@ def test_output_contract_matches_generated_and_skipped_files(tmp_path: Path) -> 
             assert row["rationale"]
 
 
+def test_numeric_sample_ids_remain_labels(tmp_path: Path) -> None:
+    sample_rows = ["001\tcontrol\t", "002\tcontrol\t", "101\ttreat\t", "102\ttreat\t"]
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=sample_rows,
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample={
+            "001": HIGH_CONTROL,
+            "002": HIGH_CONTROL,
+            "101": HIGH_TREAT,
+            "102": HIGH_TREAT,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    normalized = (
+        tmp_path
+        / "analysis_output"
+        / "tables"
+        / "all_genes"
+        / "cmp_treat_vs_control"
+        / "library_size_normalized_counts.tsv"
+    )
+    header = normalized.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    assert header[-4:] == ["001", "002", "101", "102"]
+
+
+def _read_tsv_rows(path: Path) -> list[dict[str, str]]:
+    header, *rows = path.read_text(encoding="utf-8").strip().splitlines()
+    return [dict(zip(header.split("\t"), row.split("\t"), strict=True)) for row in rows]
+
+
+def _base_abundance() -> dict[str, list[tuple[str, int, float]]]:
+    return {
+        sample.split("\t", 1)[0]: HIGH_CONTROL if sample.startswith("ctrl") else HIGH_TREAT
+        for sample in BASE_SAMPLES
+    }
+
+
+def test_gene_classes_reuse_the_all_gene_normalization(tmp_path: Path) -> None:
+    # The lncRNA gene shifts strongly, so normalizing mRNA genes alone would change their values.
+    abundance = _base_abundance()
+    for sample, rows in abundance.items():
+        if sample.startswith("treat"):
+            abundance[sample] = [
+                (name, 900, tpm) if name == "TX_C1" else (name, count, tpm)
+                for name, count, tpm in rows
+            ]
+    result = _run_analysis(
+        tmp_path,
+        mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+        mapping_lines=BASE_MAPPING,
+        sample_rows=BASE_SAMPLES,
+        comparison_rows=BASE_COMPARISON,
+        abundance_by_sample=abundance,
+    )
+    assert result.returncode == 0, result.stderr
+    tables = tmp_path / "analysis_output" / "tables"
+    table = Path("cmp_treat_vs_control") / "library_size_normalized_counts.tsv"
+
+    def normalized(analysis: str) -> dict[str, list[float]]:
+        lines = (tables / analysis / table).read_text(encoding="utf-8").strip().splitlines()[1:]
+        return {
+            line.split("\t")[0]: [float(value) for value in line.split("\t")[1:]] for line in lines
+        }
+
+    all_genes = normalized("all_genes")
+    mrna = normalized("mRNA")
+    assert set(mrna) == {"G_ALPHA", "G_BETA"}
+    for gene, values in mrna.items():
+        assert values == pytest.approx(all_genes[gene])
+
+
+def test_fold_change_threshold_is_part_of_the_statistical_test(tmp_path: Path) -> None:
+    pvalues: dict[str, dict[str, float]] = {}
+    for threshold in ("0", "1"):
+        run_root = tmp_path / f"threshold_{threshold}"
+        run_root.mkdir()
+        result = _run_analysis(
+            run_root,
+            mapping_header="transcript_id\tgene_id\tgene_name\tgene_biotype",
+            mapping_lines=BASE_MAPPING,
+            sample_rows=BASE_SAMPLES,
+            comparison_rows=BASE_COMPARISON,
+            abundance_by_sample=_base_abundance(),
+            lfc_threshold=threshold,
+        )
+        assert result.returncode == 0, result.stderr
+        rows = _read_tsv_rows(
+            run_root
+            / "analysis_output"
+            / "differential_expression"
+            / "all_genes"
+            / "cmp_treat_vs_control"
+            / "full_results.tsv"
+        )
+        pvalues[threshold] = {row["gene_id"]: float(row["pvalue"]) for row in rows}
+    assert all(pvalues["1"][gene] > value for gene, value in pvalues["0"].items())
+    parameters = _read_tsv_rows(
+        tmp_path
+        / "threshold_1"
+        / "analysis_output"
+        / "tables"
+        / "provenance"
+        / "analysis_parameters.tsv"
+    )
+    recorded = {row["parameter"]: row["value"] for row in parameters}
+    assert recorded["wald_test_null_hypothesis"] == "absolute log2 fold change <= 1"
+    assert recorded["normalization_gene_set"] == "all expressed genes"
+
+
 def test_analysis_script_has_no_fixed_human_enst_ensg_assumptions() -> None:
     body = _analysis_script_path().read_text(encoding="utf-8")
     assert "ENST" not in body

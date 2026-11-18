@@ -47,6 +47,40 @@ def bulk_job() -> DependencyInstallJob:
     )
 
 
+def test_workloads_do_not_inherit_the_desktop_api_secret(monkeypatch):
+    monkeypatch.setenv("MISSUS_TOM_API_TOKEN", "private-launch-token")
+    assert "MISSUS_TOM_API_TOKEN" not in dependencies.runtime_environment("ont-analysis")
+
+
+def test_older_installed_ont_environment_is_not_treated_as_locked(tmp_path, monkeypatch):
+    prefix = tmp_path / "environment"
+    (prefix / "conda-meta").mkdir(parents=True)
+    monkeypatch.setattr(dependencies, "_managed_bin", lambda _pipeline: prefix / "bin")
+    monkeypatch.setattr(dependencies.modkit_repair, "problems", lambda _prefix: [])
+    expected = {name: "locked" for name in dependencies._ONT_LOCK_PACKAGES}
+    installed = dict(expected, **{"r-base": "older"})
+    monkeypatch.setattr(dependencies, "_lock_package_versions", lambda *_args: expected)
+    monkeypatch.setattr(dependencies, "_prefix_package_versions", lambda _prefix: installed)
+    assert dependencies.ont_runtime_lock_mismatches() == [
+        "r-base: expected locked, installed older"
+    ]
+    installed["r-base"] = "locked"
+    assert dependencies.ont_runtime_lock_mismatches() == []
+
+
+def test_analysis_build_script_and_backend_agree_on_content_identity():
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "scripts/build-analysis-image.sh"), "--print-tag"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == dependencies.bulk_analysis_image()
+
+
 def trust_dorado_archive(monkeypatch: pytest.MonkeyPatch, archive: Path) -> None:
     monkeypatch.setattr(
         dependencies,
@@ -343,6 +377,7 @@ def test_failed_candidate_does_not_replace_active_prefix(
     monkeypatch.setattr(installer, "_ensure_micromamba", lambda *_: Path("/bin/true"))
     monkeypatch.setattr(installer, "_run", Mock())
     monkeypatch.setattr(installer, "_install_dorado", Mock())
+    monkeypatch.setattr(installer, "_install_modkit_repair", Mock())
     monkeypatch.setattr(
         installer, "_verify_environment", Mock(side_effect=RuntimeError("unusable"))
     )

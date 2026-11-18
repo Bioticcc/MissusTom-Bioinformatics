@@ -105,7 +105,20 @@ for (directory in c("differential_expression", "figures", "tables")) {
 provenance_dir <- file.path(output_root, "tables", "provenance")
 dir.create(provenance_dir, recursive = TRUE, showWarnings = FALSE)
 
-samples <- read.delim(sample_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+# Sheet values are labels. Reading them as text keeps IDs such as 001 and 101
+# intact and stops R from later treating a numeric ID as a column position.
+read_label_sheet <- function(path) {
+  read.delim(
+    path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    colClasses = "character",
+    na.strings = character(),
+    quote = ""
+  )
+}
+
+samples <- read_label_sheet(sample_sheet_path)
 required_columns <- c("sample_id", "condition", "biological_replicate", "batch", "intervention", "abundance_tsv")
 if (!all(required_columns %in% colnames(samples))) {
   stop("Sample sheet must contain sample_id, condition, biological_replicate, batch, intervention, and abundance_tsv columns")
@@ -113,7 +126,7 @@ if (!all(required_columns %in% colnames(samples))) {
 if (anyDuplicated(samples$sample_id)) stop("Sample identifiers must be unique")
 if (!all(file.exists(samples$abundance_tsv))) stop("One or more abundance tables are missing")
 
-comparisons <- read.delim(comparison_sheet_path, stringsAsFactors = FALSE, check.names = FALSE)
+comparisons <- read_label_sheet(comparison_sheet_path)
 custom_figures <- read.delim(custom_figures_path, stringsAsFactors = FALSE, check.names = FALSE)
 custom_figure_columns <- c("figure_id", "figure_type", "title", "x_variable", "y_variable", "top_n", "x_axis_mode", "x_axis_minimum", "x_axis_maximum", "y_axis_mode", "y_axis_minimum", "y_axis_maximum")
 if (!all(custom_figure_columns %in% colnames(custom_figures))) {
@@ -286,7 +299,9 @@ write.table(
       "adjust_for_batch_effects",
       "design_formula",
       "log2_fold_change_numerator",
-      "log2_fold_change_denominator"
+      "log2_fold_change_denominator",
+      "wald_test_null_hypothesis",
+      "normalization_gene_set"
     ),
     value = c(
       q_value,
@@ -300,7 +315,9 @@ write.table(
         "condition"
       ), collapse = " + ")),
       "manifest comparison numerator (case)",
-      "manifest comparison denominator (reference)"
+      "manifest comparison denominator (reference)",
+      paste("absolute log2 fold change <=", format(lfc_threshold, trim = TRUE, scientific = FALSE)),
+      "all expressed genes"
     ),
     stringsAsFactors = FALSE
   ),
@@ -787,8 +804,30 @@ for (comparison_index in seq_len(nrow(comparisons))) {
 
   analysis_results <- list()
 
-  # Run the unchanged analysis once for all genes and, where annotation permits,
-  # once for each optional biological gene class.
+  # Fit one model on every expressed gene. Size factors, dispersions, shrinkage,
+  # and rlog values therefore come from the whole transcriptome, and a gene keeps
+  # the same normalized value in the all-gene, mRNA, and lncRNA reports.
+  dds_all <- DESeqDataSetFromTximport(comparison_txi, colData = col_data, design = design_formula)
+  # Retain genes with sufficient observed counts in at least the smaller
+  # condition group; this existing filter avoids testing uninformative genes.
+  keep <- rowSums(counts(dds_all) >= 10) >= min(condition_counts[c(reference_group, case_group)])
+  dds_all <- dds_all[keep, ]
+  if (nrow(dds_all) < 2) {
+    stop(paste("Insufficient expressed genes after filtering for comparison", comparison_id))
+  }
+  progress_message(sprintf("Running DESeq2 for all expressed genes (%s)", comparison_id))
+  dds_all <- run_deseq_robust(dds_all)
+  # The Wald test asks whether the change exceeds the project's fold-change
+  # threshold, matching the laboratory's baseline bulk RNA-seq scripts.
+  raw_all <- results(dds_all, contrast = contrast, lfcThreshold = lfc_threshold, alpha = q_value)
+  shrunken_all <- lfcShrink(dds_all, contrast = contrast, res = raw_all, type = "normal")
+  progress_message(sprintf("Computing rlog for all expressed genes (%s)", comparison_id))
+  # rlog transforms normalized counts for visualization; it is not used to
+  # replace the count-based DESeq2 test above.
+  rlog_all <- assay(rlog(dds_all, blind = FALSE, fitType = "mean"))
+
+  # Report all genes and, where annotation permits, each optional gene class from
+  # that shared model.
   for (analysis_name in names(analysis_classes)) {
     class_label <- analysis_class_label(analysis_name)
     selected_genes <- intersect(rownames(comparison_txi$counts), analysis_classes[[analysis_name]])
@@ -810,13 +849,6 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       next
     }
 
-    class_txi <- lapply(comparison_txi, function(value) {
-      if (is.matrix(value) && nrow(value) == nrow(comparison_txi$counts)) {
-        value[selected_genes, , drop = FALSE]
-      } else {
-        value
-      }
-    })
     de_dir <- file.path(output_root, "differential_expression", analysis_name, comparison_id)
     figure_dir <- file.path(output_root, "figures", analysis_name, comparison_id)
     table_dir <- file.path(output_root, "tables", analysis_name, comparison_id)
@@ -824,11 +856,7 @@ for (comparison_index in seq_len(nrow(comparisons))) {
     dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
     dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
 
-    dds <- DESeqDataSetFromTximport(class_txi, colData = col_data, design = design_formula)
-    # Retain genes with sufficient observed counts in at least the smaller
-    # condition group; this existing filter avoids testing uninformative genes.
-    keep <- rowSums(counts(dds) >= 10) >= min(condition_counts[c(reference_group, case_group)])
-    dds <- dds[keep, ]
+    dds <- dds_all[intersect(selected_genes, rownames(dds_all)), ]
     if (nrow(dds) < 2) {
       if (analysis_name == "all_genes") {
         stop(paste("Insufficient expressed genes after filtering for comparison", comparison_id))
@@ -853,12 +881,17 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       lncRNA = "lncRNA",
       analysis_name
     )
-    progress_message(sprintf("Running DESeq2 for %s (%s)", progress_label, comparison_id))
-    dds <- run_deseq_robust(dds)
-    # DESeq2 tests the requested condition contrast. Shrinkage stabilizes noisy
-    # effect-size estimates while retaining the existing statistical method.
-    raw_result <- results(dds, contrast = contrast, alpha = q_value)
-    result <- lfcShrink(dds, contrast = contrast, res = raw_result, type = "normal")
+    progress_message(sprintf("Summarizing DESeq2 results for %s (%s)", progress_label, comparison_id))
+    # Adjusted p-values control false discoveries within each reported gene class.
+    # Shrinkage stabilizes noisy effect sizes using the all-gene prior.
+    result <- if (analysis_name == "all_genes") {
+      raw_all
+    } else {
+      results(dds, contrast = contrast, lfcThreshold = lfc_threshold, alpha = q_value)
+    }
+    shrunken_rows <- match(rownames(result), rownames(shrunken_all))
+    result$log2FoldChange <- shrunken_all$log2FoldChange[shrunken_rows]
+    result$lfcSE <- shrunken_all$lfcSE[shrunken_rows]
     result_df <- as.data.frame(result)
     result_df$gene_id <- rownames(result_df)
     result_df$gene_name <- gene_annotation[result_df$gene_id, "gene_name"]
@@ -935,11 +968,8 @@ for (comparison_index in seq_len(nrow(comparisons))) {
       col.names = NA
     )
 
-    progress_message(sprintf("Computing rlog/PCA for %s (%s)", progress_label, comparison_id))
-    # rlog transforms normalized counts for visualization; it is not used to
-    # replace the count-based DESeq2 test above.
-    rld <- rlog(dds, blind = FALSE, fitType = "mean")
-    rlog_matrix <- assay(rld)
+    progress_message(sprintf("Computing PCA for %s (%s)", progress_label, comparison_id))
+    rlog_matrix <- rlog_all[rownames(dds), , drop = FALSE]
     write.table(
       as.data.frame(rlog_matrix),
       file.path(table_dir, "rlog_normalized_expression.tsv"),
@@ -1414,7 +1444,7 @@ progress_message("Analysis complete")
 #
 # SECTION 6
 # Appendix 6.1 — Fit DESeq2 normally; for very small gene sets, use the documented gene-wise fallback.
-# Appendix 6.2 — For each comparison, select samples, fit the requested design, export results and figures, and record provenance.
+# Appendix 6.2 — For each comparison, select samples, fit the requested design once on all expressed genes, test changes beyond the fold-change threshold, report each gene class from that fit, and record provenance.
 #
 # SECTION 7
 # Appendix 7.1 — Combine per-comparison statuses and export cross-comparison summaries, software versions, and the output contract.

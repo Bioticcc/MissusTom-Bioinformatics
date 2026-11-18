@@ -73,6 +73,8 @@ export interface SystemPreflight {
 }
 
 export interface ProposedSample {
+  metadata_source_sample_id?: string | null;
+  metadata_source_path?: string | null;
   sample_id: string;
   r1_files: string[];
   r2_files: string[];
@@ -107,6 +109,15 @@ export interface QuantificationDiscoveryResult {
   total_bytes: number;
 }
 
+export interface OntDiscoveryResult {
+  directory: string;
+  samples: ProposedSample[];
+  files: Array<{ path: string; size_bytes: number }>;
+  warnings: string[];
+  total_files: number;
+  total_bytes: number;
+}
+
 export interface MetadataCsvResult {
   path: string;
   rows: Array<{
@@ -116,6 +127,7 @@ export interface MetadataCsvResult {
     biological_replicate: string | null;
     intervention: string | null;
     matched_sample_id: string | null;
+    source_sample_id: string | null;
   }>;
   warnings: string[];
   unmatched_samples: string[];
@@ -162,6 +174,8 @@ export interface ProjectManifest {
   read_layout: "paired-end" | "single-end";
   strandedness: BulkStrandedness | "unknown";
   samples: Array<{
+    metadata_source_sample_id?: string | null;
+    metadata_source_path?: string | null;
     sample_id: string;
     r1_files: string[];
     r2_files: string[];
@@ -277,6 +291,7 @@ export interface DemoStatus {
 }
 
 export interface CommandLogChunk {
+  log_path?: string | null;
   text: string;
   next_offset: number;
   bytes_available: number;
@@ -332,6 +347,7 @@ export interface OpenProjectResult {
 }
 
 export interface RunLog {
+  log_path?: string | null;
   job_identifier: string;
   text: string;
   truncated: boolean;

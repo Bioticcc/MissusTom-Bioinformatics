@@ -35,7 +35,7 @@ not by itself establish that a scientific result is valid.
 | `cutadapt:` or `This is cutadapt` | Adapter-trimming program startup/progress/summary. | Read files, adapter sequences, quality and length settings. |
 | `FastQC` | FastQC report generation. Detailed quality findings belong in the generated HTML report, not the console line alone. | FASTQ input and FastQC checks. |
 | `MultiQC` | MultiQC report aggregation. | Existing tool report files. |
-| `Loading`, `Importing`, `Running DESeq2`, `Computing rlog/PCA`, `Writing figures and tables`, `Analysis complete` | Missus Tom's R analysis progress messages. | The saved sample sheet, comparisons, Kallisto abundance tables, and configured analysis parameters. |
+| `Loading`, `Importing`, `Running DESeq2`, `Computing rlog`, `Computing PCA`, `Writing figures and tables`, `Analysis complete` | Missus Tom's R analysis progress messages. | The saved sample sheet, comparisons, Kallisto abundance tables, and configured analysis parameters. |
 
 ## What to do with an unfamiliar line
 

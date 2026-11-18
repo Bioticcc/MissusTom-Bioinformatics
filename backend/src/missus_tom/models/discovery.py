@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -41,6 +42,7 @@ class DiscoveredFastq(BaseModel):
 
 class ProposedSample(BaseModel):
     sample_id: str
+    ont_bam_files: list[str] = Field(default_factory=list)
     r1_files: list[str] = Field(default_factory=list)
     r2_files: list[str] = Field(default_factory=list)
     abundance_tsv: str | None = None
@@ -84,6 +86,34 @@ class QuantificationDiscoveryResult(BaseModel):
     directory: str
     samples: list[ProposedSample]
     files: list[DiscoveredQuantification]
+    warnings: list[str]
+    total_files: int
+    total_bytes: int
+
+
+class DiscoveredOntBam(BaseModel):
+    path: str
+    size_bytes: int = Field(ge=0)
+
+
+class OntDiscoveryRequest(BaseModel):
+    directory: str
+    recursive: bool = True
+
+    @field_validator("directory")
+    @classmethod
+    def normalize_directory(cls, value: str) -> str:
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute():
+            raise ValueError("path must be absolute")
+        # Preserve symlinks so discovery can reject them before resolving the path.
+        return str(path)
+
+
+class OntDiscoveryResult(BaseModel):
+    directory: str
+    samples: list[ProposedSample]
+    files: list[DiscoveredOntBam]
     warnings: list[str]
     total_files: int
     total_bytes: int

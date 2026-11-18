@@ -81,6 +81,10 @@
   },
   "allOf": [
     {
+      "if": {"properties": {"pipeline_identifier": {"const": "ont-analysis"}}, "required": ["pipeline_identifier"]},
+      "then": {"properties": {"parameters": {"properties": {"modification_mode": {"enum": ["5mc_5hmc", "5mc_only"]}}}}}
+    },
+    {
       "if": {
         "properties": {
           "pipeline_identifier": { "const": "bulk-rnaseq" },
@@ -173,7 +177,9 @@
         "biological_replicate": { "type": "string" },
         "batch": { "type": ["string", "null"] },
         "covariates": { "$ref": "#/$defs/scalarMap" },
-        "included": { "type": "boolean" }
+        "included": { "type": "boolean" },
+        "metadata_source_sample_id": { "type": ["string", "null"] },
+        "metadata_source_path": { "type": ["string", "null"] }
       }
     },
     "comparison": {

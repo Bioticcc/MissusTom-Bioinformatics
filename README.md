@@ -29,26 +29,35 @@ been verified.
   - Pipeline inputs: paired FASTQ files for every sample, a transcriptome FASTA,
     and a matching GTF annotation. The FASTA and GTF must be from the same
     reference/annotation version, or validation problems may occur.
-- [ONE-SAMPLE MOUSE ONT MODIFIED-BASE ANALYSIS] - Available for setup and
-  one-sample mouse projects, but it has not passed sufficient production
+- [HUMAN AND MOUSE ONT MODIFIED-BASE ANALYSIS] - Available for setup and
+  independent human or mouse samples, but it has not passed sufficient production
   testing. It works with existing pass modBAM files, retaining modified-base
-  calls for alignment, coverage, and descriptive 5mC/5hmC exploration.
+  calls for alignment, coverage, and descriptive 5mC-only or joint 5mC/5hmC exploration.
   - Pipeline requirements: Dorado, Samtools/HTSlib, Mosdepth, Modkit,
     Minimap2, Python, R, and the required R packages. Setup installs these
     managed dependencies automatically when you select their installation.
-  - Pipeline inputs: existing mouse pass modBAM files and the compatible mouse
+  - Pipeline inputs: existing human or mouse modBAM files and compatible
     reference resources required by the selected project.
+
+- [SINGLE CELL RNA SEQUENCING] - In development. Open **New project → Pipeline →
+  SingleCell RNA-seq** to choose an existing Seurat object (`.rds`), confirm its
+  metadata columns, QC and analysis settings, then export the standalone
+  configuration. Managed setup, saving as an app project and running from the
+  app are not available yet.
+  See the [SingleCell guide](workflows/singlecell_rnaseq/START_HERE.md).
 
 The pipelines are deliberately separate. Bulk RNA-seq does not currently
 support single-end data, batch/covariate statistical models, or automatic
-reference downloads. ONT currently supports one mouse GRCm38p6 sample only;
+reference downloads. ONT supports independent human or mouse samples;
 it does not re-basecall reads or provide multi-sample comparisons, DMR/DhMR,
-enrichment, or human ONT analysis.
+or enrichment. Supported ONT builds are human GRCh38/hg38 and GRCh37/hg19,
+and mouse GRCm38p6/GRCm38/mm10 and GRCm39/mm39. Each project uses one species
+and assembly, with matching FASTA, FAI and optional annotations. A minimap2
+index (`.mmi`) is optional: Stage 01 builds and reuses one when omitted.
 
 ## Future pipelines
 
 - [SIX BASE DNA METHYLATION ANALYSIS] - Not Started
-- [SINGLE CELL RNA SEQUENCING] - Not Started
 - [ONT VS SIXBASE DIRECT COMPARISON] - Not Started
 
 ## Setup and demo fixtures
@@ -133,8 +142,20 @@ proceed offline when the project's reference files are already on the machine.
    expression, differential-expression tables/figures, logs, and provenance.
 
 Use **Recent projects** to reopen a saved project. Bulk RNA-seq projects define
-the two groups to compare. ONT projects select one mouse sample and do not
+the two groups to compare. ONT projects process human or mouse samples independently and do not
 include an experimental-comparison step.
+
+For ONT inputs, **Scan directory** finds `.bam` files recursively and proposes
+one sample per file. Review the assignments before applying them. To group
+multiple BAM files from one biological sample, give them the same sample
+identifier in the scan review. Applying replaces the current sample list.
+You can also select files manually. A BAM chunk is one part of a sample's reads;
+its `.bai` index is ignored by the scanner. Discovery does not establish that
+the files contain suitable modified-base calls or match the selected reference.
+In **ONT pipeline options → Modified-base measurements**, select the calling
+model's measurements. Use **5mC only** for older 5mC-only datasets; 5hmC will be
+marked not measured. Legacy `Mm`/`Ml` tags are accepted and normalized in generated
+output. Original BAMs are preserved.
 
 ## Develop from source
 
@@ -163,8 +184,12 @@ Start the backend from the repository root in one terminal:
 Start the desktop application from `desktop/` in another terminal:
 
 ```bash
+cd desktop
 npm run tauri dev
 ```
+
+The frontend checks for file changes every 500 ms to avoid Linux file-watcher
+limits during development.
 
 ## Technical details
 

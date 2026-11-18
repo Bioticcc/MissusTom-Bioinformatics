@@ -1,0 +1,10 @@
+{
+  "Homo sapiens": {
+    "references": ["GRCh38", "hg38", "GRCh37", "hg19"],
+    "autosomes": 22
+  },
+  "Mus musculus": {
+    "references": ["GRCm38p6", "GRCm38", "mm10", "GRCm39", "mm39"],
+    "autosomes": 19
+  }
+}

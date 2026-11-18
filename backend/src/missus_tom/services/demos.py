@@ -262,6 +262,7 @@ class DemoService:
         truncated = start + len(data) < size
         job = self.prepare_job(job_identifier)
         return CommandLogChunk(
+            log_path=str(path),
             text=data.decode("utf-8", errors="replace"),
             next_offset=start + len(data),
             bytes_available=size,

@@ -10,6 +10,8 @@
       "../../workflows": "workflows",
       "../../scripts/build-analysis-image.sh": "scripts/build-analysis-image.sh",
       "../../backend/build/sidecar-resources/resources/locks": "resources/locks",
+      "../../backend/build/sidecar-resources/resources/modkit-repair": "resources/modkit-repair",
+      "../../backend/build/sidecar-resources/resources/analysis-tools": "resources/analysis-tools",
       "../../backend/build/sidecar-resources/resources/build_revision.txt": "resources/build_revision.txt"
     }
   }

@@ -43,11 +43,16 @@ if [[ ! -s "${ont_lock_source}" ]] || ! grep -qx '@EXPLICIT' "${ont_lock_source}
   echo "Required explicit ONT dependency lock is missing or invalid: ${ont_lock_source}" >&2
   exit 1
 fi
+# Compile only after the inexpensive lock checks have passed.
+"${sidecar_python}" "${repository_root}/scripts/build-modkit-repair.py"
 mkdir -p "${resource_stage}/scripts"
 cp -a "${repository_root}/workflows" "${resource_stage}/workflows"
 cp -a "${repository_root}/scripts/build-analysis-image.sh" "${resource_stage}/scripts/"
 mkdir -p "${resource_stage}/resources/locks"
 cp -a "${backend_root}/src/missus_tom/resources/locks/." "${resource_stage}/resources/locks/"
+cp -a "${backend_root}/src/missus_tom/resources/modkit-repair" "${resource_stage}/resources/"
+mkdir -p "${resource_stage}/resources/analysis-tools"
+cp -a "${backend_root}/build/analysis-tools/modkit-repair" "${resource_stage}/resources/analysis-tools/"
 if git -C "${repository_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "${repository_root}" rev-parse HEAD > "${resource_stage}/resources/build_revision.txt"
 fi

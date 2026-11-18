@@ -9,7 +9,10 @@ permissions:
   contents: read
 
 jobs:
+  scientific:
+    uses: ./.github/workflows/scientific.yml
   build:
+    needs: scientific
     name: Build Linux x86_64 release
     runs-on: ubuntu-22.04
     permissions:
@@ -36,6 +39,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             build-essential \
+            cmake \
+            libclang-dev \
+            libbz2-dev \
+            liblzma-dev \
+            zlib1g-dev \
             curl \
             file \
             libayatana-appindicator3-dev \
@@ -135,6 +143,9 @@ jobs:
               ("workflows", "bulk_rnaseq", "main.nf"),
               ("workflows", "ont_analysis", "run_pipeline.py"),
               ("scripts", "build-analysis-image.sh"),
+              ("resources", "modkit-repair", "recipe.json"),
+              ("resources", "analysis-tools", "modkit-repair", "modkit"),
+              ("resources", "analysis-tools", "modkit-repair", "manifest.json"),
           )
           member_parts = [member.parts for member in members]
           missing = [

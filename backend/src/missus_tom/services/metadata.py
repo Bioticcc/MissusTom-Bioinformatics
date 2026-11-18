@@ -17,7 +17,9 @@ def _normalize_sample_id(value: str) -> str:
     return re.sub(r"_S[0-9]+$", "", value, flags=re.IGNORECASE)
 
 
-def read_metadata_csv(path_value: str, sample_ids: list[str] | None = None) -> MetadataCsvResult:
+def read_metadata_csv(
+    path_value: str, sample_ids: list[str] | None = None, *, legacy_identifiers: bool = False
+) -> MetadataCsvResult:
     path = Path(path_value).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Metadata CSV does not exist: {path}")
@@ -87,8 +89,9 @@ def read_metadata_csv(path_value: str, sample_ids: list[str] | None = None) -> M
     matched_rows: list[MetadataRow] = []
     legacy_healthy_matches = 0
     rows_by_normalized: dict[str, list[int]] = {}
+    normalize = _normalize_sample_id if legacy_identifiers else lambda value: value
     for index, row in enumerate(rows):
-        rows_by_normalized.setdefault(_normalize_sample_id(row.sample_id), []).append(index)
+        rows_by_normalized.setdefault(normalize(row.sample_id), []).append(index)
     chosen_by_normalized: dict[str, int] = {}
     equivalent_duplicate_ids: list[str] = []
     for normalized_id, indexes in rows_by_normalized.items():
@@ -122,16 +125,21 @@ def read_metadata_csv(path_value: str, sample_ids: list[str] | None = None) -> M
             + (f" (+{more} more)" if more else "")
         )
 
-    normalized_project_ids = [_normalize_sample_id(sample_id) for sample_id in requested_samples]
+    normalized_project_ids = [normalize(sample_id) for sample_id in requested_samples]
     for sample_id, normalized_id in zip(requested_samples, normalized_project_ids, strict=True):
         row_index = chosen_by_normalized.get(normalized_id)
-        if row_index is None and normalized_id.upper().endswith("_H_D1"):
+        if legacy_identifiers and row_index is None and normalized_id.upper().endswith("_H_D1"):
             row_index = chosen_by_normalized.get(normalized_id[:-3])
             if row_index is not None:
                 legacy_healthy_matches += 1
         if row_index is None:
             unmatched_samples.append(sample_id)
             continue
+        if row_index in matched_row_indexes:
+            raise ValueError(
+                "Multiple project samples match the same metadata row "
+                f"{rows[row_index].sample_id}. Resolve sample identifiers before import."
+            )
         matched_row_indexes.add(row_index)
         matched_rows.append(
             rows[row_index].model_copy(

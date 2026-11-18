@@ -3,8 +3,9 @@ import { apiRequest } from "../api";
 import { LiveCommandLog } from "../components/LiveCommandLog";
 import { DirectoryOpenError, type DirectoryOpenFailure } from "../components/DirectoryOpenError";
 import { isDesktopShell, openDirectory } from "../native";
+import { outputDirectoryForRun } from "../runOutputs";
 import { finishedTime, outcomeLabel } from "../runPresentation";
-import type { RunLog, RunRecord, RunStatus } from "../types";
+import type { ResultArtifact, RunLog, RunRecord, RunStatus } from "../types";
 
 const pollableStatuses = new Set<RunStatus>(["queued", "preparing", "running", "cancelling"]);
 const terminalStatuses = new Set<RunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -69,6 +70,7 @@ export function Jobs({
       ));
     }
     return {
+      log_path: log.log_path,
       text: log.text,
       next_offset: log.next_offset ?? offset + (log.text?.length ?? 0),
       bytes_available: log.bytes_available ?? 0,
@@ -136,7 +138,13 @@ export function Jobs({
     }
   };
 
-  const openOutput = async (path: string) => {
+  const openOutput = async (run: RunRecord) => {
+    let path = run.results_directory;
+    if (run.pipeline_identifier === "ont-analysis") {
+      // Opening the project root remains available if the API is unreachable.
+      const files = await apiRequest<ResultArtifact[]>(`/api/v1/runs/${run.job_identifier}/artifacts`).catch(() => []);
+      path = outputDirectoryForRun(run, files);
+    }
     try {
       await openDirectory(path);
       setDirectoryOpenFailure(null);
@@ -164,7 +172,7 @@ export function Jobs({
               {(cancellableStatuses.has(run.status) || run.status === "cancelling") && <button type="button" className="button secondary" disabled={busy} onClick={() => setConfirmingCancel(run.job_identifier)}>{busy ? "Stopping…" : "Stop run"}</button>}
               {confirmingCancel === run.job_identifier && cancellableStatuses.has(run.status) && !busy && <div className="cancel-confirmation" role="alertdialog" aria-label="Confirm run cancellation"><p>Stop this run? Missus Tom will stop its controlled work and keep the logs and run history.</p><button type="button" className="button danger" onClick={() => void cancel(run.job_identifier)}>Stop run</button><button type="button" className="button secondary" onClick={() => setConfirmingCancel(null)}>Keep running</button></div>}
               {retryCleanup && <button type="button" className="button secondary" disabled={busy} onClick={() => void cancel(run.job_identifier)}>{cancelling.has(run.job_identifier) ? "Checking cleanup…" : "Retry cleanup"}</button>}
-              {terminalStatuses.has(run.status) && <button type="button" className="button secondary" onClick={() => void openOutput(run.results_directory)}>Open output folder</button>}
+              {terminalStatuses.has(run.status) && <button type="button" className="button secondary" onClick={() => void openOutput(run)}>Open output folder</button>}
               <LiveCommandLog
                 title="Log output"
                 resetKey={run.job_identifier}

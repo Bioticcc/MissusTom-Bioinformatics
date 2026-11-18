@@ -50,6 +50,9 @@ class StubAdapter:
         ]
 
 
+SLEEPING_PROCESS_READY = "sleeping-process-ready"
+
+
 class SleepingAdapter(StubAdapter):
     def construct_command(
         self,
@@ -60,7 +63,10 @@ class SleepingAdapter(StubAdapter):
         return [
             sys.executable,
             "-c",
-            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+            "import pathlib, signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(30)",
+            str(self.repository_root / SLEEPING_PROCESS_READY),
         ]
 
 
@@ -623,15 +629,19 @@ def test_cancellation_retains_admission_until_process_reaped(
     manifest_payload["output_directory"] = str(tmp_path / "project")
     manifest = ProjectManifest.model_validate(manifest_payload)
     (tmp_path / "workflows" / "bulk_rnaseq").mkdir(parents=True)
-    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 0.1)
+    # The process ignores SIGTERM, so this grace period keeps admission held long
+    # enough for the second start below to run on a slow CI machine.
+    monkeypatch.setattr(runs_module, "TERM_GRACE_SECONDS", 3.0)
     monkeypatch.setattr(runs_module, "KILL_GRACE_SECONDS", 0.1)
     manager = RunManager(SleepingAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
     started = manager.start(manifest)
 
-    for _ in range(100):
-        if manager.get(started.job_identifier).status == RunStatus.RUNNING:
+    ready = tmp_path / SLEEPING_PROCESS_READY
+    for _ in range(1000):
+        if ready.exists():
             break
         time.sleep(0.01)
+    assert ready.exists()
     cancelling = manager.cancel(started.job_identifier)
 
     assert cancelling.status == RunStatus.CANCELLING
@@ -1140,6 +1150,7 @@ def test_container_cleanup_follows_nextflow_execution_profile(
     docker_payload = dict(manifest_payload)
     docker_payload["execution_profile"] = "docker"
     docker_payload["output_directory"] = str(tmp_path / "docker-project")
+    monkeypatch.setattr(runs_module, "resolve_bulk_analysis_image_id", lambda: "sha256:" + "a" * 64)
     docker_run = manager.start(ProjectManifest.model_validate(docker_payload))
     assert docker_run.container_cleanup_required is True
     assert wait_for_terminal(manager, docker_run.job_identifier).status == RunStatus.COMPLETED
@@ -1312,11 +1323,13 @@ def test_recovery_uses_persisted_containment_scope_without_leader_identity(
     ("exit_code", "expected_status"),
     [(1, RunStatus.FAILED), (0, RunStatus.COMPLETED)],
 )
+@pytest.mark.parametrize("pipeline", ["bulk-rnaseq", "ont-analysis"])
 def test_recovery_finalizes_known_exit_after_scope_and_process_disappear(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     exit_code: int,
     expected_status: RunStatus,
+    pipeline: str,
 ) -> None:
     registry = tmp_path / "state"
     registry.mkdir()
@@ -1324,6 +1337,7 @@ def test_recovery_finalizes_known_exit_after_scope_and_process_disappear(
         job_identifier=str(uuid4()),
         project_identifier=str(uuid4()),
         project_name="known exit",
+        pipeline_identifier=pipeline,
         status=RunStatus.INTERRUPTED,
         command=["nextflow", "run"],
         log_path=str(tmp_path / "project" / "logs" / "run.log"),
@@ -1353,6 +1367,13 @@ def test_recovery_finalizes_known_exit_after_scope_and_process_disappear(
     )  # type: ignore[arg-type]
 
     assert recovered.status == expected_status
+    assert recovered.current_stage == (
+        "Completed"
+        if exit_code == 0
+        else "Nextflow failed"
+        if pipeline == "bulk-rnaseq"
+        else "Workflow failed"
+    )
     assert recovered.finished_at is not None
     assert recovered.holds_admission is False
     assert recovered.containment_scope_id is None
@@ -1453,14 +1474,25 @@ def test_stop_containment_preserves_scope_and_admission_until_retry_succeeds(
     assert record.containment_cleanup_attempts == 2
 
 
+@pytest.mark.parametrize(
+    "pipeline,stage",
+    [
+        ("bulk-rnaseq", "Nextflow failed"),
+        ("ont-analysis", "Workflow failed"),
+    ],
+)
 def test_workflow_failure_keeps_terminal_time_and_primary_error_when_cleanup_is_uncertain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline: str,
+    stage: str,
 ) -> None:
     manager = RunManager(StubAdapter(tmp_path), registry_directory=tmp_path / "state")  # type: ignore[arg-type]
     record = RunRecord(
         job_identifier=str(uuid4()),
         project_identifier=str(uuid4()),
         project_name="failed workflow",
+        pipeline_identifier=pipeline,
         status=RunStatus.RUNNING,
         command=["nextflow", "run"],
         log_path=str(tmp_path / "project" / "logs" / "run.log"),
@@ -1476,7 +1508,7 @@ def test_workflow_failure_keeps_terminal_time_and_primary_error_when_cleanup_is_
 
     failed = manager.get(record.job_identifier)
     assert failed.status == RunStatus.FAILED
-    assert failed.current_stage == "Nextflow failed"
+    assert failed.current_stage == stage
     assert failed.error_message == "Workflow runner exited with status 1"
     assert failed.finished_at is not None
     assert failed.cleanup_warning == "resource containment slice did not become inactive"

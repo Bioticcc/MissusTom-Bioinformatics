@@ -1,0 +1,33 @@
+{
+  "schema_version": "singlecell-seurat-v1",
+  "input": {
+    "seurat_rds": "/absolute/path/to/seurat_object.rds",
+    "assay": "RNA",
+    "metadata_columns": {
+      "sample_id": "REPLACE_WITH_SAMPLE_COLUMN",
+      "donor_id": "REPLACE_WITH_DONOR_COLUMN",
+      "condition": "REPLACE_WITH_CONDITION_COLUMN",
+      "batch": "REPLACE_WITH_BATCH_COLUMN"
+    }
+  },
+  "reference": {
+    "species": "Mus musculus",
+    "genome_build": "REPLACE_WITH_ACTUAL_BUILD_AND_ANNOTATION_RELEASE",
+    "mitochondrial_gene_ids": ["REPLACE_WITH_OBJECT_MITOCHONDRIAL_FEATURE_IDS"]
+  },
+  "qc": {
+    "min_counts": 500,
+    "min_features": 250,
+    "max_features": 6000,
+    "max_mito_percent": 20
+  },
+  "analysis": {
+    "normalization": "log_normalize",
+    "integration": "none",
+    "variable_features": 2000,
+    "pcs": 30,
+    "resolution": 0.5,
+    "seed": 42,
+    "cluster_markers": true
+  }
+}

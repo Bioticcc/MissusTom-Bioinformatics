@@ -35,13 +35,8 @@ ONT_PROJECT_DIRECTORIES = (
     "input_manifest",
     "configuration",
     "work",
-    "results/00_manifests",
-    "results/config",
-    "results/01_alignment",
-    "results/02_alignment_qc",
-    "results/03_ont_qc_coverage",
-    "results/04_methylation",
-    "results/05_methylation_exploration",
+    "results/samples",
+    "results/reference",
     "reports",
     "logs",
 )
@@ -65,12 +60,24 @@ def _validation_key(manifest: ProjectManifest) -> str:
         if sample.abundance_tsv:
             paths.append(sample.abundance_tsv)
 
-    def path_state(raw_path: str) -> tuple[str, int | None, int | None]:
+    def path_state(raw_path: str) -> tuple[str, ...]:
         try:
             state = Path(raw_path).stat()
-            return raw_path, state.st_size, state.st_mtime_ns
+            return (
+                raw_path,
+                *(
+                    str(value)
+                    for value in (
+                        state.st_dev,
+                        state.st_ino,
+                        state.st_size,
+                        state.st_mtime_ns,
+                        state.st_ctime_ns,
+                    )
+                ),
+            )
         except OSError:
-            return raw_path, None, None
+            return (raw_path, "unavailable")
 
     # Keep reuse safe when the same manifest names a file that has since been
     # replaced or edited. Metadata checks are far cheaper than re-parsing a

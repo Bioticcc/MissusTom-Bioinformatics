@@ -35,7 +35,7 @@ _EXTENSIONS = {
     ".config": "config",
     ".md": "markdown",
 }
-_NAMED_SOURCES = {"run_with_timeout": "shell"}
+_NAMED_SOURCES = {"run_with_timeout": "shell", "reference_profiles.json": "json"}
 _MAX_SOURCE_BYTES = 2_000_000
 
 
@@ -60,9 +60,17 @@ class PipelineSourceService:
 
     def _read_active(self, pipeline_identifier: str) -> str | None:
         path = self._active_path(pipeline_identifier)
-        if not path.exists():
-            return None
         try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(
+                "custom pipeline activation is invalid; restore the official pipeline"
+            ) from exc
+        try:
+            if path.is_symlink():
+                raise ValueError
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError
@@ -165,7 +173,16 @@ class PipelineSourceService:
         display_name, _ = _PIPELINES.get(pipeline_identifier, (None, None))
         if display_name is None:
             raise ValueError("unsupported pipeline identifier")
-        active = self._read_active(pipeline_identifier)
+        try:
+            active = self._read_active(pipeline_identifier)
+        except ValueError:
+            return PipelineSourceStatus(
+                pipeline_identifier=pipeline_identifier,
+                display_name=display_name,
+                source_type="custom-unavailable",
+                source_version=settings.app_version,
+                files=[],
+            )
         root = self.official_root(pipeline_identifier)
         if active:
             try:
@@ -316,7 +333,7 @@ class PipelineSourceService:
 
     def restore(self, pipeline_identifier: str) -> PipelineSourceStatus:
         active = self._active_path(pipeline_identifier)
-        if active.exists():
+        if active.exists() or active.is_symlink():
             active.unlink()
         return self.status(pipeline_identifier)
 

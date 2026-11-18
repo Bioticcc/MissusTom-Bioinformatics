@@ -42,6 +42,13 @@ test("saved project values populate the editor", () => {
   assert.equal(saved.samples[0].r1_files.length, 1);
 });
 
+test("ONT measurement mode survives editing and older manifests retain joint mode", () => {
+  const ont = { ...saved, pipeline_identifier: "ont-analysis", parameters: { modification_mode: "5mc_only" } };
+  assert.equal(loadProjectEditor(ont, {}).options.modificationMode, "5mc_only");
+  assert.equal(loadProjectEditor({ ...ont, parameters: {} }, {}).options.modificationMode, "5mc_5hmc");
+  assert.equal(preserveExistingProject(ont, { ...ont, parameters: { modification_mode: "5mc_5hmc" } }).parameters.modification_mode, "5mc_5hmc");
+});
+
 test("editing retains identity and extension fields while invalidating saved status", () => {
   const edited = { ...saved, project_identifier: "new-id", created_at: "new-time", project_name: "Changed", reference_resources: { kallisto_index: "/ref/index" }, parameters: { start_stage: "quantification", trim_quality: 25 } };
   const result = preserveExistingProject(saved, edited);

@@ -12,9 +12,11 @@ from missus_tom.pipeline_adapters.base import PipelineAdapter
 from missus_tom.services.dependencies import (
     ONT_R_PACKAGES,
     ont_lock_provenance,
+    ont_runtime_lock_mismatches,
     runtime_environment,
     runtime_tool,
 )
+from missus_tom.services.ont_references import supported_ont_reference
 from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import ont_analysis_preflight
 from missus_tom.services.projects import read_project_manifest
@@ -29,7 +31,6 @@ class OntAnalysisAdapter(PipelineAdapter):
     required_reference_resources = {
         "reference_fasta",
         "reference_fai",
-        "minimap2_index",
     }
 
     @property
@@ -59,7 +60,7 @@ class OntAnalysisAdapter(PipelineAdapter):
             PlannedStage(
                 stage_id="align_modbam",
                 name="Align modBAM",
-                description="Prepare ONT modified-base alignment inputs.",
+                description="Prepare the reference index if needed, then align ONT modBAMs.",
                 source_mapping="ONT runner align_modbam",
             ),
             PlannedStage(
@@ -95,6 +96,7 @@ class OntAnalysisAdapter(PipelineAdapter):
             "qc_coverage",
             "methylation",
             "methylation_exploration",
+            "project_qc",
             "logs",
             "manifests",
             "run_manifest",
@@ -157,8 +159,7 @@ class OntAnalysisAdapter(PipelineAdapter):
         ]
         supported = (
             manifest.pipeline_version == self.pipeline_version
-            and manifest.organism == "Mus musculus"
-            and manifest.reference_genome == "GRCm38p6"
+            and supported_ont_reference(manifest.organism, manifest.reference_genome)
             and manifest.execution_profile.value == "local"
         )
         missing_tools = self.missing_runtime_tools()
@@ -173,7 +174,9 @@ class OntAnalysisAdapter(PipelineAdapter):
         elif not self.runner_path.is_file():
             warnings.append("The ONT analysis runner is not installed.")
         elif not supported:
-            warnings.append("Execution supports local Mus musculus projects using GRCm38p6.")
+            warnings.append(
+                "Execution requires a supported human or mouse reference and local tools."
+            )
         if missing_tools:
             warnings.append("Required ONT tools are unavailable: " + ", ".join(missing_tools))
         input_bytes = sum(
@@ -222,8 +225,10 @@ class OntAnalysisAdapter(PipelineAdapter):
             raise ValueError("unsupported pipeline identifier")
         if manifest.pipeline_version != self.pipeline_version:
             raise ValueError("unsupported ONT analysis pipeline version")
-        if manifest.organism != "Mus musculus" or manifest.reference_genome != "GRCm38p6":
-            raise ValueError("this workflow supports Mus musculus GRCm38p6 projects")
+        if not supported_ont_reference(manifest.organism, manifest.reference_genome):
+            raise ValueError(
+                "unsupported ONT species/reference pair; select a human or mouse build"
+            )
         if manifest.execution_profile.value != "local":
             raise ValueError("ONT analysis requires the local execution profile")
         if not self.runner_path.is_file():
@@ -254,9 +259,20 @@ class OntAnalysisAdapter(PipelineAdapter):
 
     @staticmethod
     def missing_runtime_tools() -> list[str]:
+        if ont_runtime_lock_mismatches():
+            return ["locked ONT environment (reinstall dependencies in Setup)"]
         missing = [
             tool
-            for tool in ("dorado", "samtools", "mosdepth", "modkit", "bgzip", "tabix", "Rscript")
+            for tool in (
+                "dorado",
+                "minimap2",
+                "samtools",
+                "mosdepth",
+                "modkit",
+                "bgzip",
+                "tabix",
+                "Rscript",
+            )
             if runtime_tool(tool, "ont-analysis") is None
         ]
         rscript = runtime_tool("Rscript", "ont-analysis")
@@ -283,7 +299,9 @@ class OntAnalysisAdapter(PipelineAdapter):
 
     def artifact_roots(self, project_root: Path) -> dict[str, Path]:
         return {
-            "qc": project_root / "results" / "qc",
+            "project_qc": project_root / "results" / "project_qc",
+            "samples": project_root / "results" / "samples",
+            # Keep historical single-sample projects discoverable.
             "alignment": project_root / "results" / "01_alignment",
             "alignment_qc": project_root / "results" / "02_alignment_qc",
             "qc_coverage": project_root / "results" / "03_ont_qc_coverage",
@@ -294,3 +312,17 @@ class OntAnalysisAdapter(PipelineAdapter):
             "run_manifest": project_root / "input_manifest",
             "workflow_configuration": project_root / "results" / "config",
         }
+
+    @staticmethod
+    def sample_artifact_category(relative_path: Path) -> str | None:
+        categories = {
+            "00_manifests": "manifests",
+            "config": "workflow_configuration",
+            "01_alignment": "alignment",
+            "02_alignment_qc": "alignment_qc",
+            "03_ont_qc_coverage": "qc_coverage",
+            "04_methylation": "methylation",
+            "05_methylation_exploration": "methylation_exploration",
+        }
+        parts = relative_path.parts
+        return categories.get(parts[1]) if len(parts) >= 3 else None

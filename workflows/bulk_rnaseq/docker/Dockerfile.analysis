@@ -9,20 +9,33 @@
 FROM bioconductor/bioconductor_docker@sha256:41ed449aa2181f330cdc8d0499a11a7435b04827ff926dc141584a34f65a12cb
 
 # APPENDIX: 1.2
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends r-cran-ggplot2 \
-    && rm -rf /var/lib/apt/lists/*
+COPY bulk-rnaseq-linux-64.lock /tmp/bulk-rnaseq-linux-64.lock
+RUN curl --fail --location --retry 3 \
+      https://github.com/mamba-org/micromamba-releases/releases/download/2.3.2-0/micromamba-linux-64.tar.bz2 \
+      --output /tmp/micromamba.tar.bz2 \
+    && echo '5512233cdd8564a671626081026dc861537a963baa06706baab08fac6f3bb9d2  /tmp/micromamba.tar.bz2' | sha256sum --check - \
+    && tar -xjf /tmp/micromamba.tar.bz2 -C /tmp bin/micromamba \
+    && /tmp/bin/micromamba create --yes --no-rc --prefix /opt/missus-tom \
+       --file /tmp/bulk-rnaseq-linux-64.lock \
+    && rm -rf /tmp/bin /tmp/micromamba.tar.bz2 /root/.local/share/mamba/pkgs
+
+ENV PATH="/opt/missus-tom/bin:${PATH}" \
+    R_HOME=/opt/missus-tom/lib/R \
+    R_LIBS_USER=/opt/missus-tom/lib/R/library \
+    R_LIBS_SITE=/opt/missus-tom/lib/R/site-library \
+    R_ENVIRON_USER=/dev/null R_PROFILE_USER=/dev/null \
+    R_ENVIRON_SITE=/dev/null R_PROFILE_SITE=/dev/null
 
 # APPENDIX: 1.3
-RUN R --vanilla -e 'options(Ncpus = 1); BiocManager::install(c("DESeq2", "tximport"), ask = FALSE, update = FALSE); stopifnot(requireNamespace("DESeq2", quietly = TRUE), requireNamespace("tximport", quietly = TRUE), requireNamespace("ggplot2", quietly = TRUE))'
+RUN Rscript --vanilla -e 'stopifnot(requireNamespace("DESeq2", quietly = TRUE), requireNamespace("tximport", quietly = TRUE), requireNamespace("ggplot2", quietly = TRUE))'
 
 LABEL org.opencontainers.image.title="Missus Tom bulk RNA-seq analysis"
-LABEL org.opencontainers.image.version="0.3.0"
+LABEL org.opencontainers.image.version="locked-bulk-0.5.0"
 
 # =============================================================================
 # APPENDICES: PLAIN-ENGLISH PSEUDOCODE
 # =============================================================================
 # SECTION 1
 # Appendix 1.1 — Start from the pinned Bioconductor R image.
-# Appendix 1.2 — Install ggplot2 and remove temporary package-list files.
-# Appendix 1.3 — Install DESeq2 and tximport, then verify all required R packages exist.
+# Appendix 1.2 — Install the exact native Bulk dependency lock with verified Micromamba.
+# Appendix 1.3 — Verify the locked R analysis packages without resolving new versions.

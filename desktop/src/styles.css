@@ -267,17 +267,11 @@ h4 {
 }
 
 .brand-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 13px 13px 13px 4px;
-  color: #d9f0e8;
-  background: rgba(255, 255, 255, 0.08);
-  font-family: Georgia, serif;
-  font-size: 0.86rem;
-  letter-spacing: 0.08em;
+  display: block;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 
 .brand-block strong,

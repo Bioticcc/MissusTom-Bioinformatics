@@ -37,7 +37,19 @@ Optional lncRNA outputs include genes whose `gene_biotype` is exactly one of:
 `lncRNA`, `lincRNA`, `antisense`, `sense_intronic`, `sense_overlapping`,
 `bidirectional_promoter_lncrna`, `macro_lncrna`, or `3prime_overlapping_ncrna`.
 Optional mRNA outputs require `gene_biotype == protein_coding`. When a class
-analysis is skipped, a `skip_rationale.txt` file records why. Outputs include
+analysis is skipped, a `skip_rationale.txt` file records why.
+
+Each comparison fits one DESeq2 model on all expressed genes. Size factors,
+dispersions, LFC shrinkage, and rlog values come from that fit, and mRNA and
+lncRNA reports are subsets of it. Adjusted p-values are calculated separately
+within each reported class. This deliberately differs from the laboratory's
+baseline scripts, which subset to mRNA or lncRNA before fitting. As in those
+baseline scripts, the Wald test uses the project's absolute log2 fold-change
+threshold as `lfcThreshold`; a significant gene must also pass that threshold
+after normal shrinkage. `tables/provenance/analysis_parameters.tsv` records both
+choices.
+
+Outputs include
 normalized matrices, differential-expression tables, PCA, heatmaps, volcano/MA
 plots, distribution plots, sample distances, comparison summaries, and
 provenance tables (sample metadata, mapping summary, analysis parameters, and

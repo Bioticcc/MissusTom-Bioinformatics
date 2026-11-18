@@ -1,0 +1,8 @@
+{
+  "repair_id": "modkit-0.6.4-ambiguity-1",
+  "source_commit": "bb20328778b2a5e3f0f815b36af2ae09c1df7ae7",
+  "source_url": "https://codeload.github.com/SuhasSrinivasan/modkit/tar.gz/bb20328778b2a5e3f0f815b36af2ae09c1df7ae7",
+  "source_sha256": "7f9e6efffeb278d4c0a7197bbfd1e1ec384552fd618c22c021c14279abfa9361",
+  "cargo_lock_sha256": "52c10ca26565ff230f77476e0f79801971bc74389030f16c5f276f1ad9df57fd",
+  "rust_toolchain": "1.98.0"
+}

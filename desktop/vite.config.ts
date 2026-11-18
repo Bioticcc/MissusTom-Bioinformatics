@@ -8,6 +8,13 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      // Tauri watches Rust sources itself; exclude its generated build tree from Vite.
+      ignored: ["**/src-tauri/**"],
+      // Keep frontend reloads working when the user's inotify watch quota is exhausted.
+      usePolling: true,
+      interval: 500,
+    },
   },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {

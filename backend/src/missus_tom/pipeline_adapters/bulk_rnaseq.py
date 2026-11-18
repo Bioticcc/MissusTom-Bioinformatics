@@ -30,7 +30,12 @@ from missus_tom.services.bulk_references import (
     legacy_biomart_migration_message,
     read_supplied_transcript_to_gene,
 )
-from missus_tom.services.dependencies import bulk_lock_provenance, runtime_environment, runtime_tool
+from missus_tom.services.dependencies import (
+    bulk_analysis_image,
+    bulk_lock_provenance,
+    runtime_environment,
+    runtime_tool,
+)
 from missus_tom.services.experimental_design import (
     PAIRED_DESIGN,
     batch_adjustment_enabled,
@@ -305,6 +310,11 @@ class BulkRnaSeqAdapter(PipelineAdapter):
             str(manifest.resource_profile.max_parallel_tasks),
             "--start_stage",
             start_stage.value,
+            *(
+                ["--analysis_container", bulk_analysis_image()]
+                if manifest.execution_profile.value == "docker"
+                else []
+            ),
         ]
 
     def construct_run_plan(self, manifest: ProjectManifest) -> RunPlan:

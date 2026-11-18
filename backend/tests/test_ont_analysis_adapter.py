@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -10,6 +12,51 @@ import pytest
 from missus_tom.models.manifest import ProjectManifest
 from missus_tom.models.preflight import CheckStatus
 from missus_tom.pipeline_adapters.ont_analysis import OntAnalysisAdapter
+from missus_tom.services.runs import RunManager
+
+
+def test_ont_run_requires_the_locked_environment(monkeypatch):
+    from missus_tom.pipeline_adapters import ont_analysis
+
+    monkeypatch.setattr(ont_analysis, "ont_runtime_lock_mismatches", lambda: ["r-base differs"])
+    assert OntAnalysisAdapter.missing_runtime_tools() == [
+        "locked ONT environment (reinstall dependencies in Setup)"
+    ]
+
+
+def test_multisample_artifacts_are_unique_and_correctly_classified(tmp_path):
+    directory = tmp_path / "results/samples/mouse/04_methylation"
+    directory.mkdir(parents=True)
+    (directory / "global.tsv").write_text("counts\n")
+    temporary = tmp_path / "results/samples/mouse/tmp"
+    temporary.mkdir()
+    (temporary / "intermediate.txt").write_text("temporary\n")
+    manager = RunManager.__new__(RunManager)
+    record = SimpleNamespace(results_directory=str(tmp_path / "results"))
+    with (
+        patch.object(manager, "get", return_value=record),
+        patch.object(manager, "_adapter_for_record", return_value=OntAnalysisAdapter()),
+    ):
+        artifacts = manager.artifacts("test")
+    assert [(item.category, item.relative_path) for item in artifacts] == [
+        ("methylation", "results/samples/mouse/04_methylation/global.tsv")
+    ]
+
+
+def test_distinct_samples_can_have_identical_bam_basenames(tmp_path):
+    manifest = ont_manifest(tmp_path)
+    sample = manifest.samples[0].model_copy(deep=True)
+    sample.sample_id = "other"
+    bam = Path(manifest.input_directory) / "other" / "mouse_pass.bam"
+    bam.parent.mkdir()
+    bam.touch()
+    sample.ont_bam_files = [str(bam)]
+    manifest.samples.append(sample)
+    checks = OntAnalysisAdapter().validate_project(manifest)
+    assert (
+        next(check for check in checks if check.check_id == "ont_bam_files").status
+        == CheckStatus.PASSED
+    )
 
 
 def ont_manifest(tmp_path: Path) -> ProjectManifest:
@@ -32,6 +79,10 @@ def ont_manifest(tmp_path: Path) -> ProjectManifest:
     ):
         path = references / key
         path.touch()
+        if key == "minimap2_index":
+            path.write_bytes(b"synthetic index")
+        if key == "reference_fai":
+            path.write_text("".join(f"chr{i}\t100\t0\t100\t101\n" for i in range(1, 20)))
         resources[key] = str(path)
     return ProjectManifest.model_validate(
         {
@@ -87,6 +138,28 @@ def test_ont_adapter_accepts_one_contained_mouse_bam(tmp_path: Path) -> None:
     assert plan.command_preview[1].endswith("workflows/ont_analysis/run_pipeline.py")
     assert "--manifest" in plan.command_preview
     assert "--outdir" in plan.command_preview
+
+
+def test_ont_adapter_accepts_multiple_independent_samples(tmp_path: Path) -> None:
+    manifest = ont_manifest(tmp_path)
+    payload = manifest.model_dump(mode="json")
+    second_bam = Path(payload["input_directory"]) / "mouse_02_pass.bam"
+    second_bam.touch()
+    payload["samples"].append(
+        {
+            "sample_id": "mouse_02",
+            "condition": "single_sample",
+            "biological_replicate": "2",
+            "ont_bam_files": [str(second_bam)],
+        }
+    )
+    payload["parameters"]["expected_pass_bam_count"] = 2
+
+    checks = OntAnalysisAdapter().validate_project(ProjectManifest.model_validate(payload))
+
+    identifiers = next(check for check in checks if check.check_id == "sample_identifiers")
+    assert identifiers.status == CheckStatus.PASSED
+    assert identifiers.message == "2 included ONT sample(s)"
 
 
 def test_ont_runner_working_directory_remains_its_installed_workflow(tmp_path: Path) -> None:
@@ -224,3 +297,108 @@ def test_ont_adapter_rejects_output_nested_under_inputs(tmp_path: Path) -> None:
     separation = next(check for check in checks if check.check_id == "path_separation")
 
     assert separation.status == CheckStatus.BLOCKING
+
+
+@pytest.mark.parametrize(
+    "organism,build,count",
+    [
+        ("Homo sapiens", "GRCh38", 22),
+        ("Homo sapiens", "hg38", 22),
+        ("Mus musculus", "GRCm38p6", 19),
+        ("Mus musculus", "GRCm39", 19),
+    ],
+)
+def test_both_species_pass_preflight_and_execution_gates(tmp_path, organism, build, count):
+    manifest = ont_manifest(tmp_path)
+    manifest.organism = organism
+    manifest.reference_genome = build
+    Path(manifest.reference_resources["reference_fai"]).write_text(
+        "".join(f"chr{i}\t100\t0\t100\t101\n" for i in range(1, count + 1))
+    )
+    adapter = OntAnalysisAdapter()
+    checks = {check.check_id: check for check in adapter.validate_project(manifest)}
+    assert checks["ont_reference_build"].status == CheckStatus.PASSED
+    assert checks["ont_reference_chromosomes"].status == CheckStatus.PASSED
+    assert len(checks["ont_reference_chromosomes"].details["main_chromosomes"]) == count
+    with patch.object(adapter, "missing_runtime_tools", return_value=[]):
+        assert adapter.construct_run_plan(manifest).execution_enabled
+
+
+def test_reference_species_mismatch_blocks_preflight(tmp_path):
+    manifest = ont_manifest(tmp_path)
+    manifest.organism = "Homo sapiens"
+    manifest.reference_genome = "GRCh38"
+    checks = {check.check_id: check for check in OntAnalysisAdapter().validate_project(manifest)}
+    assert checks["ont_reference_chromosomes"].status == CheckStatus.BLOCKING
+    manifest.reference_genome = "GRCm38p6"
+    checks = {check.check_id: check for check in OntAnalysisAdapter().validate_project(manifest)}
+    assert checks["ont_reference_build"].status == CheckStatus.BLOCKING
+
+
+def test_ont_index_is_optional_and_generation_is_visible_in_preflight(tmp_path):
+    manifest = ont_manifest(tmp_path)
+    del manifest.reference_resources["minimap2_index"]
+    adapter = OntAnalysisAdapter()
+    assert "minimap2_index" not in adapter.required_reference_resources
+    checks = {check.check_id: check for check in adapter.validate_project(manifest)}
+    assert checks["references"].status == CheckStatus.PASSED
+    assert checks["references"].details["minimap2_index_mode"] == "generated"
+    assert checks["ont_minimap2_index"].status == CheckStatus.PASSED
+    assert "generated" in checks["ont_minimap2_index"].message
+    assert not (Path(manifest.output_directory) / "results/reference").exists()
+
+
+def test_explicit_index_must_be_readable_and_nonempty(tmp_path):
+    manifest = ont_manifest(tmp_path)
+    index = Path(manifest.reference_resources["minimap2_index"])
+    for contents in (b"", None):
+        if contents is None:
+            index.unlink()
+        else:
+            index.write_bytes(contents)
+        checks = {
+            check.check_id: check for check in OntAnalysisAdapter().validate_project(manifest)
+        }
+        assert checks["references"].status == CheckStatus.BLOCKING
+        assert checks["ont_minimap2_index"].status == CheckStatus.BLOCKING
+
+
+@pytest.mark.parametrize("mode", ["5mc_only", "5mc_5hmc"])
+def test_modification_modes_round_trip_and_preflight(tmp_path, mode):
+    manifest = ont_manifest(tmp_path)
+    payload = manifest.model_dump(mode="json")
+    payload["parameters"]["modification_mode"] = mode
+    restored = ProjectManifest.model_validate(payload)
+    checks = {check.check_id: check for check in OntAnalysisAdapter().validate_project(restored)}
+    assert checks["ont_modification_mode"].details["modification_mode"] == mode
+    assert restored.model_dump(mode="json")["parameters"]["modification_mode"] == mode
+    payload["parameters"]["modification_mode"] = "guess"
+    with pytest.raises(ValueError, match="modification_mode"):
+        ProjectManifest.model_validate(payload)
+
+
+def test_ont_project_save_creates_sample_layout_without_legacy_placeholders(tmp_path):
+    from missus_tom.services.projects import ProjectHistoryStore, save_project
+
+    manifest = ont_manifest(tmp_path)
+    root = Path(manifest.output_directory)
+    legacy = root / "results/04_methylation/existing.tsv"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("historical data\n")
+    save_project(
+        manifest,
+        history_store=ProjectHistoryStore(tmp_path / "history.sqlite3"),
+        adapter=OntAnalysisAdapter(),
+    )
+    assert (root / "results/samples").is_dir()
+    assert (root / "results/reference").is_dir()
+    for name in (
+        "00_manifests",
+        "config",
+        "01_alignment",
+        "02_alignment_qc",
+        "03_ont_qc_coverage",
+        "05_methylation_exploration",
+    ):
+        assert not (root / "results" / name).exists()
+    assert legacy.read_text() == "historical data\n"

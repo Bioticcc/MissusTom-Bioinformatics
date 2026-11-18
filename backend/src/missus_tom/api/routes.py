@@ -26,6 +26,8 @@ from missus_tom.models.directories import DirectoryPreview, DirectoryPreviewRequ
 from missus_tom.models.discovery import (
     FastqDiscoveryRequest,
     FastqDiscoveryResult,
+    OntDiscoveryRequest,
+    OntDiscoveryResult,
     QuantificationDiscoveryRequest,
     QuantificationDiscoveryResult,
 )
@@ -63,6 +65,7 @@ from missus_tom.services.directories import preview_directory
 from missus_tom.services.fastq import discover_fastqs
 from missus_tom.services.metadata import read_metadata_csv
 from missus_tom.services.observability import backend_observability
+from missus_tom.services.ont_discovery import discover_ont_bams
 from missus_tom.services.pipeline_sources import pipeline_sources
 from missus_tom.services.preflight import system_preflight
 from missus_tom.services.projects import (
@@ -294,6 +297,18 @@ def post_fastq_discover(
 
 
 @router.post(
+    f"{settings.api_prefix}/ont/discover",
+    response_model=ApiResponse[OntDiscoveryResult],
+)
+def post_ont_discover(request: OntDiscoveryRequest) -> ApiResponse[OntDiscoveryResult]:
+    try:
+        result = discover_ont_bams(request.directory, request.recursive)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ApiResponse(data=result)
+
+
+@router.post(
     f"{settings.api_prefix}/quantifications/discover",
     response_model=ApiResponse[QuantificationDiscoveryResult],
 )
@@ -313,7 +328,9 @@ def post_quantification_discover(
 )
 def post_metadata_csv(request: MetadataCsvRequest) -> ApiResponse[MetadataCsvResult]:
     try:
-        result = read_metadata_csv(request.path, request.sample_ids)
+        result = read_metadata_csv(
+            request.path, request.sample_ids, legacy_identifiers=request.legacy_identifiers
+        )
     except (
         FileNotFoundError,
         PermissionError,
@@ -578,6 +595,10 @@ def get_runs() -> ApiResponse[list[RunRecord]]:
 def post_backend_shutdown() -> ApiResponse[dict[str, str]]:
     """Stop owned workflow work before the desktop host terminates this process."""
     run_manager.shutdown()
+    if any(record.holds_admission for record in run_manager.list_runs()):
+        raise HTTPException(status_code=409, detail="Workflow cleanup is not yet confirmed")
+    if dependency_installer.active_jobs():
+        raise HTTPException(status_code=409, detail="A dependency installation is still running")
     return ApiResponse(data={"status": "stopped"})
 
 

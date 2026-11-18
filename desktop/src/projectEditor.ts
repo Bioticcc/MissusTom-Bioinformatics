@@ -35,6 +35,7 @@ export interface EditorOptions {
   coverageWindowSize: number;
   modkitFilterPercentile: number;
   modkitMaxDepth: number;
+  modificationMode: "5mc_5hmc" | "5mc_only";
   explorationMinValidCoverage: number;
   explorationMinFeatureCpgs: number;
 }
@@ -53,6 +54,7 @@ const editableParameters = new Set([
   "adjusted_p_value", "absolute_log2_fold_change",
   "experimental_design_type",
   "adjust_for_batch_effects",
+  "modification_mode",
 ]);
 
 function numberOr(value: ProjectManifest["parameters"][string], fallback: number): number {
@@ -115,6 +117,7 @@ export function loadProjectEditor(manifest: ProjectManifest, defaults: EditorOpt
       coverageWindowSize: numberOr(parameters.coverage_window_size, defaults.coverageWindowSize),
       modkitFilterPercentile: numberOr(parameters.modkit_filter_percentile, defaults.modkitFilterPercentile),
       modkitMaxDepth: numberOr(parameters.modkit_max_depth, defaults.modkitMaxDepth),
+      modificationMode: parameters.modification_mode === "5mc_only" ? "5mc_only" : "5mc_5hmc",
       explorationMinValidCoverage: numberOr(parameters.exploration_min_valid_coverage, defaults.explorationMinValidCoverage),
       explorationMinFeatureCpgs: numberOr(parameters.exploration_min_feature_cpgs, defaults.explorationMinFeatureCpgs),
     },
