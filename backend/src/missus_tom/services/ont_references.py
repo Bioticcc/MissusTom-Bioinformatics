@@ -26,4 +26,4 @@ def supported_ont_reference(organism: str, reference: str) -> bool:
 
 
 def ont_main_chromosomes(fai: Path, organism: str, reference: str) -> list[str]:
-    return _contract()["main_chromosomes"](fai, organism, reference)
+    return list(_contract()["main_chromosomes"](fai, organism, reference))

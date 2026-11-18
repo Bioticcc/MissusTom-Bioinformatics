@@ -26,6 +26,9 @@ def _fake_python(path: Path, import_succeeds: bool = False) -> None:
         'if [[ "$1" == "-c" && "$2" == "import PyInstaller" ]]; then\n'
         f"  exit {import_exit_code}\n"
         "fi\n"
+        'if [[ "$1" == */build-modkit-repair.py ]]; then\n'
+        "  exit 0\n"
+        "fi\n"
         "exit 1\n",
         encoding="utf-8",
     )
@@ -127,6 +130,12 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
     lock_dir.mkdir(parents=True)
     (lock_dir / "bulk-rnaseq-linux-64.lock").write_text("@EXPLICIT\n", encoding="utf-8")
     (lock_dir / "ont-analysis-linux-64.lock").write_text("@EXPLICIT\n", encoding="utf-8")
+    recipe = lock_dir.parent / "modkit-repair" / "recipe.json"
+    recipe.parent.mkdir()
+    recipe.write_text("{}\n", encoding="utf-8")
+    modkit = repository_root / "backend" / "build" / "analysis-tools" / "modkit-repair" / "modkit"
+    modkit.parent.mkdir(parents=True)
+    modkit.write_text("compiled repair\n", encoding="utf-8")
 
     result = _run_script(
         script,
@@ -139,6 +148,8 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
         str(python),
         "-c",
         "import PyInstaller",
+        str(python),
+        str(repository_root / "scripts" / "build-modkit-repair.py"),
         str(python),
         "-m",
         "PyInstaller",
@@ -164,6 +175,9 @@ def test_sidecar_build_invokes_pyinstaller_through_checked_interpreter(tmp_path:
     staged_ont_lock = staged_lock.with_name("ont-analysis-linux-64.lock")
     assert staged_ont_lock.read_bytes() == (lock_dir / staged_ont_lock.name).read_bytes()
     assert not (repository_root / "backend" / "build" / "sidecar-resources" / "locks").exists()
+    staged_resources = repository_root / "backend" / "build" / "sidecar-resources" / "resources"
+    assert (staged_resources / "modkit-repair" / "recipe.json").is_file()
+    assert (staged_resources / "analysis-tools" / "modkit-repair" / "modkit").is_file()
 
 
 def test_sidecar_build_rejects_missing_lock_after_clearing_old_stage(tmp_path: Path) -> None:

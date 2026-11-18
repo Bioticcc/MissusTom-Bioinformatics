@@ -32,7 +32,6 @@ if ! "${sidecar_python}" -c "import PyInstaller"; then
 fi
 
 resource_stage="${backend_root}/build/sidecar-resources"
-"${sidecar_python}" "${repository_root}/scripts/build-modkit-repair.py"
 rm -rf "${resource_stage}"
 lock_source="${backend_root}/src/missus_tom/resources/locks/bulk-rnaseq-linux-64.lock"
 if [[ ! -s "${lock_source}" ]] || ! grep -qx '@EXPLICIT' "${lock_source}"; then
@@ -44,6 +43,8 @@ if [[ ! -s "${ont_lock_source}" ]] || ! grep -qx '@EXPLICIT' "${ont_lock_source}
   echo "Required explicit ONT dependency lock is missing or invalid: ${ont_lock_source}" >&2
   exit 1
 fi
+# Compile only after the inexpensive lock checks have passed.
+"${sidecar_python}" "${repository_root}/scripts/build-modkit-repair.py"
 mkdir -p "${resource_stage}/scripts"
 cp -a "${repository_root}/workflows" "${resource_stage}/workflows"
 cp -a "${repository_root}/scripts/build-analysis-image.sh" "${resource_stage}/scripts/"
